@@ -506,7 +506,44 @@ let test_multi_axis_reduction () =
   check_float "multi-axis sum col2" (List.nth result 2) 78.0 1e-4;
   check_float "multi-axis sum col3" (List.nth result 3) 84.0 1e-4
 
-(* ---- Test 21: CUDA backend registration ---- *)
+(* ---- Test 21: Non-contiguous multi-axis reduction ---- *)
+let test_noncontig_multi_axis () =
+  Printf.printf "\n=== Non-Contiguous Multi-Axis Reduction ===\n%!";
+  Schedule.reset ();
+  (* [2;3;4] tensor, sum along axes [0;2] → [1;3;1]
+     Data: 1..24 (row-major)
+     slice 0: [[1,2,3,4], [5,6,7,8], [9,10,11,12]]
+     slice 1: [[13,14,15,16], [17,18,19,20], [21,22,23,24]]
+     For each j in 0..2:
+       sum over i=0..1, k=0..3 of data[i][j][k]
+     j=0: (1+2+3+4) + (13+14+15+16) = 10+58 = 68
+     j=1: (5+6+7+8) + (17+18+19+20) = 26+74 = 100
+     j=2: (9+10+11+12) + (21+22+23+24) = 42+90 = 132 *)
+  let data = List.init 24 (fun i -> Float.of_int (i + 1)) in
+  let a = Tensor.from_float_list [2; 3; 4] data in
+  let s = Tensor.sum ~axes:[0; 2] a in
+  check "noncontig shape" (s.shape = [1; 3; 1]);
+  let result = Tensor.to_float_list s in
+  check "noncontig length" (List.length result = 3);
+  check_float "noncontig sum j=0" (List.nth result 0) 68.0 1e-4;
+  check_float "noncontig sum j=1" (List.nth result 1) 100.0 1e-4;
+  check_float "noncontig sum j=2" (List.nth result 2) 132.0 1e-4
+
+(* ---- Test 22: Fused expression reduction ---- *)
+let test_fused_reduction () =
+  Printf.printf "\n=== Fused Expression Reduction ===\n%!";
+  Schedule.reset ();
+  (* sum(a + b) where a=[1,2,3,4] b=[10,20,30,40] *)
+  let a = Tensor.from_float_list [4] [1.0; 2.0; 3.0; 4.0] in
+  let b = Tensor.from_float_list [4] [10.0; 20.0; 30.0; 40.0] in
+  let fused = Tensor.sqrt_ (Tensor.mul (Tensor.add a b) a) in
+  let s = Tensor.sum fused in
+  let result = Tensor.to_float_list s in
+  (* sqrt((1+10)*1) + sqrt((2+20)*2) + sqrt((3+30)*3) + sqrt((4+40)*4) *)
+  let expected = sqrt 11.0 +. sqrt 44.0 +. sqrt 99.0 +. sqrt 176.0 in
+  check_float "fused sum(sqrt((a+b)*a))" (List.nth result 0) expected 1e-4
+
+(* ---- Test 23: CUDA backend registration ---- *)
 let test_cuda_backend () =
   Printf.printf "\n=== CUDA Backend ===\n%!";
   (* Verify CUDA backend is recognized and returns a module *)
@@ -558,6 +595,8 @@ let () =
   run_test "partial_reduction" test_partial_reduction;
   run_test "partial_mean" test_partial_mean;
   run_test "multi_axis_reduction" test_multi_axis_reduction;
+  run_test "noncontig_multi_axis" test_noncontig_multi_axis;
+  run_test "fused_reduction" test_fused_reduction;
   run_test "cuda_backend" test_cuda_backend;
   Printf.printf "\n============================\n%!";
   Printf.printf "Results: %d passed, %d failed\n%!" !pass_count !fail_count;

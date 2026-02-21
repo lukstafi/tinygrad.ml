@@ -226,28 +226,33 @@ let lower_reduce_kernel ~device ~input_numel ~output_numel ~reduce_axes ~input_s
       Some (kernel_uops, param_bufs, out_buf)
     end else begin
       (* Partial reduction: output_numel > 1.
-         For input_shape [d0, d1, ..., dn] reducing axis k:
-         - reduce_extent = d_k
-         - inner_numel = product of dims after the reduced axis
-         - flat_idx(o, r) = (o / inner_numel) * (reduce_extent * inner_numel)
-                          + r * inner_numel + (o mod inner_numel)
-         This handles both last-axis (inner_numel=1) and non-last-axis reductions. *)
+         General approach for arbitrary (possibly non-contiguous) reduce_axes:
+         - o iterates over output elements (flat index into non-reduced dims)
+         - r iterates over reduce elements (flat index into reduced dims)
+         - Decompose o and r into per-axis indices, interleave into full
+           multi-dim index, then compute flat input index via strides. *)
       let reduce_extent = input_numel / output_numel in
-
-      (* Compute inner_numel: product of dims after all reduced axes.
-         For single-axis reduction of axis k in shape [d0..dn]:
-           inner_numel = product of d_{k+1} ... d_n *)
       let ndims = List.length input_shape in
-      let inner_numel =
-        if reduce_axes = [] then 1
-        else
-          let max_reduce_axis = List.fold_left max 0 reduce_axes in
-          let rec prod_from i acc =
-            if i >= ndims then acc
-            else prod_from (i + 1) (acc * List.nth input_shape i)
-          in
-          prod_from (max_reduce_axis + 1) 1
+
+      (* Compute input strides (row-major) *)
+      let input_strides = Array.make ndims 1 in
+      for i = ndims - 2 downto 0 do
+        input_strides.(i) <- input_strides.(i + 1) * List.nth input_shape (i + 1)
+      done;
+
+      (* Separate dims into reduced and non-reduced, preserving order *)
+      let is_reduced i = List.mem i reduce_axes in
+
+      (* Check if this is a simple contiguous case (single axis or contiguous
+         trailing axes) where we can use the fast path *)
+      let sorted_axes = List.sort compare reduce_axes in
+      let is_contiguous_trailing =
+        sorted_axes <> [] &&
+        List.nth sorted_axes (List.length sorted_axes - 1) = ndims - 1 &&
+        let first = List.hd sorted_axes in
+        List.length sorted_axes = ndims - first
       in
+      let is_single_axis = List.length reduce_axes = 1 in
 
       let outer_bound = Uop.const_int Dtype.int32 output_numel in
       let o = Uop.range outer_bound [0; 0] in
@@ -259,19 +264,88 @@ let lower_reduce_kernel ~device ~input_numel ~output_numel ~reduce_axes ~input_s
       let inner_bound = Uop.const_int Dtype.int32 reduce_extent in
       let r = Uop.range inner_bound [1; 0] in
 
-      (* Compute flat index into the input buffer.
-         flat_idx = (o / inner_numel) * (reduce_extent * inner_numel)
-                  + r * inner_numel + (o % inner_numel) *)
       let flat_idx =
-        if inner_numel = 1 then
-          (* Last-axis reduction: simple o * reduce_extent + r *)
-          Uop.add (Uop.mul o (Uop.const_int Dtype.int32 reduce_extent)) r
-        else
-          let inner_c = Uop.const_int Dtype.int32 inner_numel in
-          let stride_c = Uop.const_int Dtype.int32 (reduce_extent * inner_numel) in
-          let outer_idx = Uop.idiv o inner_c in
-          let inner_offset = Uop.mod_ o inner_c in
-          Uop.add (Uop.add (Uop.mul outer_idx stride_c) (Uop.mul r inner_c)) inner_offset
+        if is_single_axis || is_contiguous_trailing then begin
+          (* Fast path for single-axis or contiguous trailing axes.
+             inner_numel = product of dims after all reduced axes. *)
+          let max_reduce_axis = List.fold_left max 0 reduce_axes in
+          let inner_numel = ref 1 in
+          for i = max_reduce_axis + 1 to ndims - 1 do
+            inner_numel := !inner_numel * List.nth input_shape i
+          done;
+          let inner = !inner_numel in
+          if inner = 1 then
+            Uop.add (Uop.mul o (Uop.const_int Dtype.int32 reduce_extent)) r
+          else
+            let inner_c = Uop.const_int Dtype.int32 inner in
+            let stride_c = Uop.const_int Dtype.int32 (reduce_extent * inner) in
+            let outer_idx = Uop.idiv o inner_c in
+            let inner_offset = Uop.mod_ o inner_c in
+            Uop.add (Uop.add (Uop.mul outer_idx stride_c) (Uop.mul r inner_c)) inner_offset
+        end else begin
+          (* General path: decompose o and r into per-axis indices, compute
+             flat input index from strides.
+             Non-reduced dims (from o): extract per-dim index via div/mod
+             Reduced dims (from r): extract per-dim index via div/mod *)
+          let non_reduced_dims = List.init ndims Fun.id
+            |> List.filter (fun i -> not (is_reduced i)) in
+          let reduced_dims = List.init ndims Fun.id
+            |> List.filter is_reduced in
+
+          (* For each axis, compute its index from o or r *)
+          let axis_idx = Array.make ndims (Uop.const_int Dtype.int32 0) in
+
+          (* Decompose o into non-reduced axis indices (row-major within non-reduced) *)
+          let remaining_o = ref o in
+          let nr_count = List.length non_reduced_dims in
+          List.iteri (fun pos ax ->
+            let dim_size = List.nth input_shape ax in
+            if pos = nr_count - 1 then
+              (* Last non-reduced dim: just use remaining *)
+              axis_idx.(ax) <- !remaining_o
+            else begin
+              (* Compute product of remaining non-reduced dims *)
+              let tail_prod = ref 1 in
+              List.iteri (fun j a ->
+                if j > pos then tail_prod := !tail_prod * List.nth input_shape a
+              ) non_reduced_dims;
+              let tp = Uop.const_int Dtype.int32 !tail_prod in
+              axis_idx.(ax) <- Uop.idiv !remaining_o tp;
+              remaining_o := Uop.mod_ !remaining_o tp
+            end;
+            ignore dim_size
+          ) non_reduced_dims;
+
+          (* Decompose r into reduced axis indices (row-major within reduced) *)
+          let remaining_r = ref r in
+          let rd_count = List.length reduced_dims in
+          List.iteri (fun pos ax ->
+            let dim_size = List.nth input_shape ax in
+            if pos = rd_count - 1 then
+              axis_idx.(ax) <- !remaining_r
+            else begin
+              let tail_prod = ref 1 in
+              List.iteri (fun j a ->
+                if j > pos then tail_prod := !tail_prod * List.nth input_shape a
+              ) reduced_dims;
+              let tp = Uop.const_int Dtype.int32 !tail_prod in
+              axis_idx.(ax) <- Uop.idiv !remaining_r tp;
+              remaining_r := Uop.mod_ !remaining_r tp
+            end;
+            ignore dim_size
+          ) reduced_dims;
+
+          (* Compute flat index: sum of axis_idx[i] * stride[i] *)
+          let flat = ref (Uop.const_int Dtype.int32 0) in
+          for i = 0 to ndims - 1 do
+            let stride = input_strides.(i) in
+            if stride = 1 then
+              flat := Uop.add !flat axis_idx.(i)
+            else
+              flat := Uop.add !flat (Uop.mul axis_idx.(i) (Uop.const_int Dtype.int32 stride))
+          done;
+          !flat
+        end
       in
 
       let buf_id_to_load : (int, Uop.t) Hashtbl.t = Hashtbl.create 16 in

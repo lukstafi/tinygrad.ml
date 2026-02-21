@@ -62,3 +62,11 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Updated gradient.ml**: Pattern match on `Axis_arg` updated to 3-tuple.
 - **Fallback preserved**: If `src_shape` is empty (legacy UOps), the scheduler falls back to heuristic inference from buffer sizes, maintaining backward compatibility.
 - Total tests: 96 unit + 104 e2e = 200 all passing.
+
+## Claude round 9 decisions
+
+- **General non-contiguous multi-axis reduction indexing**: Replaced the single-axis-optimized `inner_numel` stride computation with a general approach that decomposes output index `o` and reduce index `r` into per-axis indices using `idiv`/`mod`, then combines them with input strides to compute the flat input index. Handles arbitrary axis combinations (e.g., `[0;2]` on `[2;3;4]`).
+- **Fast path preserved**: Single-axis and contiguous-trailing-axes reductions still use the efficient `inner_numel` shortcut. The general decomposition path only activates for truly non-contiguous axis sets.
+- **Added non-contiguous multi-axis reduction test**: `sum(axes=[0;2])` on `[2;3;4]` → `[1;3;1]` with expected values `[68, 100, 132]`.
+- **Added fused expression reduction test**: `sum(sqrt((a+b)*a))` verifies expression evaluation inside reduction loop.
+- Total tests: 96 unit + 110 e2e = 206 all passing.
