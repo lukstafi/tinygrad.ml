@@ -1,4 +1,4 @@
 (library
  (name tinygrad_ml)
  (wrapped false)
- (libraries unix str ctypes ctypes-foreign))
+ (libraries unix str ctypes ctypes-foreign metal))

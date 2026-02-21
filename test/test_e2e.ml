@@ -214,6 +214,64 @@ let test_multi_backend_render () =
   check "Metal has gid attribute" has_gid;
   ()
 
+(* ---- Test 6: Metal GPU execution ---- *)
+let test_metal_execution () =
+  Printf.printf "\n=== Metal GPU Execution ===\n%!";
+  let n = 256 in
+  (* Kernel: out[i] = in[i] * 2.0 *)
+  let in_param = Uop.param 0 (Dtype.ptr Dtype.float32) in
+  let out_param = Uop.param 1 (Dtype.ptr Dtype.float32) in
+  let i = Uop.range (Uop.const_int Dtype.int32 n) [0; 0] in
+  let in_val = Uop.load (Uop.index in_param i) in
+  let result = Uop.mul in_val (Uop.const Dtype.float32 2.0) in
+  let st = Uop.store (Uop.index out_param i) result in
+  let end_r = Uop.end_ i in
+  let kernel = Uop.sink ~name:"scale2x" [st; end_r] in
+  let uops = Uop.toposort1 kernel in
+
+  (* Render for Metal *)
+  let pspec = Cstyle.render_uops Cstyle.metal_config uops in
+
+  (* Allocate Metal buffers *)
+  let in_buf = Device.alloc_buffer
+    (Device.make_buffer ~device:"METAL" ~size:n ~dtype:Dtype.float32) in
+  let out_buf = Device.alloc_buffer
+    (Device.make_buffer ~device:"METAL" ~size:n ~dtype:Dtype.float32) in
+
+  (* Fill input: in[i] = i *)
+  Device.copyin_floats in_buf (Array.init n Float.of_int);
+
+  (* Compile and execute *)
+  let module B = (val Device.get_backend "METAL" : Device.Backend) in
+  let _src = B.compile "scale2x" pspec.src in
+
+  (* Reorder buffers according to pspec.globals *)
+  let bufs = [| in_buf; out_buf |] in
+  let ordered_ptrs = List.map (fun idx -> bufs.(idx).ptr) pspec.globals in
+  B.exec "scale2x" pspec.src ordered_ptrs [];
+
+  (* Verify: out[i] = i * 2 *)
+  let result_data = Device.copyout_floats out_buf in
+  check_float "metal scale2x[0]" result_data.(0) 0.0 1e-6;
+  check_float "metal scale2x[1]" result_data.(1) 2.0 1e-6;
+  check_float "metal scale2x[10]" result_data.(10) 20.0 1e-5;
+  check_float "metal scale2x[255]" result_data.(255) 510.0 1e-3;
+  let all_correct = Array.for_all2 (fun got i ->
+    Float.abs (got -. Float.of_int i *. 2.0) < 1e-4
+  ) result_data (Array.init n Fun.id) in
+  check "metal scale2x all correct" all_correct
+
+(* ---- Test 7: Tensor from_float_list -> realize -> to_float_list round-trip ---- *)
+let test_tensor_roundtrip () =
+  Printf.printf "\n=== Tensor Data Round-Trip ===\n%!";
+  let data = [1.0; 2.0; 3.0; 4.0; 5.0] in
+  let t = Tensor.from_float_list [5] data in
+  let result = Tensor.to_float_list t in
+  check "tensor roundtrip length" (List.length result = 5);
+  List.iter2 (fun got expected ->
+    check_float (Printf.sprintf "tensor roundtrip %.1f" expected) got expected 1e-6
+  ) result data
+
 (* ---- Main ---- *)
 let () =
   Printf.printf "tinygrad_ml end-to-end tests\n%!";
@@ -223,6 +281,8 @@ let () =
   (try test_reduction () with e -> Printf.printf "  ERROR: %s\n%!" (Printexc.to_string e));
   (try test_unary_ops () with e -> Printf.printf "  ERROR: %s\n%!" (Printexc.to_string e));
   (try test_multi_backend_render () with e -> Printf.printf "  ERROR: %s\n%!" (Printexc.to_string e));
+  (try test_metal_execution () with e -> Printf.printf "  ERROR: %s\n%!" (Printexc.to_string e));
+  (try test_tensor_roundtrip () with e -> Printf.printf "  ERROR: %s\n%!" (Printexc.to_string e));
   Printf.printf "\n============================\n%!";
   Printf.printf "Results: %d passed, %d failed\n%!" !pass_count !fail_count;
   if !fail_count > 0 then exit 1
