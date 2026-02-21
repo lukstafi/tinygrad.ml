@@ -227,8 +227,11 @@ let lower_reduce_kernel ~device ~input_numel ~output_numel ~kname
 
 (** Create schedule for a UOp root.
     Handles both input buffer realization and expression computation.
-    [numel] is the number of elements in the output tensor (from tensor shape). *)
-let create_schedule ?(device="CPU") ~numel (roots : Uop.t list) : exec_item list =
+    [numel] is the number of elements in the output tensor (from tensor shape).
+    [input_numel] is the total elements before reduction (from source tensor shape);
+    required when scheduling reduction kernels, defaults to [numel]. *)
+let create_schedule ?(device="CPU") ~numel ?(input_numel=0) (roots : Uop.t list) : exec_item list =
+  let input_numel = if input_numel > 0 then input_numel else numel in
   let items = ref [] in
 
   List.iter (fun (root : Uop.t) ->
@@ -259,18 +262,11 @@ let create_schedule ?(device="CPU") ~numel (roots : Uop.t list) : exec_item list
           | Uop.Axis_arg (_axes, op) -> (op, List.hd u.src)
           | _ -> failwith "REDUCE_AXIS missing Axis_arg"
         in
-        let src_uops = Uop.toposort1 source_uop in
-        let input_numel = List.fold_left (fun acc (su : Uop.t) ->
-          if su.op = Ops.BUFFER then
-            match get_realized su.id with
-            | Some dbuf -> max acc dbuf.size
-            | None -> acc
-          else acc
-        ) 1 src_uops in
-        (* Output numel = 1 for full reduction *)
-        let output_numel = 1 in
+        (* Use input_numel from tensor shape metadata (passed by caller) *)
+        let reduce_input_numel = input_numel in
+        let output_numel = numel in
         let kname = fresh_kernel_name () in
-        match lower_reduce_kernel ~device ~input_numel ~output_numel ~kname reduce_op source_uop u with
+        match lower_reduce_kernel ~device ~input_numel:reduce_input_numel ~output_numel ~kname reduce_op source_uop u with
         | Some (kernel_uops, param_bufs, out_buf) ->
           items := Kernel { name = kname; uops = kernel_uops; bufs = param_bufs } :: !items;
           store_realized u.id out_buf

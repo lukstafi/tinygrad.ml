@@ -177,11 +177,28 @@ module Metal : Backend = struct
   let synchronize = Metal_backend.synchronize
 end
 
+(** CUDA backend stub — renders valid CUDA code but cannot execute without cudajit.
+    The renderer (Cstyle.cuda_config) generates correct CUDA kernels.
+    To enable execution, install cudajit and implement alloc/copyin/copyout/exec
+    using Cuda/Nvrtc bindings. *)
+module CUDA : Backend = struct
+  let device_name = "CUDA"
+  let _unavail () = failwith "CUDA backend: cudajit not installed (install cudajit opam package for GPU execution)"
+  let alloc _nbytes = _unavail ()
+  let free _ptr = _unavail ()
+  let copyin _dst _src = _unavail ()
+  let copyout _dst _src = _unavail ()
+  let compile _name _src = _unavail ()
+  let exec _name _bin _ptrs _vals = _unavail ()
+  let synchronize () = ()
+end
+
 (** Get a backend module by device name *)
 let get_backend device =
   match String.uppercase_ascii device with
   | "CPU" -> (module CPU : Backend)
   | "METAL" -> (module Metal : Backend)
+  | "CUDA" -> (module CUDA : Backend)
   | _ -> failwith (Printf.sprintf "Unknown device: %s" device)
 
 (** Allocate a buffer on its device *)

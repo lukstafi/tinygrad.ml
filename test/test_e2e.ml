@@ -441,6 +441,27 @@ let test_tensor_mean () =
   check "mean length" (List.length result = 1);
   check_float "mean([2,4,6,8])" (List.nth result 0) 5.0 1e-5
 
+(* ---- Test 18: CUDA backend registration ---- *)
+let test_cuda_backend () =
+  Printf.printf "\n=== CUDA Backend ===\n%!";
+  (* Verify CUDA backend is recognized and returns a module *)
+  let module B = (val Device.get_backend "CUDA" : Device.Backend) in
+  check "cuda backend name" (B.device_name = "CUDA");
+  (* Verify CUDA rendering produces valid kernel source *)
+  let in_param = Uop.param 0 (Dtype.ptr Dtype.float32) in
+  let out_param = Uop.param 1 (Dtype.ptr Dtype.float32) in
+  let i = Uop.range (Uop.const_int Dtype.int32 4) [0; 0] in
+  let v = Uop.load (Uop.index in_param i) in
+  let r = Uop.mul v (Uop.const Dtype.float32 2.0) in
+  let st = Uop.store (Uop.index out_param i) r in
+  let end_r = Uop.end_ i in
+  let kernel = Uop.sink ~name:"cuda_test" [st; end_r] in
+  let uops = Uop.toposort1 kernel in
+  let pspec = Cstyle.render_uops (Cstyle.cuda_config ~arch:"sm_80") uops in
+  check "cuda src has __global__" (String.length pspec.src > 0
+    && (try ignore (Str.search_forward (Str.regexp_string "__global__") pspec.src 0); true with Not_found -> false));
+  check "cuda src has extern C" (try ignore (Str.search_forward (Str.regexp_string {|extern "C"|}) pspec.src 0); true with Not_found -> false)
+
 let run_test name f =
   try f () with e ->
     incr fail_count;
@@ -469,6 +490,7 @@ let () =
   run_test "tensor_sum" test_tensor_sum;
   run_test "tensor_max" test_tensor_max;
   run_test "tensor_mean" test_tensor_mean;
+  run_test "cuda_backend" test_cuda_backend;
   Printf.printf "\n============================\n%!";
   Printf.printf "Results: %d passed, %d failed\n%!" !pass_count !fail_count;
   if !fail_count > 0 then exit 1

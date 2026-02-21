@@ -36,3 +36,11 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - Made `test_e2e` a proper `(test)` in dune so `dune test` catches regressions.
 - Completed `Schedule.reset` to also reset `kernel_counter` for deterministic test isolation.
 - Total tests: 96 unit + 80 e2e = 176 all passing.
+
+## Claude round 6 decisions
+
+- Added CUDA backend stub to `device.ml`: `module CUDA : Backend` with clear error messages ("cudajit not installed") for all operations except `synchronize`. Wired into `get_backend` dispatch.
+- Fixed `input_numel` inference for reductions: `tensor.ml` now scans the UOp graph for `Dtype.Ptr` buffer sizes to determine the pre-reduction element count, passing it to `create_schedule ~input_numel`. This replaces heuristic assumptions when the tensor shape alone can't reveal the source size.
+- Fixed `Dtype.Ptr` pattern match bug: constructor field order is `Ptr(base, addr_space, size)`, not `Ptr(base, size, addr_space)`. The round 5 code had the wrong field order, causing a type error.
+- Added CUDA backend e2e test: verifies stub module name and that rendered CUDA source has `__global__` and `extern "C"` markers.
+- Total tests: 96 unit + 83 e2e = 179 all passing.
