@@ -789,7 +789,83 @@ let test_gradient_sin () =
   check_float "sin grad[1]" (List.nth dx_vals 1) (Float.sqrt 2.0 /. 2.0) 1e-4;
   check_float "sin grad[2]" (List.nth dx_vals 2) 0.0 1e-4
 
-(* ---- Test 26: CUDA backend registration ---- *)
+(* ---- Test 26: Input buffer broadcast via step-1 shape metadata ---- *)
+let test_input_broadcast () =
+  Printf.printf "\n=== Input Buffer Broadcast ===\n%!";
+  Schedule.reset ();
+  (* Create a [1;3] tensor and a [2;3] tensor, expand [1;3] to [2;3], add them.
+     This exercises the step-1 copyin path storing shape [1;3] so the downstream
+     kernel can use broadcast_index instead of the ratio heuristic. *)
+  let a = Tensor.from_float_list [1; 3] [10.0; 20.0; 30.0] in
+  let b = Tensor.from_float_list [2; 3] [1.0; 2.0; 3.0; 4.0; 5.0; 6.0] in
+  let a_exp = Tensor.expand a [2; 3] in
+  let result = Tensor.add a_exp b in
+  let vals = Tensor.to_float_list result in
+  check "input bcast length" (List.length vals = 6);
+  (* [10+1, 20+2, 30+3, 10+4, 20+5, 30+6] = [11, 22, 33, 14, 25, 36] *)
+  check_float "input bcast[0]" (List.nth vals 0) 11.0 1e-6;
+  check_float "input bcast[1]" (List.nth vals 1) 22.0 1e-6;
+  check_float "input bcast[2]" (List.nth vals 2) 33.0 1e-6;
+  check_float "input bcast[3]" (List.nth vals 3) 14.0 1e-6;
+  check_float "input bcast[4]" (List.nth vals 4) 25.0 1e-6;
+  check_float "input bcast[5]" (List.nth vals 5) 36.0 1e-6
+
+(* ---- Test 27: Leading-axis broadcast from input buffer ---- *)
+let test_leading_axis_broadcast () =
+  Printf.printf "\n=== Leading-Axis Broadcast ===\n%!";
+  Schedule.reset ();
+  (* Create [3;1] and [3;2] tensors. Expand [3;1] to [3;2] and multiply.
+     This tests the case codex flagged: leading-axis broadcast where the
+     ratio heuristic gives wrong results but stride-based indexing is correct. *)
+  let a = Tensor.from_float_list [3; 1] [2.0; 3.0; 4.0] in
+  let b = Tensor.from_float_list [3; 2] [1.0; 10.0; 1.0; 10.0; 1.0; 10.0] in
+  let a_exp = Tensor.expand a [3; 2] in
+  let result = Tensor.mul a_exp b in
+  let vals = Tensor.to_float_list result in
+  check "leading bcast length" (List.length vals = 6);
+  (* [2*1, 2*10, 3*1, 3*10, 4*1, 4*10] = [2, 20, 3, 30, 4, 40] *)
+  check_float "leading bcast[0]" (List.nth vals 0) 2.0 1e-6;
+  check_float "leading bcast[1]" (List.nth vals 1) 20.0 1e-6;
+  check_float "leading bcast[2]" (List.nth vals 2) 3.0 1e-6;
+  check_float "leading bcast[3]" (List.nth vals 3) 30.0 1e-6;
+  check_float "leading bcast[4]" (List.nth vals 4) 4.0 1e-6;
+  check_float "leading bcast[5]" (List.nth vals 5) 40.0 1e-6
+
+(* ---- Test 28: Log2 gradient ---- *)
+let test_gradient_log2 () =
+  Printf.printf "\n=== Gradient (log2) ===\n%!";
+  Schedule.reset ();
+  (* d/dx sum(log2(x)) = 1/(x * ln(2)) *)
+  let x = Tensor.from_float_list [3] [1.0; 2.0; 4.0] in
+  let y = Tensor.log2_ x in
+  let loss = Tensor.sum y in
+  let grads = Tensor.backward loss [x] in
+  let (_, dx) = List.hd grads in
+  let dx_vals = Tensor.to_float_list dx in
+  let ln2 = Float.log 2.0 in
+  check_float "log2 grad[0]" (List.nth dx_vals 0) (1.0 /. (1.0 *. ln2)) 1e-4;
+  check_float "log2 grad[1]" (List.nth dx_vals 1) (1.0 /. (2.0 *. ln2)) 1e-4;
+  check_float "log2 grad[2]" (List.nth dx_vals 2) (1.0 /. (4.0 *. ln2)) 1e-4
+
+(* ---- Test 29: Permute gradient ---- *)
+let test_gradient_permute () =
+  Printf.printf "\n=== Gradient (permute) ===\n%!";
+  Schedule.reset ();
+  (* x is [2;3], permute to [3;2], sum all → scalar.
+     d/dx sum(permute(x, [1;0])) = ones([2;3]) since sum gradient is all-1s
+     and permute gradient is inverse permute (which is [1;0] again for swap). *)
+  let x = Tensor.from_float_list [2; 3] [1.0; 2.0; 3.0; 4.0; 5.0; 6.0] in
+  let xp = Tensor.permute x [1; 0] in
+  let loss = Tensor.sum xp in
+  let grads = Tensor.backward loss [x] in
+  let (_, dx) = List.hd grads in
+  let dx_vals = Tensor.to_float_list dx in
+  check "permute grad length" (List.length dx_vals = 6);
+  List.iteri (fun i v ->
+    check_float (Printf.sprintf "permute grad[%d]" i) v 1.0 1e-6
+  ) dx_vals
+
+(* ---- Test 30: CUDA backend registration ---- *)
 let test_cuda_backend () =
   Printf.printf "\n=== CUDA Backend ===\n%!";
   (* Verify CUDA backend is recognized and returns a module *)
@@ -851,6 +927,10 @@ let () =
   run_test "gradient_unary" test_gradient_unary;
   run_test "gradient_chained_reduce" test_gradient_chained_reduce;
   run_test "gradient_sin" test_gradient_sin;
+  run_test "input_broadcast" test_input_broadcast;
+  run_test "leading_axis_broadcast" test_leading_axis_broadcast;
+  run_test "gradient_log2" test_gradient_log2;
+  run_test "gradient_permute" test_gradient_permute;
   run_test "cuda_backend" test_cuda_backend;
   Printf.printf "\n============================\n%!";
   Printf.printf "Results: %d passed, %d failed\n%!" !pass_count !fail_count;
