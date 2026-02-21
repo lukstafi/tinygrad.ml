@@ -161,10 +161,23 @@ module CPU : Backend = struct
   let synchronize () = ()
 end
 
+(** Metal backend — compiles MSL to Metal library, executes via Metal compute pipeline *)
+module Metal : Backend = struct
+  let device_name = "METAL"
+  let alloc = Metal_backend.alloc
+  let free = Metal_backend.free
+  let copyin = Metal_backend.copyin
+  let copyout = Metal_backend.copyout
+  let compile = Metal_backend.compile
+  let exec = Metal_backend.exec
+  let synchronize = Metal_backend.synchronize
+end
+
 (** Get a backend module by device name *)
 let get_backend device =
   match String.uppercase_ascii device with
   | "CPU" -> (module CPU : Backend)
+  | "METAL" -> (module Metal : Backend)
   | _ -> failwith (Printf.sprintf "Unknown device: %s" device)
 
 (** Allocate a buffer on its device *)

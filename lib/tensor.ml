@@ -54,20 +54,17 @@ let from_float_list ?(device="CPU") ?(dtype=Dtype.float32) shape (data : float l
   if List.length data <> numel then
     failwith (Printf.sprintf "data length %d doesn't match shape %s (numel=%d)"
       (List.length data) (String.concat "x" (List.map string_of_int shape)) numel);
-  (* Create a buffer, copy data in *)
+  (* Create a buffer UOp and store the data in the schedule's buffer_data table *)
   let buf_id = fresh_buf_id () in
   let buf_uop = Uop.buffer buf_id (Dtype.ptr ~size:numel dtype) in
-  (* The actual data will be stored in the realized buffer *)
+  (* Store data for later copyin during realize *)
+  Schedule.store_buffer_data buf_uop.id (Array.of_list data);
+  (* Build the graph: BUFFER → INDEX → LOAD → RESHAPE *)
   let idx = Uop.const Dtype.int32 0.0 in
   let indexed = Uop.index buf_uop idx in
   let loaded = Uop.load indexed in
   let reshaped = if List.length shape > 0 then Uop.reshape loaded shape else loaded in
-  (* Store the float data for later copyin *)
-  let t = of_uop ~device shape dtype reshaped in
-  (* We need a mechanism to associate data with this tensor.
-     For now, we'll use contiguous to mark it needs realization *)
-  ignore data;  (* TODO: associate data with buffer for copyin *)
-  t
+  of_uop ~device shape dtype reshaped
 
 (** Elementwise binary operations *)
 let binop op (a : t) (b : t) =
@@ -185,22 +182,30 @@ let contiguous (t : t) =
     2. Compile and execute kernels
     3. Return the tensor with realized data *)
 let realize (t : t) =
-  (* For now, this is a placeholder. Full implementation would:
-     1. Walk the UOp graph to find unrealized computations
-     2. Create a schedule (kernel boundaries, buffer allocation)
-     3. For each kernel: codegen → compile → execute
-     4. Return tensor backed by a realized buffer *)
-  let schedule = Schedule.create_schedule [t.uop] in
+  let schedule = Schedule.create_schedule ~device:t.device [t.uop] in
   Realize.run_schedule schedule;
   t
+
+(** Find the buffer UOp in the graph and return the realized Device.buffer *)
+let find_realized_buffer (t : t) : Device.buffer option =
+  let uops = Uop.toposort1 t.uop in
+  (* Look for BUFFER nodes that have been realized *)
+  List.find_map (fun (u : Uop.t) ->
+    if u.op = Ops.BUFFER then Schedule.get_realized u.id
+    else None
+  ) uops
 
 (** Convert to flat float list (triggers realize if needed) *)
 let to_float_list (t : t) =
   let _t = realize t in
-  (* After realization, extract data from the buffer *)
-  (* Placeholder — full implementation needs buffer data extraction *)
-  let numel = Helpers.prod t.shape in
-  List.init numel (fun _ -> 0.0)
+  match find_realized_buffer t with
+  | Some buf ->
+    let data = Device.copyout_floats buf in
+    Array.to_list data
+  | None ->
+    (* No realized buffer found — return zeros as fallback *)
+    let numel = Helpers.prod t.shape in
+    List.init numel (fun _ -> 0.0)
 
 (** OCaml operator overloads *)
 let ( + ) = add
