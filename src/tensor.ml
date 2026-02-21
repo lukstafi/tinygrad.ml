@@ -3,6 +3,7 @@ type node =
   | Const of float
   | Binop of Uop.binop * t * t
   | Unop of Uop.unop * t
+  | Reshape of t
 
 and t = {
   shape : int array;
@@ -55,17 +56,12 @@ let reshape t new_shape =
     invalid_arg
       (Printf.sprintf "reshape: numel mismatch %s -> %s"
          (Buffer.pp_shape t.shape) (Buffer.pp_shape new_shape));
-  let node =
-    match t.node with
-    | Data (b : Buffer.t) -> Data { b with shape = Array.copy new_shape }
-    | _ -> t.node
-  in
   let cache =
     List.map
       (fun (dev, (b : Buffer.t)) -> (dev, { b with shape = Array.copy new_shape }))
       t.cache
   in
-  { shape = Array.copy new_shape; node; cache }
+  { shape = Array.copy new_shape; node = Reshape t; cache }
 
 let find_cache dev entries =
   List.find_map (fun (d, b) -> if d = dev then Some b else None) entries
@@ -73,19 +69,30 @@ let find_cache dev entries =
 let update_cache dev buf entries =
   (dev, buf) :: List.filter (fun (d, _) -> d <> dev) entries
 
-let rec lower_to_expr t inputs =
+let rec lower_to_expr_with_shape t current_shape inputs =
   match t.node with
   | Data b ->
+      let b_view =
+        if Array.length b.shape = Array.length current_shape
+           && Array.for_all2 ( = ) b.shape current_shape
+        then b
+        else { b with shape = Array.copy current_shape }
+      in
       let idx = List.length inputs in
-      (Uop.Input idx, inputs @ [ b ])
+      (Uop.Input idx, inputs @ [ b_view ])
   | Const c -> (Uop.Const c, inputs)
   | Binop (op, lhs, rhs) ->
-      let lhs_expr, inputs = lower_to_expr lhs inputs in
-      let rhs_expr, inputs = lower_to_expr rhs inputs in
+      let lhs_expr, inputs = lower_to_expr_with_shape lhs current_shape inputs in
+      let rhs_expr, inputs = lower_to_expr_with_shape rhs current_shape inputs in
       (Uop.Binop (op, lhs_expr, rhs_expr), inputs)
   | Unop (op, x) ->
-      let x_expr, inputs = lower_to_expr x inputs in
+      let x_expr, inputs = lower_to_expr_with_shape x current_shape inputs in
       (Uop.Unop (op, x_expr), inputs)
+  | Reshape inner ->
+      lower_to_expr_with_shape inner current_shape inputs
+
+let lower_to_expr t inputs =
+  lower_to_expr_with_shape t t.shape inputs
 
 let realize_result ?device t =
   let dev = Option.value device ~default:(Runtime.default_device ()) in

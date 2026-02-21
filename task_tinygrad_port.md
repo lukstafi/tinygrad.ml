@@ -82,3 +82,10 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
   - CPU non-contiguous multi-axis checks (`axes=[0;2]` on `[2;3;4]`) for `sum_axis`, `max_axis`, `mean_axis`.
   - Metal/CUDA non-contiguous `sum_axis` consistency checks against CPU.
 - Harmonized Metal test tolerance with relative epsilon style used in CPU/CUDA tests.
+
+## Codex round 11 decisions
+
+- Replaced ad-hoc reshape behavior with an explicit `Reshape` node in `Tensor` AST so shape views are represented structurally, including for unrealized expression graphs.
+- Implemented shape-aware lowering (`lower_to_expr_with_shape`) that propagates requested output shape through `Reshape` nodes and emits input buffer views with matching shape metadata.
+- Restored strict backend input-shape validation (removed prior permissive “numel-only” acceptance) now that reshape compatibility is handled during lowering rather than backend validation.
+- Added CPU regression coverage for reshaped unrealized expressions (`reshape(add(a,b), [4;2])`) to validate the new lowering path end-to-end.

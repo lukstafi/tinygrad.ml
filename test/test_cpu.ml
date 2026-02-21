@@ -88,6 +88,9 @@ let test_reshape_and_axis_reductions_cpu () =
   let c = Tinygrad_ml.Tensor.add a b in
   let c_arr = Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c c in
   check_array ~msg:"reshape add" [| 9.0; 9.0; 9.0; 9.0; 9.0; 9.0; 9.0; 9.0 |] c_arr;
+  let expr_reshaped = Tinygrad_ml.Tensor.reshape c [| 4; 2 |] in
+  check_array ~msg:"reshape unrealized expression" [| 9.0; 9.0; 9.0; 9.0; 9.0; 9.0; 9.0; 9.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c expr_reshaped);
   let s = Tinygrad_ml.Tensor.sum_axis ~device:Tinygrad_ml.Runtime.Cpu_c ~axes:[ 1 ] a in
   check_array ~msg:"sum_axis axis=1" [| 10.0; 26.0 |]
     (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c s);

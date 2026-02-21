@@ -64,12 +64,10 @@ let compile_reduce ~(dev : Metal.Device.t) ~(op : Uop.reduce_op) ~(expr : Uop.ex
   compile_spec ~dev spec
 
 let validate_inputs ~shape (inputs : Buffer.t list) =
-  let target_numel = Buffer.numel shape in
   List.for_all
     (fun (b : Buffer.t) ->
-      (Array.length b.shape = Array.length shape
-       && Array.for_all2 ( = ) b.shape shape)
-      || Buffer.numel b.shape = target_numel)
+      Array.length b.shape = Array.length shape
+      && Array.for_all2 ( = ) b.shape shape)
     inputs
 
 let run_expr ~(expr : Uop.expr) ~(inputs : Buffer.t list) ~(shape : int array) =

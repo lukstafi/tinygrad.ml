@@ -86,12 +86,10 @@ let available () =
   with exn -> Error (Printexc.to_string exn)
 
 let validate_inputs ~shape (inputs : Buffer.t list) =
-  let target_numel = Buffer.numel shape in
   List.for_all
     (fun b ->
-      (Array.length b.Buffer.shape = Array.length shape
-       && Array.for_all2 ( = ) b.Buffer.shape shape)
-      || Buffer.numel b.Buffer.shape = target_numel)
+      Array.length b.Buffer.shape = Array.length shape
+      && Array.for_all2 ( = ) b.Buffer.shape shape)
     inputs
 
 let run_expr ~(expr : Uop.expr) ~(inputs : Buffer.t list) ~(shape : int array) =
