@@ -40,6 +40,20 @@ let test_reductions_cuda () =
   let mean = Tinygrad_ml.Tensor.mean ~device:Tinygrad_ml.Runtime.Cuda x in
   check_close ~msg:"cuda mean" 4.5 mean
 
+let test_fused_reductions_cuda_vs_cpu () =
+  let a = Tinygrad_ml.Tensor.from_array [| 1.0; 2.0; 3.0; 4.0; 5.0 |] in
+  let b = Tinygrad_ml.Tensor.from_array [| 5.0; 4.0; 3.0; 2.0; 1.0 |] in
+  let fused =
+    Tinygrad_ml.Tensor.reciprocal
+      (Tinygrad_ml.Tensor.sqrt (Tinygrad_ml.Tensor.mul (Tinygrad_ml.Tensor.add a b) a))
+  in
+  let cpu_sum = Tinygrad_ml.Tensor.sum ~device:Tinygrad_ml.Runtime.Cpu_c fused in
+  let cuda_sum = Tinygrad_ml.Tensor.sum ~device:Tinygrad_ml.Runtime.Cuda fused in
+  let cpu_max = Tinygrad_ml.Tensor.max ~device:Tinygrad_ml.Runtime.Cpu_c fused in
+  let cuda_max = Tinygrad_ml.Tensor.max ~device:Tinygrad_ml.Runtime.Cuda fused in
+  check_close ~msg:"cuda fused sum matches cpu" cpu_sum cuda_sum;
+  check_close ~msg:"cuda fused max matches cpu" cpu_max cuda_max
+
 let run_or_skip () =
   match Tinygrad_ml.Cuda_backend.available () with
   | Error msg ->
@@ -49,6 +63,7 @@ let run_or_skip () =
       test_matches_cpu ();
       test_chain_cuda ();
       test_reductions_cuda ();
+      test_fused_reductions_cuda_vs_cpu ();
       Printf.printf "test_cuda: ok\n%!"
 
 let () = run_or_skip ()

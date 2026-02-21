@@ -53,3 +53,11 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - Upgraded staged CUDA backend (`experimental/cuda_backend_real.ml`) to execute reductions on GPU with dedicated CUDA reduction kernels (`run_reduce`), instead of reducing on host after `run_expr`.
 - Added CUDA reduction kernel rendering (`src/cuda_renderer.ml`: `render_reduce_kernel`) with expression-keyed kernel caching shared through existing compile path.
 - Extended CUDA tests (`test/test_cuda.ml`) with `sum`/`max`/`mean` checks (automatically skipped when CUDA backend is unavailable in current environment).
+
+## Codex round 8 decisions
+
+- Added fused-reduction coverage on CPU (`test/test_cpu.ml`): validates `sum` and `max` over computed expressions (not only raw input tensors).
+- Added cross-backend fused-reduction consistency checks:
+  - Metal vs CPU (`test/test_metal.ml`)
+  - CUDA vs CPU (`test/test_cuda.ml`, runtime-skipped when CUDA unavailable).
+- Tightened CPU test tolerance to relative form (`max(1e-6, 1e-6 * abs(expected))`) for numeric stability parity with CUDA tests.

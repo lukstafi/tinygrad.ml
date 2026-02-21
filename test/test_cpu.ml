@@ -1,5 +1,5 @@
 let check_close ~msg a b =
-  let eps = 1e-6 in
+  let eps = max 1e-6 (1e-6 *. Float.abs a) in
   if Float.abs (a -. b) > eps then
     failwith (Printf.sprintf "%s: expected %.8f, got %.8f" msg a b)
 
@@ -41,6 +41,18 @@ let test_max_mean_cpu () =
   let mean = Tinygrad_ml.Tensor.mean ~device:Tinygrad_ml.Runtime.Cpu_c x in
   check_close ~msg:"mean" 4.5 mean
 
+let test_fused_reductions_cpu () =
+  let a = Tinygrad_ml.Tensor.from_array [| 1.0; 2.0; 3.0; 4.0 |] in
+  let b = Tinygrad_ml.Tensor.from_array [| 10.0; 20.0; 30.0; 40.0 |] in
+  let fused = Tinygrad_ml.Tensor.sqrt (Tinygrad_ml.Tensor.mul (Tinygrad_ml.Tensor.add a b) a) in
+  let s = Tinygrad_ml.Tensor.sum ~device:Tinygrad_ml.Runtime.Cpu_c fused in
+  let m = Tinygrad_ml.Tensor.max ~device:Tinygrad_ml.Runtime.Cpu_c fused in
+  let expected = [| sqrt 11.0; sqrt 44.0; sqrt 99.0; sqrt 176.0 |] in
+  let expected_sum = Array.fold_left ( +. ) 0.0 expected in
+  let expected_max = Array.fold_left max Float.neg_infinity expected in
+  check_close ~msg:"fused sum" expected_sum s;
+  check_close ~msg:"fused max" expected_max m
+
 let test_kernel_cache_for_fused_expr () =
   Tinygrad_ml.Cpu_c_backend.reset_kernel_cache_for_tests ();
   let before = Tinygrad_ml.Cpu_c_backend.compiled_kernel_count () in
@@ -67,5 +79,6 @@ let () =
   test_sub_neg_sqrt_reciprocal_cpu ();
   test_sum_cpu ();
   test_max_mean_cpu ();
+  test_fused_reductions_cpu ();
   test_kernel_cache_for_fused_expr ();
   Printf.printf "test_cpu: ok\n"

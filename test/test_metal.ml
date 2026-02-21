@@ -56,6 +56,20 @@ let test_reductions_metal () =
   let mean = Tinygrad_ml.Tensor.mean ~device:Tinygrad_ml.Runtime.Metal x in
   check_close ~msg:"metal mean" 4.5 mean
 
+let test_fused_reductions_metal_vs_cpu () =
+  let a = Tinygrad_ml.Tensor.from_array [| 1.0; 2.0; 3.0; 4.0; 5.0 |] in
+  let b = Tinygrad_ml.Tensor.from_array [| 5.0; 4.0; 3.0; 2.0; 1.0 |] in
+  let fused =
+    Tinygrad_ml.Tensor.reciprocal
+      (Tinygrad_ml.Tensor.sqrt (Tinygrad_ml.Tensor.mul (Tinygrad_ml.Tensor.add a b) a))
+  in
+  let cpu_sum = Tinygrad_ml.Tensor.sum ~device:Tinygrad_ml.Runtime.Cpu_c fused in
+  let metal_sum = Tinygrad_ml.Tensor.sum ~device:Tinygrad_ml.Runtime.Metal fused in
+  let cpu_max = Tinygrad_ml.Tensor.max ~device:Tinygrad_ml.Runtime.Cpu_c fused in
+  let metal_max = Tinygrad_ml.Tensor.max ~device:Tinygrad_ml.Runtime.Metal fused in
+  check_close ~msg:"metal fused sum matches cpu" cpu_sum metal_sum;
+  check_close ~msg:"metal fused max matches cpu" cpu_max metal_max
+
 let run_or_skip () =
   match Tinygrad_ml.Metal_backend.available () with
   | Error msg ->
@@ -67,6 +81,7 @@ let run_or_skip () =
       test_matches_cpu ();
       test_chain_realize_metal ();
       test_reductions_metal ();
+      test_fused_reductions_metal_vs_cpu ();
       Printf.printf "test_metal: ok\n%!"
 
 let () = run_or_skip ()
