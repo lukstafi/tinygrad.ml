@@ -112,6 +112,31 @@ let permute t axes =
   let out_shape = Array.init ndim (fun i -> t.shape.(axes.(i))) in
   { shape = out_shape; node = Permute (Array.copy axes, t); cache = [] }
 
+let pad_prefix_to_rank (prefix : int array) (rank : int) =
+  let plen = Array.length prefix in
+  if plen > rank then
+    invalid_arg
+      (Printf.sprintf "pad_prefix_to_rank: prefix rank %d exceeds target rank %d" plen rank);
+  Array.init rank (fun i ->
+      let j = i - (rank - plen) in
+      if j < 0 then 1 else prefix.(j))
+
+let broadcast_prefix_shape (a_prefix : int array) (b_prefix : int array) =
+  let ar = Array.length a_prefix in
+  let br = Array.length b_prefix in
+  let rank = max ar br in
+  let a_pad = pad_prefix_to_rank a_prefix rank in
+  let b_pad = pad_prefix_to_rank b_prefix rank in
+  Array.init rank (fun i ->
+      let ad = a_pad.(i) in
+      let bd = b_pad.(i) in
+      if ad <> bd && ad <> 1 && bd <> 1 then
+        invalid_arg
+          (Printf.sprintf
+             "matmul: non-broadcastable batch dims at axis %d (%d vs %d)"
+             i ad bd);
+      max ad bd)
+
 let find_cache dev entries =
   List.find_map (fun (d, b) -> if d = dev then Some b else None) entries
 
@@ -338,6 +363,36 @@ let mean_axis ?device ~axes t =
   if factor = 0 then failwith "mean_axis: invalid zero reduction factor";
   let inv = full_with_shape s.shape (1.0 /. float_of_int factor) in
   mul s inv
+
+let matmul a b =
+  let a_ndim = Array.length a.shape in
+  let b_ndim = Array.length b.shape in
+  if a_ndim < 2 || b_ndim < 2 then
+    invalid_arg "matmul: both operands must be at least rank-2";
+  let n = a.shape.(a_ndim - 2) in
+  let k_a = a.shape.(a_ndim - 1) in
+  let k_b = b.shape.(b_ndim - 2) in
+  let m = b.shape.(b_ndim - 1) in
+  if k_a <> k_b then
+    invalid_arg
+      (Printf.sprintf "matmul: inner dimension mismatch (%d vs %d)" k_a k_b);
+  let a_batch = Array.sub a.shape 0 (a_ndim - 2) in
+  let b_batch = Array.sub b.shape 0 (b_ndim - 2) in
+  let batch = broadcast_prefix_shape a_batch b_batch in
+  let batch_rank = Array.length batch in
+  let a_batch_pad = pad_prefix_to_rank a_batch batch_rank in
+  let b_batch_pad = pad_prefix_to_rank b_batch batch_rank in
+  let a_base_shape = Array.concat [ a_batch_pad; [| n; k_a |] ] in
+  let b_base_shape = Array.concat [ b_batch_pad; [| k_b; m |] ] in
+  let a_aligned = if same_shape_arrays a.shape a_base_shape then a else reshape a a_base_shape in
+  let b_aligned = if same_shape_arrays b.shape b_base_shape then b else reshape b b_base_shape in
+  let a3 = reshape a_aligned (Array.concat [ a_batch_pad; [| n; k_a; 1 |] ]) in
+  let b3 = reshape b_aligned (Array.concat [ b_batch_pad; [| 1; k_b; m |] ]) in
+  let expanded_shape = Array.concat [ batch; [| n; k_a; m |] ] in
+  let prod = mul (expand a3 expanded_shape) (expand b3 expanded_shape) in
+  let reduced = sum_axis ~axes:[ batch_rank + 1 ] prod in
+  let out_shape = Array.concat [ batch; [| n; m |] ] in
+  if same_shape_arrays reduced.shape out_shape then reduced else reshape reduced out_shape
 
 let reduce_scalar_result ?device ~(op : Uop.reduce_op) t =
   let dev = Option.value device ~default:(Runtime.default_device ()) in

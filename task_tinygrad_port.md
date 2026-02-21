@@ -177,3 +177,15 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - Added CPU tests:
   - Forward `permute` correctness on `[2;3] -> [3;2]`.
   - Backward `d/dx sum(permute(x)) = ones_like(x)`.
+
+## Codex round 18 decisions
+
+- Added `Tensor.matmul` using existing primitive tensor ops (`reshape`, `expand`, `mul`, `sum_axis`) instead of introducing backend-specific matmul kernels.
+- Implemented matmul shape logic with broadcasted batch-prefix handling:
+  - Supports rank-2+ operands.
+  - Validates inner dimension compatibility (`K`) and right-aligned broadcastability of leading batch dims.
+- Added CPU coverage for:
+  - 2D matmul forward numerics.
+  - Batched matmul with batch-prefix broadcasting.
+  - Backward gradients for `sum(matmul(a,b))` wrt both operands.
+- Strengthened permute-backward coverage with a weighted test (`sum(permute(x) * w)`) so gradient routing correctness depends on inverse-axis mapping, not just permutation-invariant sums.

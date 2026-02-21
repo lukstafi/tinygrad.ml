@@ -144,6 +144,36 @@ let test_permute_cpu () =
     [| 1.0; 4.0; 2.0; 5.0; 3.0; 6.0 |]
     (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c ap)
 
+let test_matmul_cpu () =
+  let a =
+    Tinygrad_ml.Tensor.reshape
+      (Tinygrad_ml.Tensor.from_array [| 1.0; 2.0; 3.0; 4.0 |])
+      [| 2; 2 |]
+  in
+  let b =
+    Tinygrad_ml.Tensor.reshape
+      (Tinygrad_ml.Tensor.from_array [| 5.0; 6.0; 7.0; 8.0 |])
+      [| 2; 2 |]
+  in
+  let c = Tinygrad_ml.Tensor.matmul a b in
+  check_array ~msg:"matmul 2d"
+    [| 19.0; 22.0; 43.0; 50.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c c);
+  let b_batched =
+    Tinygrad_ml.Tensor.reshape
+      (Tinygrad_ml.Tensor.from_array
+         [|
+           1.0; 0.0; 0.0; 1.0;
+           2.0; 0.0; 0.0; 2.0;
+           0.0; 1.0; 1.0; 0.0;
+         |])
+      [| 3; 2; 2 |]
+  in
+  let c_batched = Tinygrad_ml.Tensor.matmul a b_batched in
+  check_array ~msg:"matmul broadcast batch prefix"
+    [| 1.0; 2.0; 3.0; 4.0; 2.0; 4.0; 6.0; 8.0; 2.0; 1.0; 4.0; 3.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c c_batched)
+
 let test_noncontiguous_axis_reductions_cpu () =
   let a =
     Tinygrad_ml.Tensor.reshape
@@ -283,6 +313,47 @@ let test_backward_permute_cpu () =
     [| 1.0; 1.0; 1.0; 1.0; 1.0; 1.0 |]
     (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c dx)
 
+let test_backward_permute_weighted_cpu () =
+  let x =
+    Tinygrad_ml.Tensor.reshape
+      (Tinygrad_ml.Tensor.from_array [| 1.0; 2.0; 3.0; 4.0; 5.0; 6.0 |])
+      [| 2; 3 |]
+  in
+  let w =
+    Tinygrad_ml.Tensor.reshape
+      (Tinygrad_ml.Tensor.from_array [| 10.0; 20.0; 30.0; 40.0; 50.0; 60.0 |])
+      [| 3; 2 |]
+  in
+  let xp = Tinygrad_ml.Tensor.permute x [| 1; 0 |] in
+  let y = Tinygrad_ml.Tensor.mul xp w in
+  let grads = Tinygrad_ml.Tensor.backward ~wrt:[ x ] y in
+  let _, dx = List.hd grads in
+  check_array ~msg:"d/dx sum(permute(x) * w)"
+    [| 10.0; 30.0; 50.0; 20.0; 40.0; 60.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c dx)
+
+let test_backward_matmul_cpu () =
+  let a =
+    Tinygrad_ml.Tensor.reshape
+      (Tinygrad_ml.Tensor.from_array [| 1.0; 2.0; 3.0; 4.0 |])
+      [| 2; 2 |]
+  in
+  let b =
+    Tinygrad_ml.Tensor.reshape
+      (Tinygrad_ml.Tensor.from_array [| 5.0; 6.0; 7.0; 8.0 |])
+      [| 2; 2 |]
+  in
+  let y = Tinygrad_ml.Tensor.matmul a b in
+  let grads = Tinygrad_ml.Tensor.backward ~wrt:[ a; b ] y in
+  let _, da = List.nth grads 0 in
+  let _, db = List.nth grads 1 in
+  check_array ~msg:"d/da sum(matmul(a,b))"
+    [| 11.0; 15.0; 11.0; 15.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c da);
+  check_array ~msg:"d/db sum(matmul(a,b))"
+    [| 4.0; 4.0; 6.0; 6.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c db)
+
 let test_backward_unary_extra_cpu () =
   let x = Tinygrad_ml.Tensor.from_array [| 0.0; 1.0; 2.0 |] in
   let y = Tinygrad_ml.Tensor.exp2 x in
@@ -317,6 +388,7 @@ let () =
   test_reshape_and_axis_reductions_cpu ();
   test_expand_cpu ();
   test_permute_cpu ();
+  test_matmul_cpu ();
   test_noncontiguous_axis_reductions_cpu ();
   test_reshape_preserves_realize_cache_cpu ();
   test_backward_basic_cpu ();
@@ -324,5 +396,7 @@ let () =
   test_backward_reductions_cpu ();
   test_backward_expand_cpu ();
   test_backward_permute_cpu ();
+  test_backward_permute_weighted_cpu ();
+  test_backward_matmul_cpu ();
   test_backward_unary_extra_cpu ();
   Printf.printf "test_cpu: ok\n"
