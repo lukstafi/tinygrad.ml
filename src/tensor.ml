@@ -4,6 +4,12 @@ type node =
   | Binop of Uop.binop * t * t
   | Unop of Uop.unop * t
   | Reshape of t
+  | Reduce_axis of {
+      op : Uop.reduce_op;
+      axes : int list;
+      src : t;
+      device_hint : Runtime.device option;
+    }
 
 and t = {
   shape : int array;
@@ -72,56 +78,6 @@ let find_cache dev entries =
 let update_cache dev buf entries =
   (dev, buf) :: List.filter (fun (d, _) -> d <> dev) entries
 
-let rec lower_to_expr_with_shape t current_shape inputs =
-  match t.node with
-  | Data b ->
-      let b_view =
-        if Array.length b.shape = Array.length current_shape
-           && Array.for_all2 ( = ) b.shape current_shape
-        then b
-        else { b with shape = Array.copy current_shape }
-      in
-      let idx = List.length inputs in
-      (Uop.Input idx, inputs @ [ b_view ])
-  | Const c -> (Uop.Const c, inputs)
-  | Binop (op, lhs, rhs) ->
-      let lhs_expr, inputs = lower_to_expr_with_shape lhs current_shape inputs in
-      let rhs_expr, inputs = lower_to_expr_with_shape rhs current_shape inputs in
-      (Uop.Binop (op, lhs_expr, rhs_expr), inputs)
-  | Unop (op, x) ->
-      let x_expr, inputs = lower_to_expr_with_shape x current_shape inputs in
-      (Uop.Unop (op, x_expr), inputs)
-  | Reshape inner ->
-      lower_to_expr_with_shape inner current_shape inputs
-
-let lower_to_expr t inputs =
-  lower_to_expr_with_shape t t.shape inputs
-
-let realize_result ?device t =
-  let dev = Option.value device ~default:(Runtime.default_device ()) in
-  match find_cache dev t.cache with
-  | Some b -> Ok b
-  | None ->
-      let computed =
-        match t.node with
-        | Data buf -> Ok buf
-        | _ ->
-            let expr, inputs = lower_to_expr t [] in
-            Runtime.run_expr ~device:dev ~expr ~inputs ~shape:t.shape
-      in
-      (match computed with
-      | Ok buf ->
-          t.cache <- update_cache dev buf t.cache;
-          Ok buf
-      | Error _ as e -> e)
-
-let realize ?device t =
-  match realize_result ?device t with
-  | Ok b -> b
-  | Error msg -> failwith msg
-
-let to_array ?device t = Buffer.to_array (realize ?device t)
-
 let normalize_axes (shape : int array) (axes : int list) =
   let ndim = Array.length shape in
   let normalized =
@@ -144,7 +100,73 @@ let compute_strides (shape : int array) =
   done;
   strides
 
-let reduce_axis_host_data ?device ~(axes : int list) ~(op : Uop.reduce_op) t =
+let rec lower_to_expr_with_shape ~device t current_shape inputs =
+  match t.node with
+  | Data b ->
+      let b_view =
+        if Array.length b.shape = Array.length current_shape
+           && Array.for_all2 ( = ) b.shape current_shape
+        then b
+        else { b with shape = Array.copy current_shape }
+      in
+      let idx = List.length inputs in
+      (Uop.Input idx, inputs @ [ b_view ])
+  | Const c -> (Uop.Const c, inputs)
+  | Binop (op, lhs, rhs) ->
+      let lhs_expr, inputs = lower_to_expr_with_shape ~device lhs current_shape inputs in
+      let rhs_expr, inputs = lower_to_expr_with_shape ~device rhs current_shape inputs in
+      (Uop.Binop (op, lhs_expr, rhs_expr), inputs)
+  | Unop (op, x) ->
+      let x_expr, inputs = lower_to_expr_with_shape ~device x current_shape inputs in
+      (Uop.Unop (op, x_expr), inputs)
+  | Reshape inner ->
+      lower_to_expr_with_shape ~device inner current_shape inputs
+  | Reduce_axis _ ->
+      let b : Buffer.t = realize ~device t in
+      let b_view =
+        if Array.length b.shape = Array.length current_shape
+           && Array.for_all2 ( = ) b.shape current_shape
+        then b
+        else { b with shape = Array.copy current_shape }
+      in
+      let idx = List.length inputs in
+      (Uop.Input idx, inputs @ [ b_view ])
+
+and lower_to_expr ~device t inputs =
+  lower_to_expr_with_shape ~device t t.shape inputs
+
+and realize_result ?device t =
+  let dev = Option.value device ~default:(Runtime.default_device ()) in
+  match find_cache dev t.cache with
+  | Some b -> Ok b
+  | None ->
+      let computed =
+        match t.node with
+        | Data buf -> Ok buf
+        | Reduce_axis { op; axes; src; device_hint } ->
+            let reduce_dev = Option.value device ~default:(Option.value device_hint ~default:dev) in
+            let out_shape, out = reduce_axis_host_data ~device:reduce_dev ~axes ~op src in
+            let b = Buffer.create out_shape in
+            Array.iteri (fun i v -> b.data.{i} <- v) out;
+            Ok b
+        | _ ->
+            let expr, inputs = lower_to_expr ~device:dev t [] in
+            Runtime.run_expr ~device:dev ~expr ~inputs ~shape:t.shape
+      in
+      (match computed with
+      | Ok buf ->
+          t.cache <- update_cache dev buf t.cache;
+          Ok buf
+      | Error _ as e -> e)
+
+and realize ?device t =
+  match realize_result ?device t with
+  | Ok b -> b
+  | Error msg -> failwith msg
+
+and to_array ?device t = Buffer.to_array (realize ?device t)
+
+and reduce_axis_host_data ?device ~(axes : int list) ~(op : Uop.reduce_op) t =
   let in_arr = to_array ?device t in
   let in_shape = t.shape in
   let ndim = Array.length in_shape in
@@ -181,23 +203,28 @@ let reduce_axis_host ?device ~(axes : int list) ~(op : Uop.reduce_op) t =
   let out_shape, out = reduce_axis_host_data ?device ~axes ~op t in
   from_flat_array_with_shape out_shape out
 
-let sum_axis ?device ~axes t = reduce_axis_host ?device ~axes ~op:Uop.Sum t
-let max_axis ?device ~axes t = reduce_axis_host ?device ~axes ~op:Uop.Max t
+let reduce_axis ?device ~(axes : int list) ~(op : Uop.reduce_op) t =
+  let ndim = Array.length t.shape in
+  let axes = if axes = [] then List.init ndim Fun.id else normalize_axes t.shape axes in
+  let out_shape = Array.mapi (fun i d -> if List.mem i axes then 1 else d) t.shape in
+  match device with
+  | Some dev -> reduce_axis_host ~device:dev ~axes ~op t
+  | None -> { shape = out_shape; node = Reduce_axis { op; axes; src = t; device_hint = None }; cache = [] }
+
+let sum_axis ?device ~axes t = reduce_axis ?device ~axes ~op:Uop.Sum t
+let max_axis ?device ~axes t = reduce_axis ?device ~axes ~op:Uop.Max t
 let mean_axis ?device ~axes t =
-  let out_shape, out_sum = reduce_axis_host_data ?device ~axes ~op:Uop.Sum t in
+  let s = sum_axis ?device ~axes t in
   let ndim = Array.length t.shape in
   let axes = if axes = [] then List.init ndim Fun.id else normalize_axes t.shape axes in
   let factor = List.fold_left (fun acc a -> acc * t.shape.(a)) 1 axes in
   if factor = 0 then failwith "mean_axis: invalid zero reduction factor";
-  let inv = 1.0 /. float_of_int factor in
-  for i = 0 to Array.length out_sum - 1 do
-    out_sum.(i) <- out_sum.(i) *. inv
-  done;
-  from_flat_array_with_shape out_shape out_sum
+  let inv = full_with_shape s.shape (1.0 /. float_of_int factor) in
+  mul s inv
 
 let reduce_scalar_result ?device ~(op : Uop.reduce_op) t =
   let dev = Option.value device ~default:(Runtime.default_device ()) in
-  let expr, inputs = lower_to_expr t [] in
+  let expr, inputs = lower_to_expr ~device:dev t [] in
   match Runtime.run_reduce ~device:dev ~op ~expr ~inputs ~shape:t.shape with
   | Ok v -> v
   | Error msg -> failwith msg
@@ -218,6 +245,7 @@ let children t =
   | Binop (_, a, b) -> [ a; b ]
   | Unop (_, x) -> [ x ]
   | Reshape x -> [ x ]
+  | Reduce_axis { src; _ } -> [ src ]
 
 let rec contains_phys x = function
   | [] -> false
@@ -248,10 +276,65 @@ let add_grad grads t g =
   in
   grads := loop [] !grads
 
+let reduce_out_shape src_shape axes =
+  Array.mapi (fun i d -> if List.mem i axes then 1 else d) src_shape
+
+let reduce_output_index ~src_shape ~reduced_shape ~axes idx =
+  let ndim = Array.length src_shape in
+  let src_strides = compute_strides src_shape in
+  let reduced_strides = compute_strides reduced_shape in
+  let is_reduced = Array.make ndim false in
+  List.iter (fun a -> is_reduced.(a) <- true) axes;
+  let rem = ref idx in
+  let reduced_idx = ref 0 in
+  for d = 0 to ndim - 1 do
+    let coord = !rem / src_strides.(d) in
+    rem := !rem mod src_strides.(d);
+    if not is_reduced.(d) then
+      reduced_idx := !reduced_idx + (coord * reduced_strides.(d))
+  done;
+  !reduced_idx
+
+let sum_reduce_grad ~upstream ~src_shape ~axes =
+  let reduced_shape = reduce_out_shape src_shape axes in
+  let up_arr = to_array upstream in
+  if Array.length upstream.shape <> Array.length reduced_shape
+     || not (Array.for_all2 ( = ) upstream.shape reduced_shape)
+  then
+    invalid_arg
+      (Printf.sprintf "sum_reduce_grad: upstream shape %s does not match reduced shape %s"
+         (Buffer.pp_shape upstream.shape) (Buffer.pp_shape reduced_shape));
+  let out = Array.make (Buffer.numel src_shape) 0.0 in
+  for idx = 0 to Array.length out - 1 do
+    let ridx = reduce_output_index ~src_shape ~reduced_shape ~axes idx in
+    out.(idx) <- up_arr.(ridx)
+  done;
+  from_flat_array_with_shape src_shape out
+
+let max_reduce_grad ~upstream ~src ~reduced ~axes =
+  let src_shape = src.shape in
+  let reduced_shape = reduce_out_shape src_shape axes in
+  let src_arr = to_array src in
+  let red_arr = to_array reduced in
+  let up_arr = to_array upstream in
+  let out = Array.make (Array.length src_arr) 0.0 in
+  for idx = 0 to Array.length src_arr - 1 do
+    let ridx = reduce_output_index ~src_shape ~reduced_shape ~axes idx in
+    if src_arr.(idx) = red_arr.(ridx) then out.(idx) <- up_arr.(ridx)
+  done;
+  from_flat_array_with_shape src_shape out
+
 let local_grads t upstream =
   match t.node with
   | Data _ | Const _ -> []
   | Reshape x -> [ (x, reshape upstream x.shape) ]
+  | Reduce_axis { op; axes; src; _ } ->
+      let grad_src =
+        match op with
+        | Uop.Sum -> sum_reduce_grad ~upstream ~src_shape:src.shape ~axes
+        | Uop.Max -> max_reduce_grad ~upstream ~src ~reduced:t ~axes
+      in
+      [ (src, grad_src) ]
   | Unop (Uop.Neg, x) -> [ (x, neg upstream) ]
   | Unop (Uop.Sqrt, x) ->
       let two = full_with_shape t.shape 2.0 in

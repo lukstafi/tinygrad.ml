@@ -106,3 +106,21 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
   - Simple SGD loop minimizing `sum((x-target)^2)` from `[0,0]` toward `[3,5]`.
 - Fixed a backend-independent codegen bug exposed by autograd constants:
   - C/CUDA/Metal expression renderers now emit valid float literals (`1.0f` instead of invalid `1f`).
+
+## Codex round 13 decisions
+
+- Added lazy axis-reduction nodes to Tensor AST:
+  - New `Reduce_axis` node carries `op`, normalized `axes`, and source tensor.
+  - `sum_axis` / `max_axis` now keep reductions in the graph when `?device` is omitted.
+  - Preserved previous eager behavior for explicit `?device` calls to keep backend-forward tests stable.
+- Extended realization/lowering to handle reduction nodes:
+  - `realize_result` can realize `Reduce_axis` nodes directly via host reduction path.
+  - Expression lowering treats `Reduce_axis` children as realized input buffers when reductions appear inside larger elementwise expressions.
+- Implemented reverse-mode gradients through axis reductions:
+  - `sum_axis` backward: broadcast upstream gradient back to source shape.
+  - `max_axis` backward: mask-based gradient routing to argmax positions.
+  - `mean_axis` backward now works via existing chain rule (`sum_axis * constant`).
+- Added CPU autograd coverage for reduction paths:
+  - `d/dx sum_axis(x*x, axis=1) = 2x`
+  - `d/dx max_axis(x, axis=1)` mask for unique maxima
+  - `d/dx mean_axis(x, axis=1)` equal split factor (`1/axis_size`).

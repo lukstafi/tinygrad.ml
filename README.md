@@ -16,7 +16,7 @@ It intentionally does **not** reproduce Python frontend convenience APIs.
 - Ops: elementwise `add`, `sub`, `mul`, `neg`, `sqrt`, `reciprocal`,
   compiled scalar reductions `sum`, `max`, `mean`,
   plus Tensor-layer axis reductions (`sum_axis`, `max_axis`, `mean_axis`), `reshape`,
-  and a minimal reverse-mode autograd API (`backward`).
+  and a minimal reverse-mode autograd API (`backward`) including axis-reduction gradients.
 - Execution model:
   - tensors build lazy expression trees,
   - realization lowers a tree to `Uop.expr`,

@@ -171,6 +171,28 @@ let test_gradient_descent_cpu () =
   if Float.abs ((!x).(1) -. 5.0) > 0.05 then
     failwith (Printf.sprintf "gd x[1]: expected ~5.0, got %.8f" (!x).(1))
 
+let test_backward_reductions_cpu () =
+  let x =
+    Tinygrad_ml.Tensor.reshape
+      (Tinygrad_ml.Tensor.from_array [| 1.0; 2.0; 3.0; 4.0; 5.0; 6.0 |])
+      [| 2; 3 |]
+  in
+  let y = Tinygrad_ml.Tensor.sum_axis ~axes:[ 1 ] (Tinygrad_ml.Tensor.mul x x) in
+  let grads = Tinygrad_ml.Tensor.backward ~wrt:[ x ] y in
+  let _, dx = List.hd grads in
+  check_array ~msg:"d/dx sum_axis(x*x,axis=1)" [| 2.0; 4.0; 6.0; 8.0; 10.0; 12.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c dx);
+  let y_max = Tinygrad_ml.Tensor.max_axis ~axes:[ 1 ] x in
+  let grads_max = Tinygrad_ml.Tensor.backward ~wrt:[ x ] y_max in
+  let _, dx_max = List.hd grads_max in
+  check_array ~msg:"d/dx max_axis(x,axis=1) unique maxima mask" [| 0.0; 0.0; 1.0; 0.0; 0.0; 1.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c dx_max);
+  let y_mean = Tinygrad_ml.Tensor.mean_axis ~axes:[ 1 ] x in
+  let grads_mean = Tinygrad_ml.Tensor.backward ~wrt:[ x ] y_mean in
+  let _, dx_mean = List.hd grads_mean in
+  check_array ~msg:"d/dx mean_axis(x,axis=1)" [| 1.0 /. 3.0; 1.0 /. 3.0; 1.0 /. 3.0; 1.0 /. 3.0; 1.0 /. 3.0; 1.0 /. 3.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c dx_mean)
+
 let () =
   test_add_mul_cpu ();
   test_sub_neg_sqrt_reciprocal_cpu ();
@@ -183,4 +205,5 @@ let () =
   test_reshape_preserves_realize_cache_cpu ();
   test_backward_basic_cpu ();
   test_gradient_descent_cpu ();
+  test_backward_reductions_cpu ();
   Printf.printf "test_cpu: ok\n"
