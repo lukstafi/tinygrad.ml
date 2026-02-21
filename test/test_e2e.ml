@@ -485,7 +485,28 @@ let test_partial_mean () =
   check_float "partial mean row0" (List.nth result 0) 5.0 1e-5;
   check_float "partial mean row1" (List.nth result 1) 25.0 1e-5
 
-(* ---- Test 20: CUDA backend registration ---- *)
+(* ---- Test 20: Multi-axis reduction ---- *)
+let test_multi_axis_reduction () =
+  Printf.printf "\n=== Multi-Axis Reduction ===\n%!";
+  Schedule.reset ();
+  (* [2;3;4] tensor, sum along axes [0;1] → [1;1;4]
+     Data layout (row-major):
+       slice 0: [[1,2,3,4], [5,6,7,8], [9,10,11,12]]
+       slice 1: [[13,14,15,16], [17,18,19,20], [21,22,23,24]]
+     col sums: [1+5+9+13+17+21, 2+6+10+14+18+22, 3+7+11+15+19+23, 4+8+12+16+20+24]
+             = [66, 72, 78, 84] *)
+  let data = List.init 24 (fun i -> Float.of_int (i + 1)) in
+  let a = Tensor.from_float_list [2; 3; 4] data in
+  let s = Tensor.sum ~axes:[0; 1] a in
+  check "multi-axis sum shape" (s.shape = [1; 1; 4]);
+  let result = Tensor.to_float_list s in
+  check "multi-axis sum length" (List.length result = 4);
+  check_float "multi-axis sum col0" (List.nth result 0) 66.0 1e-4;
+  check_float "multi-axis sum col1" (List.nth result 1) 72.0 1e-4;
+  check_float "multi-axis sum col2" (List.nth result 2) 78.0 1e-4;
+  check_float "multi-axis sum col3" (List.nth result 3) 84.0 1e-4
+
+(* ---- Test 21: CUDA backend registration ---- *)
 let test_cuda_backend () =
   Printf.printf "\n=== CUDA Backend ===\n%!";
   (* Verify CUDA backend is recognized and returns a module *)
@@ -536,6 +557,7 @@ let () =
   run_test "tensor_mean" test_tensor_mean;
   run_test "partial_reduction" test_partial_reduction;
   run_test "partial_mean" test_partial_mean;
+  run_test "multi_axis_reduction" test_multi_axis_reduction;
   run_test "cuda_backend" test_cuda_backend;
   Printf.printf "\n============================\n%!";
   Printf.printf "Results: %d passed, %d failed\n%!" !pass_count !fail_count;

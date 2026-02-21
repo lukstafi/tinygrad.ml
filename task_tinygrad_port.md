@@ -54,3 +54,11 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Scheduler takes `~output_shape`** instead of just `~numel`, enabling stride computation for partial reductions from the tensor's shape + reduce axes.
 - **TINYGRAD_DEBUG env var**: `realize.ml` prints generated kernel source when `TINYGRAD_DEBUG=1`.
 - Total tests: 96 unit + 98 e2e = 194 all passing.
+
+## Claude round 8 decisions
+
+- **Explicit src_shape in Axis_arg**: Extended `Axis_arg` from `(axes, reduce_op)` to `(axes, reduce_op, src_shape)`. Tensor.reduce now passes `~src_shape:t.shape` into the UOp, and the scheduler extracts the explicit source shape directly from the `Axis_arg` instead of heuristically reconstructing it from the output shape and reduce axes. This makes multi-axis reductions correct by construction.
+- **Multi-axis reduction support**: With explicit `src_shape`, multi-axis reductions (e.g., `sum(axes=[0;1])` on `[2;3;4]`) now work correctly. The `inner_numel` calculation in `lower_reduce_kernel` uses the max reduced axis from `src_shape` to determine stride layout.
+- **Updated gradient.ml**: Pattern match on `Axis_arg` updated to 3-tuple.
+- **Fallback preserved**: If `src_shape` is empty (legacy UOps), the scheduler falls back to heuristic inference from buffer sizes, maintaining backward compatibility.
+- Total tests: 96 unit + 104 e2e = 200 all passing.

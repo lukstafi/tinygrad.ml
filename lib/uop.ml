@@ -17,7 +17,7 @@ type arg =
   | Tuple_int of int list  (** generic int tuple *)
   | Shape of int list      (** shape argument for movement ops *)
   | Pad_arg of (int * int) list  (** padding: list of (before, after) *)
-  | Axis_arg of int list * Ops.t  (** reduce axis: (axes, reduce_op) *)
+  | Axis_arg of int list * Ops.t * int list  (** reduce axis: (axes, reduce_op, src_shape) *)
   | Func_name of string    (** function name for SINK *)
 
 (** A UOp node. Fields are mutable only for the hash-consing cache;
@@ -50,7 +50,7 @@ let hash_arg = function
   | Tuple_int l -> Hashtbl.hash l
   | Shape l -> Hashtbl.hash ("shape", l)
   | Pad_arg l -> Hashtbl.hash ("pad", l)
-  | Axis_arg (axes, op) -> Hashtbl.hash ("axis", axes, Ops.to_int op)
+  | Axis_arg (axes, op, _src_shape) -> Hashtbl.hash ("axis", axes, Ops.to_int op)
   | Func_name s -> Hashtbl.hash ("fn", s)
 
 (** Create a UOp. Hash-consed: identical (op, dtype, src, arg) returns same node. *)
@@ -153,9 +153,9 @@ let pad u padding = create ~arg:(Pad_arg padding) Ops.PAD u.dtype [u]
 let shrink u bounds = create ~arg:(Pad_arg bounds) Ops.SHRINK u.dtype [u]
 let flip u axes = create ~arg:(Int_list axes) Ops.FLIP u.dtype [u]
 
-(** Reduce *)
-let reduce_axis u op axes =
-  create ~arg:(Axis_arg (axes, op)) Ops.REDUCE_AXIS u.dtype [u]
+(** Reduce — stores (axes, reduce_op, src_shape) in the arg *)
+let reduce_axis ?(src_shape=[]) u op axes =
+  create ~arg:(Axis_arg (axes, op, src_shape)) Ops.REDUCE_AXIS u.dtype [u]
 
 (** CONTIGUOUS *)
 let contiguous u = create Ops.CONTIGUOUS u.dtype [u]
@@ -241,7 +241,7 @@ let rec pp_uop u =
     | Tuple_int l -> Printf.sprintf " arg=(%s)" (String.concat "," (List.map string_of_int l))
     | Shape l -> Printf.sprintf " shape=(%s)" (String.concat "," (List.map string_of_int l))
     | Pad_arg l -> Printf.sprintf " pad=[%s]" (String.concat ";" (List.map (fun (a,b) -> Printf.sprintf "%d,%d" a b) l))
-    | Axis_arg (axes, op) -> Printf.sprintf " axes=(%s,%s)" (String.concat "," (List.map string_of_int axes)) (Ops.to_string op)
+    | Axis_arg (axes, op, _) -> Printf.sprintf " axes=(%s,%s)" (String.concat "," (List.map string_of_int axes)) (Ops.to_string op)
     | Func_name s -> Printf.sprintf " fn=%S" s
   in
   Printf.sprintf "%%%d = %s %s%s%s" u.id (Ops.to_string u.op) (Dtype.to_string u.dtype) src_str arg_str

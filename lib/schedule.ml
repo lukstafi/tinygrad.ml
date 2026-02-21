@@ -348,29 +348,27 @@ let create_schedule ?(device="CPU") ~output_shape (roots : Uop.t list) : exec_it
        (e.g., mean() = sum() * (1/n) where sum is an inner REDUCE_AXIS). *)
     List.iter (fun (u : Uop.t) ->
       if u.op = Ops.REDUCE_AXIS && get_realized u.id = None then begin
-        let reduce_op, source_uop, reduce_axes = match u.arg with
-          | Uop.Axis_arg (axes, op) -> (op, List.hd u.src, axes)
+        let reduce_op, source_uop, reduce_axes, src_shape = match u.arg with
+          | Uop.Axis_arg (axes, op, src_shape) -> (op, List.hd u.src, axes, src_shape)
           | _ -> failwith "REDUCE_AXIS missing Axis_arg"
         in
-        (* Compute input_numel from source buffer sizes (per-node, not root-level) *)
+        (* Compute input_numel: prefer explicit src_shape, fall back to buffer scanning *)
         let reduce_input_numel =
-          let inferred = infer_reduce_input_numel source_uop in
-          if inferred > 0 then inferred else numel
+          if src_shape <> [] then Helpers.prod src_shape
+          else
+            let inferred = infer_reduce_input_numel source_uop in
+            if inferred > 0 then inferred else numel
         in
-        (* Reconstruct input shape from output_shape and reduce_axes.
-           output_shape has 1 in reduced dims; input_shape restores the original sizes.
-           reduce_extent_per_axis = input_numel / output_numel tells us the total
-           reduction factor. For single-axis, that's the size of the reduced dim. *)
-        let reduce_extent = reduce_input_numel / (max 1 numel) in
-        let input_shape = List.mapi (fun i d ->
-          if List.mem i reduce_axes then
-            (* This dim was reduced to 1; restore to reduce_extent for single-axis.
-               For multi-axis, distribute proportionally — but for now, support
-               single-axis cleanly and multi-axis as flat. *)
-            if List.length reduce_axes = 1 then reduce_extent
-            else d * reduce_extent  (* approximate *)
-          else d
-        ) output_shape in
+        (* Use explicit src_shape when available, otherwise reconstruct heuristically *)
+        let input_shape =
+          if src_shape <> [] then src_shape
+          else
+            let reduce_extent = reduce_input_numel / (max 1 numel) in
+            List.mapi (fun i d ->
+              if List.mem i reduce_axes then reduce_extent
+              else d
+            ) output_shape
+        in
         let output_numel = numel in
         let kname = fresh_kernel_name () in
         match lower_reduce_kernel ~device ~input_numel:reduce_input_numel ~output_numel ~reduce_axes ~input_shape ~kname reduce_op source_uop u with

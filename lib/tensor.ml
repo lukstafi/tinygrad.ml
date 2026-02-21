@@ -153,7 +153,7 @@ let reduce op (t : t) axes =
   let new_shape = List.mapi (fun i s ->
     if List.mem i axes then 1 else s
   ) t.shape in
-  let uop = Uop.reduce_axis t.uop op axes in
+  let uop = Uop.reduce_axis ~src_shape:t.shape t.uop op axes in
   { t with uop; shape = new_shape }
 
 let sum ?(axes=[]) (t : t) =
