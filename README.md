@@ -35,6 +35,7 @@ It intentionally does **not** reproduce Python frontend convenience APIs.
 - `src/cpu_c_backend.ml`: fused-kernel compile+execute with kernel caching.
 - `src/cuda_backend.ml`: default CUDA stub backend.
 - `experimental/cuda_backend_real.ml`: real `cudajit` CUDA backend implementation (staged for optional integration).
+  - includes fused expression kernels and reduction kernel execution (`sum`/`max`) when wired in.
 - `src/runtime.ml`: device selection and backend dispatch.
 
 ## Build and test

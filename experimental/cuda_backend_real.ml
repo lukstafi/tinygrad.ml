@@ -32,8 +32,7 @@ type compiled_kernel = {
 
 let kernel_cache : (string, compiled_kernel) Hashtbl.t = Hashtbl.create 64
 
-let compile_expr ~(expr : Uop.expr) ~(ninputs : int) ~(length : int) =
-  let spec = Cuda_renderer.render_expr_kernel ~expr ~ninputs ~length in
+let compile_spec (spec : Program_spec.t) =
   match Hashtbl.find_opt kernel_cache spec.expression_key with
   | Some compiled -> (spec, compiled)
   | None ->
@@ -47,11 +46,26 @@ let compile_expr ~(expr : Uop.expr) ~(ninputs : int) ~(length : int) =
       Hashtbl.replace kernel_cache spec.expression_key compiled;
       (spec, compiled)
 
+let compile_expr ~(expr : Uop.expr) ~(ninputs : int) ~(length : int) =
+  let spec = Cuda_renderer.render_expr_kernel ~expr ~ninputs ~length in
+  compile_spec spec
+
+let compile_reduce ~(op : Uop.reduce_op) ~(expr : Uop.expr) ~(ninputs : int) ~(length : int) =
+  let spec = Cuda_renderer.render_reduce_kernel ~op ~expr ~ninputs ~length in
+  compile_spec spec
+
 let validate_inputs ~shape (inputs : Buffer.t list) =
   List.for_all
     (fun (b : Buffer.t) ->
       Array.length b.shape = Array.length shape
       && Array.for_all2 ( = ) b.shape shape)
+    inputs
+
+let alloc_input_devs (inputs : Buffer.t list) =
+  List.map
+    (fun (b : Buffer.t) ->
+      let host = Bigarray.genarray_of_array1 b.data in
+      Cu.Deviceptr.alloc_and_memcpy host)
     inputs
 
 let run_expr ~(expr : Uop.expr) ~(inputs : Buffer.t list) ~(shape : int array) =
@@ -66,13 +80,7 @@ let run_expr ~(expr : Uop.expr) ~(inputs : Buffer.t list) ~(shape : int array) =
       else
         let spec, compiled = compile_expr ~expr ~ninputs:(List.length inputs) ~length:n in
         ignore spec;
-        let input_devs =
-          List.map
-            (fun (b : Buffer.t) ->
-              let host = Bigarray.genarray_of_array1 b.data in
-              Cu.Deviceptr.alloc_and_memcpy host)
-            inputs
-        in
+        let input_devs = alloc_input_devs inputs in
         let out_dev = Cu.Deviceptr.mem_alloc ~size_in_bytes:(n * 4) in
         Fun.protect
           ~finally:(fun () ->
@@ -96,16 +104,36 @@ let run_expr ~(expr : Uop.expr) ~(inputs : Buffer.t list) ~(shape : int array) =
 
 let run_reduce ~(op : Uop.reduce_op) ~(expr : Uop.expr) ~(inputs : Buffer.t list)
     ~(shape : int array) =
-  match run_expr ~expr ~inputs ~shape with
-  | Error _ as e -> e
-  | Ok out ->
-      let arr = Buffer.to_array out in
-      let v =
-        match op with
-        | Uop.Sum -> Array.fold_left ( +. ) 0.0 arr
-        | Uop.Max -> Array.fold_left max Float.neg_infinity arr
-      in
-      Ok v
+  if not (validate_inputs ~shape inputs) then
+    Error "input shape mismatch in cuda run_reduce"
+  else
+    try
+      ignore (ensure_context ());
+      let n = Buffer.numel shape in
+      if n = 0 then Ok (match op with Uop.Sum -> 0.0 | Uop.Max -> Float.neg_infinity)
+      else
+        let spec, compiled = compile_reduce ~op ~expr ~ninputs:(List.length inputs) ~length:n in
+        ignore spec;
+        let input_devs = alloc_input_devs inputs in
+        let out_dev = Cu.Deviceptr.mem_alloc ~size_in_bytes:4 in
+        Fun.protect
+          ~finally:(fun () ->
+            Cu.Deviceptr.mem_free out_dev;
+            List.iter Cu.Deviceptr.mem_free input_devs)
+          (fun () ->
+            let args =
+              Cu.Stream.Tensor out_dev
+              :: (List.map (fun d -> Cu.Stream.Tensor d) input_devs)
+              @ [ Cu.Stream.Int n ]
+            in
+            Cu.Stream.launch_kernel compiled.func ~grid_dim_x:1 ~block_dim_x:1
+              ~shared_mem_bytes:0 Cu.Stream.no_stream args;
+            Cu.Context.synchronize ();
+            let out = Buffer.create [| 1 |] in
+            let out_host = Bigarray.genarray_of_array1 out.data in
+            Cu.Deviceptr.memcpy_D_to_H ~dst:out_host ~src:out_dev ();
+            Ok out.data.{0})
+    with exn -> Error (Printexc.to_string exn)
 
 let run_binop ~(op : Uop.binop) ~(a : Buffer.t) ~(b : Buffer.t) =
   if not (Buffer.same_shape a b) then

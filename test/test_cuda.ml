@@ -31,6 +31,15 @@ let test_chain_cuda () =
   let d_realized = Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cuda d in
   check_array ~msg:"cuda chain d=(a+b)*a" [| 11.0; 44.0; 99.0; 176.0 |] d_realized
 
+let test_reductions_cuda () =
+  let x = Tinygrad_ml.Tensor.from_array [| 2.0; 7.0; 5.0; 4.0 |] in
+  let s = Tinygrad_ml.Tensor.sum ~device:Tinygrad_ml.Runtime.Cuda x in
+  check_close ~msg:"cuda sum" 18.0 s;
+  let m = Tinygrad_ml.Tensor.max ~device:Tinygrad_ml.Runtime.Cuda x in
+  check_close ~msg:"cuda max" 7.0 m;
+  let mean = Tinygrad_ml.Tensor.mean ~device:Tinygrad_ml.Runtime.Cuda x in
+  check_close ~msg:"cuda mean" 4.5 mean
+
 let run_or_skip () =
   match Tinygrad_ml.Cuda_backend.available () with
   | Error msg ->
@@ -39,6 +48,7 @@ let run_or_skip () =
   | Ok () ->
       test_matches_cpu ();
       test_chain_cuda ();
+      test_reductions_cuda ();
       Printf.printf "test_cuda: ok\n%!"
 
 let () = run_or_skip ()

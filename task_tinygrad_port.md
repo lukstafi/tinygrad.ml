@@ -47,3 +47,9 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - Added reduction coverage to tests:
   - `test/test_cpu.ml`: CPU `sum`/`max`/`mean`.
   - `test/test_metal.ml`: Metal `sum`/`max`/`mean` (runtime-skipped if Metal unavailable).
+
+## Codex round 7 decisions
+
+- Upgraded staged CUDA backend (`experimental/cuda_backend_real.ml`) to execute reductions on GPU with dedicated CUDA reduction kernels (`run_reduce`), instead of reducing on host after `run_expr`.
+- Added CUDA reduction kernel rendering (`src/cuda_renderer.ml`: `render_reduce_kernel`) with expression-keyed kernel caching shared through existing compile path.
+- Extended CUDA tests (`test/test_cuda.ml`) with `sum`/`max`/`mean` checks (automatically skipped when CUDA backend is unavailable in current environment).
