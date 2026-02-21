@@ -173,7 +173,7 @@ let lower_reduce_kernel ~device ~input_numel ~output_numel ~reduce_axes ~input_s
   | None ->
     let all_uops = Uop.toposort1 source_uop in
     let input_buffers = List.filter_map (fun (u : Uop.t) ->
-      if u.op = Ops.BUFFER then
+      if u.op = Ops.BUFFER || (u.op = Ops.REDUCE_AXIS && get_realized u.id <> None) then
         match get_realized u.id with
         | Some dbuf -> Some (u.id, dbuf)
         | None -> None
@@ -443,7 +443,15 @@ let create_schedule ?(device="CPU") ~output_shape (roots : Uop.t list) : exec_it
               else d
             ) output_shape
         in
-        let output_numel = numel in
+        (* Compute per-node output_numel from its own shape, not root numel.
+           The output shape has 1 in each reduced axis, original size elsewhere. *)
+        let output_numel =
+          if src_shape <> [] then
+            List.fold_left (fun acc (i, d) ->
+              acc * (if List.mem i reduce_axes then 1 else d)
+            ) 1 (List.mapi (fun i d -> (i, d)) src_shape)
+          else numel
+        in
         let kname = fresh_kernel_name () in
         match lower_reduce_kernel ~device ~input_numel:reduce_input_numel ~output_numel ~reduce_axes ~input_shape ~kname reduce_op source_uop u with
         | Some (kernel_uops, param_bufs, out_buf) ->

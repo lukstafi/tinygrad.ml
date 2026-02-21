@@ -70,3 +70,10 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Added non-contiguous multi-axis reduction test**: `sum(axes=[0;2])` on `[2;3;4]` → `[1;3;1]` with expected values `[68, 100, 132]`.
 - **Added fused expression reduction test**: `sum(sqrt((a+b)*a))` verifies expression evaluation inside reduction loop.
 - Total tests: 96 unit + 110 e2e = 206 all passing.
+
+## Claude round 10 decisions
+
+- **Per-node output_numel for chained reductions**: Each `REDUCE_AXIS` node now computes its own `output_numel` from its `src_shape` and `reduce_axes`, instead of reusing the root tensor's numel. This fixes chained reductions like `sum(sum(x, axis=2), axis=0)` where intermediate output shapes differ from the final shape.
+- **Realized REDUCE_AXIS as reduction inputs**: `lower_reduce_kernel` now scans for realized `REDUCE_AXIS` nodes (not just `BUFFER` nodes) as input sources, allowing reductions to chain through realized intermediate results.
+- **Added chained reduction test**: `sum(axis=2)` then `sum(axis=0)` on `[2;3;4]` → `[1;3;1]` verifying that intermediate `[2;3;1]` is correctly used as input to the second reduction.
+- Total tests: 96 unit + 115 e2e = 211 all passing.
