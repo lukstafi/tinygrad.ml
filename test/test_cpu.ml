@@ -113,6 +113,26 @@ let test_reshape_and_axis_reductions_cpu () =
   check_array ~msg:"mean_axis axis=1" [| 2.5; 6.5 |]
     (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c mean)
 
+let test_expand_cpu () =
+  let a =
+    Tinygrad_ml.Tensor.reshape
+      (Tinygrad_ml.Tensor.from_array [| 2.0; 3.0; 4.0 |])
+      [| 3; 1 |]
+  in
+  let a_exp = Tinygrad_ml.Tensor.expand a [| 3; 2 |] in
+  check_array ~msg:"expand forward"
+    [| 2.0; 2.0; 3.0; 3.0; 4.0; 4.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c a_exp);
+  let b =
+    Tinygrad_ml.Tensor.reshape
+      (Tinygrad_ml.Tensor.from_array [| 1.0; 10.0; 1.0; 10.0; 1.0; 10.0 |])
+      [| 3; 2 |]
+  in
+  let prod = Tinygrad_ml.Tensor.mul a_exp b in
+  check_array ~msg:"expand in expression"
+    [| 2.0; 20.0; 3.0; 30.0; 4.0; 40.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c prod)
+
 let test_noncontiguous_axis_reductions_cpu () =
   let a =
     Tinygrad_ml.Tensor.reshape
@@ -220,6 +240,25 @@ let test_backward_reductions_cpu () =
   check_array ~msg:"reduce_axis intermediate backward" [| 1.0; 1.0; 1.0; 1.0; 1.0; 1.0 |]
     (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c dx_expr)
 
+let test_backward_expand_cpu () =
+  let x =
+    Tinygrad_ml.Tensor.reshape
+      (Tinygrad_ml.Tensor.from_array [| 3.0; 4.0 |])
+      [| 2; 1 |]
+  in
+  let y = Tinygrad_ml.Tensor.expand x [| 2; 3 |] in
+  let grads = Tinygrad_ml.Tensor.backward ~wrt:[ x ] y in
+  let _, dx = List.hd grads in
+  check_array ~msg:"d/dx sum(expand(x))"
+    [| 3.0; 3.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c dx);
+  let sq = Tinygrad_ml.Tensor.mul y y in
+  let grads2 = Tinygrad_ml.Tensor.backward ~wrt:[ x ] sq in
+  let _, dx2 = List.hd grads2 in
+  check_array ~msg:"d/dx sum(expand(x)^2)"
+    [| 18.0; 24.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c dx2)
+
 let test_backward_unary_extra_cpu () =
   let x = Tinygrad_ml.Tensor.from_array [| 0.0; 1.0; 2.0 |] in
   let y = Tinygrad_ml.Tensor.exp2 x in
@@ -252,10 +291,12 @@ let () =
   test_fused_reductions_cpu ();
   test_kernel_cache_for_fused_expr ();
   test_reshape_and_axis_reductions_cpu ();
+  test_expand_cpu ();
   test_noncontiguous_axis_reductions_cpu ();
   test_reshape_preserves_realize_cache_cpu ();
   test_backward_basic_cpu ();
   test_gradient_descent_cpu ();
   test_backward_reductions_cpu ();
+  test_backward_expand_cpu ();
   test_backward_unary_extra_cpu ();
   Printf.printf "test_cpu: ok\n"

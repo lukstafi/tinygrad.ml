@@ -4,6 +4,7 @@ type node =
   | Binop of Uop.binop * t * t
   | Unop of Uop.unop * t
   | Reshape of t
+  | Expand of t
   | Reduce_axis of {
       op : Uop.reduce_op;
       axes : int list;
@@ -47,6 +48,9 @@ let assert_same_shape a b =
          (Buffer.pp_shape a.shape)
          (Buffer.pp_shape b.shape))
 
+let same_shape_arrays (a : int array) (b : int array) =
+  Array.length a = Array.length b && Array.for_all2 ( = ) a b
+
 let binop op a b =
   assert_same_shape a b;
   { shape = Array.copy a.shape; node = Binop (op, a, b); cache = [] }
@@ -74,6 +78,21 @@ let reshape t new_shape =
       t.cache
   in
   { shape = Array.copy new_shape; node = Reshape t; cache }
+
+let expand t new_shape =
+  if Array.length t.shape <> Array.length new_shape then
+    invalid_arg
+      (Printf.sprintf "expand: rank mismatch %s -> %s"
+         (Buffer.pp_shape t.shape) (Buffer.pp_shape new_shape));
+  Array.iteri
+    (fun i d ->
+      let s = t.shape.(i) in
+      if s <> 1 && s <> d then
+        invalid_arg
+          (Printf.sprintf "expand: dim %d incompatible (%d -> %d), expected source dim 1 or %d"
+             i s d d))
+    new_shape;
+  { shape = Array.copy new_shape; node = Expand t; cache = [] }
 
 let find_cache dev entries =
   List.find_map (fun (d, b) -> if d = dev then Some b else None) entries
@@ -103,6 +122,36 @@ let compute_strides (shape : int array) =
   done;
   strides
 
+let expand_host_data ~(src_arr : float array) ~(src_shape : int array) ~(out_shape : int array) =
+  let ndim = Array.length src_shape in
+  if Array.length out_shape <> ndim then
+    invalid_arg
+      (Printf.sprintf "expand_host_data: rank mismatch %s -> %s"
+         (Buffer.pp_shape src_shape) (Buffer.pp_shape out_shape));
+  Array.iteri
+    (fun i out_d ->
+      let src_d = src_shape.(i) in
+      if src_d <> 1 && src_d <> out_d then
+        invalid_arg
+          (Printf.sprintf "expand_host_data: incompatible dim %d (%d -> %d)"
+             i src_d out_d))
+    out_shape;
+  let src_strides = compute_strides src_shape in
+  let out_strides = compute_strides out_shape in
+  let out = Array.make (Buffer.numel out_shape) 0.0 in
+  for out_idx = 0 to Array.length out - 1 do
+    let rem = ref out_idx in
+    let src_idx = ref 0 in
+    for d = 0 to ndim - 1 do
+      let coord = !rem / out_strides.(d) in
+      rem := !rem mod out_strides.(d);
+      let src_coord = if src_shape.(d) = 1 then 0 else coord in
+      src_idx := !src_idx + (src_coord * src_strides.(d))
+    done;
+    out.(out_idx) <- src_arr.(!src_idx)
+  done;
+  out
+
 let rec lower_to_expr_with_shape ~device t current_shape inputs =
   match t.node with
   | Data b ->
@@ -124,7 +173,7 @@ let rec lower_to_expr_with_shape ~device t current_shape inputs =
       (Uop.Unop (op, x_expr), inputs)
   | Reshape inner ->
       lower_to_expr_with_shape ~device inner current_shape inputs
-  | Reduce_axis _ ->
+  | Expand _ | Reduce_axis _ ->
       let b : Buffer.t = realize ~device t in
       let b_view =
         if Array.length b.shape = Array.length current_shape
@@ -146,6 +195,12 @@ and realize_result ?device t =
       let computed =
         match t.node with
         | Data buf -> Ok buf
+        | Expand src ->
+            let src_arr = to_array ~device:dev src in
+            let out = expand_host_data ~src_arr ~src_shape:src.shape ~out_shape:t.shape in
+            let b = Buffer.create t.shape in
+            Array.iteri (fun i v -> b.data.{i} <- v) out;
+            Ok b
         | Reduce_axis { op; axes; src; device_hint } ->
             let reduce_dev = Option.value device ~default:(Option.value device_hint ~default:dev) in
             let out_shape, out = reduce_axis_host_data ~device:reduce_dev ~axes ~op src in
@@ -248,6 +303,7 @@ let children t =
   | Binop (_, a, b) -> [ a; b ]
   | Unop (_, x) -> [ x ]
   | Reshape x -> [ x ]
+  | Expand x -> [ x ]
   | Reduce_axis { src; _ } -> [ src ]
 
 let rec contains_phys x = function
@@ -342,6 +398,14 @@ let local_grads t upstream =
   match t.node with
   | Data _ | Const _ -> []
   | Reshape x -> [ (x, reshape upstream x.shape) ]
+  | Expand x ->
+      let expanded_axes = ref [] in
+      for i = 0 to Array.length x.shape - 1 do
+        if x.shape.(i) = 1 && t.shape.(i) > 1 then expanded_axes := i :: !expanded_axes
+      done;
+      let axes = List.rev !expanded_axes in
+      let g = if axes = [] then upstream else sum_axis ~axes upstream in
+      [ (x, if same_shape_arrays g.shape x.shape then g else reshape g x.shape) ]
   | Reduce_axis { op; axes; src; _ } ->
       let grad_src =
         match op with

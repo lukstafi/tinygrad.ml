@@ -149,3 +149,17 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - Added CPU coverage for both forward and backward behavior:
   - forward numerics for `exp2`, `log2`, `sin`
   - gradient checks for `sum(exp2(x))`, `sum(log2(x))`, and `sum(sin(x))`.
+
+## Codex round 16 decisions
+
+- Added lazy `Expand` movement op to Tensor AST:
+  - New `Expand` node with shape validation (`source dim` must be `1` or equal to target dim).
+  - `Tensor.expand` API added for explicit broadcasting-style expansion.
+- Implemented host realization for `Expand`:
+  - Added stride-based `expand_host_data` to materialize expanded buffers correctly for arbitrary expanded axes.
+  - Lowering treats `Expand` like `Reduce_axis` (realize and pass as kernel input), preserving current backend simplicity.
+- Added `Expand` autograd rule:
+  - Backward reduces upstream gradient over expanded axes (transpose of broadcast), then reshapes to source shape when needed.
+- Added CPU tests:
+  - Forward: `expand` values and `expand` used as intermediate node in elementwise expressions.
+  - Backward: `d/dx sum(expand(x))` and `d/dx sum(expand(x)^2)`.
