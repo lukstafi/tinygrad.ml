@@ -130,11 +130,18 @@ let lower_to_kernel ~device ~numel ~kname (root : Uop.t) : (Uop.t list * Device.
     let loop_bound = Uop.const_int Dtype.int32 numel in
     let i = Uop.range loop_bound [0; 0] in
 
-    (* Map realized UOp IDs to their PARAM → INDEX → LOAD chain *)
+    (* Map realized UOp IDs to their PARAM → INDEX → LOAD chain.
+       For buffers smaller than numel (e.g., reduction results expanded via
+       broadcast), compute a broadcast index: idx / (numel / buf_size). *)
     let buf_id_to_load : (int, Uop.t) Hashtbl.t = Hashtbl.create 16 in
-    List.iteri (fun idx (buf_id, _dbuf) ->
+    List.iteri (fun idx (buf_id, dbuf) ->
       let param = List.nth input_params idx in
-      let indexed = Uop.index param i in
+      let idx_expr =
+        if dbuf.Device.size < numel && dbuf.Device.size > 0 then
+          if dbuf.Device.size = 1 then Uop.const_int Dtype.int32 0
+          else Uop.idiv i (Uop.const_int Dtype.int32 (numel / dbuf.Device.size))
+        else i in
+      let indexed = Uop.index param idx_expr in
       let loaded = Uop.load indexed in
       Hashtbl.replace buf_id_to_load buf_id loaded
     ) input_buffers;
@@ -203,9 +210,14 @@ let lower_reduce_kernel ~device ~input_numel ~output_numel ~reduce_axes ~input_s
       let i = Uop.range loop_bound [0; 0] in
 
       let buf_id_to_load : (int, Uop.t) Hashtbl.t = Hashtbl.create 16 in
-      List.iteri (fun idx (buf_id, _dbuf) ->
+      List.iteri (fun idx (buf_id, dbuf) ->
         let param = List.nth input_params idx in
-        let indexed = Uop.index param i in
+        let idx_expr =
+          if dbuf.Device.size < input_numel && dbuf.Device.size > 0 then
+            if dbuf.Device.size = 1 then Uop.const_int Dtype.int32 0
+            else Uop.idiv i (Uop.const_int Dtype.int32 (input_numel / dbuf.Device.size))
+          else i in
+        let indexed = Uop.index param idx_expr in
         let loaded = Uop.load indexed in
         Hashtbl.replace buf_id_to_load buf_id loaded
       ) input_buffers;
@@ -349,9 +361,18 @@ let lower_reduce_kernel ~device ~input_numel ~output_numel ~reduce_axes ~input_s
       in
 
       let buf_id_to_load : (int, Uop.t) Hashtbl.t = Hashtbl.create 16 in
-      List.iteri (fun idx (buf_id, _dbuf) ->
+      List.iteri (fun idx (buf_id, dbuf) ->
         let param = List.nth input_params idx in
-        let indexed = Uop.index param flat_idx in
+        let idx_expr =
+          if dbuf.Device.size < input_numel && dbuf.Device.size > 0 then
+            if dbuf.Device.size = 1 then Uop.const_int Dtype.int32 0
+            else if dbuf.Device.size = output_numel then
+              (* Buffer matches output shape — index by outer loop var *)
+              o
+            else
+              Uop.idiv flat_idx (Uop.const_int Dtype.int32 (input_numel / dbuf.Device.size))
+          else flat_idx in
+        let indexed = Uop.index param idx_expr in
         let loaded = Uop.load indexed in
         Hashtbl.replace buf_id_to_load buf_id loaded
       ) input_buffers;

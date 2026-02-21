@@ -59,6 +59,9 @@ let grad_for_op (ctx : Uop.t) (ret : Uop.t) : Uop.t option list =
     [None; None]
   | Ops.NEG ->
     [Some (Uop.neg ctx)]
+  | Ops.TRUNC ->
+    (* d/dx trunc(x) = 0 (step function, not differentiable) *)
+    [Some (Uop.const ctx.dtype 0.0)]
   | Ops.CONTIGUOUS ->
     [Some ctx]
   | Ops.RESHAPE ->
@@ -104,6 +107,34 @@ let grad_for_op (ctx : Uop.t) (ret : Uop.t) : Uop.t option list =
       | _ -> []
     in
     [Some (Uop.permute ctx inv_axes)]
+  | Ops.PAD ->
+    (* gradient of pad is shrink back to the original (unpadded) region *)
+    let padding = match ret.arg with Uop.Pad_arg p -> p | _ -> [] in
+    let src = List.hd ret.src in
+    let src_shape = match src.arg with Uop.Shape s -> s | _ -> [] in
+    if padding <> [] && src_shape <> [] then
+      let shrink_bounds = List.map2 (fun (before, _after) dim ->
+        (before, before + dim)
+      ) padding src_shape in
+      [Some (Uop.shrink ctx shrink_bounds)]
+    else
+      [Some ctx]
+  | Ops.SHRINK ->
+    (* gradient of shrink is pad with zeros back to the original shape *)
+    let bounds = match ret.arg with Uop.Pad_arg b -> b | _ -> [] in
+    let src = List.hd ret.src in
+    let src_shape = match src.arg with Uop.Shape s -> s | _ -> [] in
+    if bounds <> [] && src_shape <> [] then
+      let padding = List.map2 (fun (lo, hi) dim ->
+        (lo, dim - hi)
+      ) bounds src_shape in
+      [Some (Uop.pad ctx padding)]
+    else
+      [Some ctx]
+  | Ops.FLIP ->
+    (* gradient of flip is flip again — self-inverse *)
+    let axes = match ret.arg with Uop.Int_list a -> a | _ -> [] in
+    [Some (Uop.flip ctx axes)]
   | Ops.REDUCE_AXIS ->
     let reduce_op, reduce_axes, src_shape = match ret.arg with
       | Uop.Axis_arg (axes, op, src_shape) -> (op, axes, src_shape)
@@ -119,8 +150,8 @@ let grad_for_op (ctx : Uop.t) (ret : Uop.t) : Uop.t option list =
       else
         [Some ctx]  (* fallback: no shape info *)
     | Ops.MAX ->
-      (* d/dx max(x, axes) = gradient flows only to argmax positions.
-         Simplified: use indicator mask (x == max_expanded) * ctx_expanded. *)
+      (* d/dx max(x, axes) = gradient flows to argmax positions, split among ties.
+         mask = (x == max_expanded), tie_count = sum(mask, axes), grad = mask * ctx / tie_count *)
       if src_shape <> [] then begin
         let out_shape = List.mapi (fun i d ->
           if List.mem i reduce_axes then 1 else d) src_shape in
@@ -128,8 +159,15 @@ let grad_for_op (ctx : Uop.t) (ret : Uop.t) : Uop.t option list =
         let ret_expanded = Uop.expand (Uop.reshape ret out_shape) src_shape in
         let x = List.hd ret.src in
         let mask = Uop.cmpeq x ret_expanded in
+        (* Cast bool mask to float for arithmetic *)
+        let mask_f = Uop.cast ctx.dtype mask in
+        (* Count ties per reduced slice: sum of 1s where mask is true *)
+        let tie_count = Uop.reduce_axis ~src_shape mask_f Ops.ADD reduce_axes in
+        let tie_count_expanded = Uop.expand (Uop.reshape tie_count out_shape) src_shape in
+        (* Normalize: gradient / tie_count at each argmax position *)
         let zero = Uop.const ctx.dtype 0.0 in
-        [Some (Uop.where_ mask ctx_expanded zero)]
+        let normalized_ctx = Uop.mul ctx_expanded (Uop.recip tie_count_expanded) in
+        [Some (Uop.where_ mask normalized_ctx zero)]
       end else
         [Some ctx]
     | _ -> [Some ctx]
