@@ -51,13 +51,20 @@ end
 module CPU : Backend = struct
   let device_name = "CPU"
 
+  (* Keep Bigarrays alive so the GC doesn't collect the backing memory
+     while we still hold raw pointers to it. *)
+  let ba_roots : (nativeint, (char, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Array1.t) Hashtbl.t = Hashtbl.create 64
+
   let alloc nbytes =
     let ba = Bigarray.Array1.create Bigarray.char Bigarray.c_layout nbytes in
     Bigarray.Array1.fill ba '\000';
     let p = bigarray_start array1 ba in
-    raw_address_of_ptr (to_voidp p)
+    let addr = raw_address_of_ptr (to_voidp p) in
+    Hashtbl.replace ba_roots addr ba;
+    addr
 
-  let free _ptr = ()  (* GC handles it for simplicity *)
+  let free ptr =
+    Hashtbl.remove ba_roots ptr
 
   let copyin dst_ptr src =
     let n = Bigarray.Array1.dim src in
