@@ -669,6 +669,81 @@ let test_gradient_descent () =
   check_float "gd x[0]→3.0" (List.nth !x_vals 0) 3.0 0.05;
   check_float "gd x[1]→5.0" (List.nth !x_vals 1) 5.0 0.05
 
+(* ---- Test 25b: Max reduction backward ---- *)
+let test_gradient_max_reduce () =
+  Printf.printf "\n=== Gradient (max reduce) ===\n%!";
+  Schedule.reset ();
+  (* x = [1, 5, 3, 2], max(x) = 5 (at index 1, no ties)
+     d/dx max(x) should be [0, 1, 0, 0] *)
+  let x = Tensor.from_float_list [4] [1.0; 5.0; 3.0; 2.0] in
+  let loss = Tensor.max_ x in
+  let grads = Tensor.backward loss [x] in
+  let (_, dx) = List.hd grads in
+  let dx_vals = Tensor.to_float_list dx in
+  check "max grad length" (List.length dx_vals = 4);
+  check_float "max grad[0]" (List.nth dx_vals 0) 0.0 1e-5;
+  check_float "max grad[1]" (List.nth dx_vals 1) 1.0 1e-5;
+  check_float "max grad[2]" (List.nth dx_vals 2) 0.0 1e-5;
+  check_float "max grad[3]" (List.nth dx_vals 3) 0.0 1e-5;
+
+  (* Test with ties: x = [3, 7, 7, 2], max(x) = 7 (indices 1 and 2 tied)
+     With tie-splitting, grad should be [0, 0.5, 0.5, 0] *)
+  Schedule.reset ();
+  let x2 = Tensor.from_float_list [4] [3.0; 7.0; 7.0; 2.0] in
+  let loss2 = Tensor.max_ x2 in
+  let grads2 = Tensor.backward loss2 [x2] in
+  let (_, dx2) = List.hd grads2 in
+  let dx2_vals = Tensor.to_float_list dx2 in
+  check_float "max tie grad[0]" (List.nth dx2_vals 0) 0.0 1e-5;
+  check_float "max tie grad[1]" (List.nth dx2_vals 1) 0.5 1e-5;
+  check_float "max tie grad[2]" (List.nth dx2_vals 2) 0.5 1e-5;
+  check_float "max tie grad[3]" (List.nth dx2_vals 3) 0.0 1e-5;
+
+  (* Test partial-axis max: x = [[1,4,2],[5,3,6]], max(axis=1)
+     → [[4],[6]]. Grad for [4] goes to position [0,1], grad for [6] goes to [1,2] *)
+  Schedule.reset ();
+  let x3 = Tensor.from_float_list [2; 3] [1.0; 4.0; 2.0; 5.0; 3.0; 6.0] in
+  let y3 = Tensor.max_ ~axes:[1] x3 in  (* [2;1] = [4, 6] *)
+  let loss3 = Tensor.sum y3 in
+  let grads3 = Tensor.backward loss3 [x3] in
+  let (_, dx3) = List.hd grads3 in
+  let dx3_vals = Tensor.to_float_list dx3 in
+  check "partial max grad length" (List.length dx3_vals = 6);
+  check_float "partial max grad[0]" (List.nth dx3_vals 0) 0.0 1e-5;
+  check_float "partial max grad[1]" (List.nth dx3_vals 1) 1.0 1e-5;
+  check_float "partial max grad[2]" (List.nth dx3_vals 2) 0.0 1e-5;
+  check_float "partial max grad[3]" (List.nth dx3_vals 3) 0.0 1e-5;
+  check_float "partial max grad[4]" (List.nth dx3_vals 4) 0.0 1e-5;
+  check_float "partial max grad[5]" (List.nth dx3_vals 5) 1.0 1e-5
+
+(* ---- Test 25c: Gradient through sqrt and log2 ---- *)
+let test_gradient_unary () =
+  Printf.printf "\n=== Gradient (unary ops) ===\n%!";
+  Schedule.reset ();
+  (* d/dx sum(sqrt(x)) at x=[1,4,9] = [1/(2*1), 1/(2*2), 1/(2*3)] = [0.5, 0.25, 0.1667] *)
+  let x = Tensor.from_float_list [3] [1.0; 4.0; 9.0] in
+  let y = Tensor.sqrt_ x in
+  let loss = Tensor.sum y in
+  let grads = Tensor.backward loss [x] in
+  let (_, dx) = List.hd grads in
+  let dx_vals = Tensor.to_float_list dx in
+  check_float "sqrt grad[0]" (List.nth dx_vals 0) 0.5 1e-5;
+  check_float "sqrt grad[1]" (List.nth dx_vals 1) 0.25 1e-5;
+  check_float "sqrt grad[2]" (List.nth dx_vals 2) (1.0 /. 6.0) 1e-4;
+
+  (* d/dx sum(exp2(x)) at x=[0,1,2] = [ln2, 2*ln2, 4*ln2] *)
+  Schedule.reset ();
+  let x2 = Tensor.from_float_list [3] [0.0; 1.0; 2.0] in
+  let y2 = Tensor.exp2_ x2 in
+  let loss2 = Tensor.sum y2 in
+  let grads2 = Tensor.backward loss2 [x2] in
+  let (_, dx2) = List.hd grads2 in
+  let dx2_vals = Tensor.to_float_list dx2 in
+  let ln2 = Float.log 2.0 in
+  check_float "exp2 grad[0]" (List.nth dx2_vals 0) (1.0 *. ln2) 1e-5;
+  check_float "exp2 grad[1]" (List.nth dx2_vals 1) (2.0 *. ln2) 1e-5;
+  check_float "exp2 grad[2]" (List.nth dx2_vals 2) (4.0 *. ln2) 1e-4
+
 (* ---- Test 26: CUDA backend registration ---- *)
 let test_cuda_backend () =
   Printf.printf "\n=== CUDA Backend ===\n%!";
@@ -727,6 +802,8 @@ let () =
   run_test "gradient" test_gradient;
   run_test "gradient_partial_reduce" test_gradient_partial_reduce;
   run_test "gradient_descent" test_gradient_descent;
+  run_test "gradient_max_reduce" test_gradient_max_reduce;
+  run_test "gradient_unary" test_gradient_unary;
   run_test "cuda_backend" test_cuda_backend;
   Printf.printf "\n============================\n%!";
   Printf.printf "Results: %d passed, %d failed\n%!" !pass_count !fail_count;

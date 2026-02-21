@@ -93,3 +93,12 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Better backward error**: `Tensor.backward` now gives a descriptive `failwith` message instead of `assert` when loss is not scalar.
 - **Partial-axis reduction gradient test**: Verified `d/dx sum(x*x, axis=1)` for `[2;3]` tensor produces correct `2*x` gradients for all 6 elements.
 - Total tests: 96 unit + 139 e2e = 235 all passing.
+
+## Claude round 13 decisions
+
+- **Max reduction gradient tie-splitting**: Fixed `REDUCE_AXIS MAX` gradient to normalize by tie count. When multiple elements share the maximum value, gradient is split equally among them (e.g., `[3,7,7,2]` → `[0, 0.5, 0.5, 0]` instead of `[0, 1, 1, 0]`). Uses `tie_count = sum(mask)` per reduced slice.
+- **Buffer broadcast indexing in kernels**: Fixed a critical bug where realized buffers smaller than the kernel's iteration space were indexed out-of-bounds. Now uses broadcast-aware indexing: scalar buffers use index 0, partial reduction results (size = output_numel) use the outer loop variable, and other mismatched sizes use `idx / (numel / buf_size)`. Affects both elementwise and reduction kernels.
+- **New gradient rules**: Added PAD (shrink back to original region), SHRINK (pad with zeros), FLIP (self-inverse), TRUNC (zero — non-differentiable).
+- **Max reduction backward tests**: Full-reduction max gradient (no ties), tie-splitting test (`[3,7,7,2]` verifying `[0, 0.5, 0.5, 0]`), and partial-axis max gradient (`max(axis=1)` on `[2;3]` tensor).
+- **Unary gradient tests**: `d/dx sum(sqrt(x))` and `d/dx sum(exp2(x))` with analytical verification.
+- Total tests: 96 unit + 161 e2e = 257 all passing.
