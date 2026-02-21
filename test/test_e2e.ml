@@ -1179,7 +1179,101 @@ let test_same_buffer_dual_expand () =
   check_float "dual[4]" (List.nth vals 4) 22.0 1e-6;
   check_float "dual[5]" (List.nth vals 5) 23.0 1e-6
 
-(* ---- Test 42: CUDA backend registration ---- *)
+(* ---- Test 42: Backward after realize (stale lazy_uop regression) ---- *)
+let test_backward_after_realize () =
+  Printf.printf "\n=== Backward After Realize ===\n%!";
+  Schedule.reset ();
+  (* Realize a tensor, then use it in a NEW expression and call backward.
+     This tests that lazy_uop doesn't leak from the realized tensor into
+     newly constructed tensors (the bug codex identified in round 17 review). *)
+  let x = Tensor.from_float_list [3] [1.0; 2.0; 3.0] in
+  let y = Tensor.mul x x in  (* y = x^2 *)
+  let _y_vals = Tensor.to_float_list y in  (* realize y → y.uop becomes BUFFER *)
+  check "y realized" (List.length _y_vals = 3);
+  check_float "y[0]" (List.nth _y_vals 0) 1.0 1e-6;
+  check_float "y[1]" (List.nth _y_vals 1) 4.0 1e-6;
+  check_float "y[2]" (List.nth _y_vals 2) 9.0 1e-6;
+  (* Now build a new expression using the realized y *)
+  let z = Tensor.sum y in  (* sum of realized y *)
+  (* backward on z w.r.t. x should work through the original y graph *)
+  let grads = Tensor.backward z [x] in
+  check "backward after realize grads" (List.length grads = 1);
+  let (_, dx) = List.hd grads in
+  let dx_vals = Tensor.to_float_list dx in
+  (* d/dx sum(x^2) = 2*x = [2, 4, 6] *)
+  check_float "post-realize dx[0]" (List.nth dx_vals 0) 2.0 1e-6;
+  check_float "post-realize dx[1]" (List.nth dx_vals 1) 4.0 1e-6;
+  check_float "post-realize dx[2]" (List.nth dx_vals 2) 6.0 1e-6
+
+(* ---- Test 43: True same-buffer aliasing ---- *)
+let test_same_buffer_aliasing () =
+  Printf.printf "\n=== Same Buffer Aliasing ===\n%!";
+  Schedule.reset ();
+  (* Use the SAME tensor through two different reshape+expand paths in one kernel.
+     x = [2], expanded as rows ([2,1] → [2,3]) AND as cols ([1,2] → [3,2]).
+     But we need matching output shapes, so:
+     x = [6] data, split into x1=[2] and x2=[3].
+     Actually, let's use x=[2] in two different expand paths that both produce [2,3]:
+       path1: reshape([2,1]) → expand([2,3])  -- rows [a, a; b, b; ...wait [2,3] means 2 rows 3 cols
+       path2: reshape([1,2]) → expand([3,2]) -- but different output shape.
+     Better: use x=[2] only once in each of two expressions with same output:
+       a = reshape(x, [2,1]) → expand([2,3])  -- x[0] fills row 0, x[1] fills row 1
+       b = reshape(x, [1,2]) → expand([2,2])  -- only works if expand target matches
+     Simplest: x=[3], used as both addend paths to [3,3]:
+       a = reshape(x, [3,1]) → expand([3,3])  -- each row is same element
+       b = reshape(x, [1,3]) → expand([3,3])  -- each col is same element
+       result = a + b  => outer-sum: result[i,j] = x[i] + x[j] *)
+  let x = Tensor.from_float_list [3] [10.0; 20.0; 30.0] in
+  let a = Tensor.expand (Tensor.reshape x [3; 1]) [3; 3] in
+  let b = Tensor.expand (Tensor.reshape x [1; 3]) [3; 3] in
+  let result = Tensor.add a b in
+  let vals = Tensor.to_float_list result in
+  check "aliasing length" (List.length vals = 9);
+  (* [[20,30,40],[30,40,50],[40,50,60]] *)
+  check_float "alias[0,0]" (List.nth vals 0) 20.0 1e-6;
+  check_float "alias[0,1]" (List.nth vals 1) 30.0 1e-6;
+  check_float "alias[0,2]" (List.nth vals 2) 40.0 1e-6;
+  check_float "alias[1,0]" (List.nth vals 3) 30.0 1e-6;
+  check_float "alias[1,1]" (List.nth vals 4) 40.0 1e-6;
+  check_float "alias[2,2]" (List.nth vals 8) 60.0 1e-6;
+  (* Backward: d/dx sum(a + b) where a and b are both expansions of x.
+     d/dx[i] = sum over j of (d/dx[i] (x[i]+x[j])) + sum over j of (d/dx[i] (x[j]+x[i]))
+     From path a (rows): each x[i] appears in 3 output positions (row i) → gradient 3
+     From path b (cols): each x[j] appears in 3 output positions (col j) → gradient 3
+     Total: d/dx[i] = 3 + 3 = 6 *)
+  let loss = Tensor.sum result in
+  let grads = Tensor.backward loss [x] in
+  check "aliasing grads" (List.length grads = 1);
+  let (_, dx) = List.hd grads in
+  let dx_vals = Tensor.to_float_list dx in
+  check_float "alias dx[0]" (List.nth dx_vals 0) 6.0 1e-6;
+  check_float "alias dx[1]" (List.nth dx_vals 1) 6.0 1e-6;
+  check_float "alias dx[2]" (List.nth dx_vals 2) 6.0 1e-6
+
+(* ---- Test 44: Realize-then-reuse backward regression ---- *)
+let test_realize_reuse_backward () =
+  Printf.printf "\n=== Realize-Reuse Backward ===\n%!";
+  Schedule.reset ();
+  (* Realize x, then compute new expression and backward w.r.t. x.
+     Since x is a leaf (BUFFER), its graph IS just a buffer, so backward
+     should find it as a target directly. *)
+  let x = Tensor.from_float_list [4] [1.0; 2.0; 3.0; 4.0] in
+  let _x_vals = Tensor.to_float_list x in  (* realize x *)
+  check "x realized" (List.length _x_vals = 4);
+  (* New expression using realized x *)
+  let y = Tensor.mul x (Tensor.const_like x 3.0) in  (* y = 3*x *)
+  let loss = Tensor.sum y in
+  let grads = Tensor.backward loss [x] in
+  check "reuse backward grads" (List.length grads = 1);
+  let (_, dx) = List.hd grads in
+  let dx_vals = Tensor.to_float_list dx in
+  (* d/dx sum(3*x) = 3 for each element *)
+  check_float "reuse dx[0]" (List.nth dx_vals 0) 3.0 1e-6;
+  check_float "reuse dx[1]" (List.nth dx_vals 1) 3.0 1e-6;
+  check_float "reuse dx[2]" (List.nth dx_vals 2) 3.0 1e-6;
+  check_float "reuse dx[3]" (List.nth dx_vals 3) 3.0 1e-6
+
+(* ---- Test 45: CUDA backend registration ---- *)
 let test_cuda_backend () =
   Printf.printf "\n=== CUDA Backend ===\n%!";
   (* Verify CUDA backend is recognized and returns a module *)
@@ -1257,6 +1351,9 @@ let () =
   run_test "relu" test_relu;
   run_test "mlp_training" test_mlp_training;
   run_test "same_buffer_dual_expand" test_same_buffer_dual_expand;
+  run_test "backward_after_realize" test_backward_after_realize;
+  run_test "same_buffer_aliasing" test_same_buffer_aliasing;
+  run_test "realize_reuse_backward" test_realize_reuse_backward;
   run_test "cuda_backend" test_cuda_backend;
   Printf.printf "\n============================\n%!";
   Printf.printf "Results: %d passed, %d failed\n%!" !pass_count !fail_count;
