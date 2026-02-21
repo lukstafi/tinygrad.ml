@@ -130,3 +130,12 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Expand + mul forward test**: `expand([1;3] → [2;3]) * [2;3]` verifying broadcast elementwise computation works correctly.
 - **Documented movement op flattening**: Added comment in `rebuild_expr` explaining that PERMUTE/PAD/SHRINK/FLIP pass-through is correct for gradient UOp graphs over flat realized buffers, but would need proper index remapping for general forward computation.
 - Total tests: 96 unit + 221 e2e = 317 all passing.
+
+## Claude round 17 decisions
+
+- **Matmul operation**: Implemented `Tensor.matmul` as decomposed primitive ops matching tinygrad's approach: `a[N,K] @ b[K,M]` → reshape a to `[N,K,1]`, expand to `[N,K,M]`, reshape b to `[1,K,M]`, expand to `[N,K,M]`, elementwise multiply, sum over K (axis=1), reshape to `[N,M]`. This works end-to-end through the existing scheduler/renderer without any new kernel types.
+- **Effective broadcast shape inference**: Added `infer_buffer_effective_shapes` that walks the UOp graph to determine each buffer's effective shape in the kernel's coordinate space. This is essential for matmul where two same-sized buffers (e.g., both `[2,2]`) have different broadcast patterns (`a` expands as `[2,2,1]` while `b` expands as `[1,2,2]`). Without this, the right-alignment heuristic in `broadcast_index` would give incorrect indexing.
+- **Broadcast shape validation**: Added `is_valid_broadcast` checks before calling `broadcast_index`. If the inferred effective shape is incompatible with the kernel's output shape (can happen when a buffer appears in multiple contexts in the DAG), gracefully falls back to the realized shape or ratio heuristic.
+- **Linear layer training test**: End-to-end test training `y = x @ w` via SGD for 100 steps. Learns `w ≈ [2.0, 3.0]` from `x = [[1,0],[0,1],[1,1]]`, `target = [[2],[3],[5]]`. Demonstrates the full forward → matmul → loss → backward → gradient → parameter update pipeline.
+- **Matmul tests**: Forward (2x2), non-square (1x3 @ 3x1, 2x3 @ 3x2), gradient (`d/da sum(a@b)`, `d/db sum(a@b)` with analytical verification).
+- Total tests: 96 unit + 246 e2e = 342 all passing.

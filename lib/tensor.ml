@@ -172,6 +172,32 @@ let mean ?(axes=[]) (t : t) =
   let n_inv = const_like s (1.0 /. Float.of_int n) in
   mul s n_inv
 
+(** Matrix multiply: a[..., N, K] @ b[..., K, M] = c[..., N, M].
+    Implemented via reshape + expand + elementwise mul + sum reduction,
+    matching tinygrad's approach of decomposing matmul into primitive ops. *)
+let matmul (a : t) (b : t) =
+  let a_ndim = List.length a.shape in
+  let b_ndim = List.length b.shape in
+  if a_ndim < 2 || b_ndim < 2 then
+    failwith "matmul: both tensors must be at least 2-D";
+  let n = List.nth a.shape (a_ndim - 2) in
+  let k_a = List.nth a.shape (a_ndim - 1) in
+  let k_b = List.nth b.shape (b_ndim - 2) in
+  let m = List.nth b.shape (b_ndim - 1) in
+  if k_a <> k_b then
+    failwith (Printf.sprintf "matmul: inner dimensions don't match (%d vs %d)" k_a k_b);
+  let k = k_a in
+  (* a: [N, K] → [N, K, 1] → expand [N, K, M] *)
+  let a3 = reshape a [n; k; 1] in
+  let a_exp = expand a3 [n; k; m] in
+  (* b: [K, M] → [1, K, M] → expand [N, K, M] *)
+  let b3 = reshape b [1; k; m] in
+  let b_exp = expand b3 [n; k; m] in
+  (* Elementwise multiply, then reduce over K (axis=1) *)
+  let prod = mul a_exp b_exp in
+  let summed = sum ~axes:[1] prod in  (* [N, 1, M] *)
+  reshape summed [n; m]  (* [N, M] *)
+
 (** Contiguous *)
 let contiguous (t : t) =
   let uop = Uop.contiguous t.uop in
