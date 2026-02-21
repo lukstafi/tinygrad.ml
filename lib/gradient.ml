@@ -80,7 +80,7 @@ let grad_for_op (ctx : Uop.t) (ret : Uop.t) : Uop.t option list =
     in
     [Some (Uop.permute ctx inv_axes)]
   | Ops.REDUCE_AXIS ->
-    let reduce_op = match ret.arg with Uop.Axis_arg (_, op) -> op | _ -> Ops.ADD in
+    let reduce_op = match ret.arg with Uop.Axis_arg (_, op, _) -> op | _ -> Ops.ADD in
     begin match reduce_op with
     | Ops.ADD -> [Some ctx]  (* broadcast back *)
     | _ -> [Some ctx]  (* simplified *)
