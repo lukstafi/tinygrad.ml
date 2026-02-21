@@ -1,6 +1,6 @@
 type binop = Add | Sub | Mul
 
-type unop = Neg | Sqrt | Reciprocal
+type unop = Neg | Sqrt | Reciprocal | Exp2 | Log2 | Sin
 
 type reduce_op = Sum | Max
 
@@ -24,6 +24,9 @@ let unop_to_name = function
   | Neg -> "neg"
   | Sqrt -> "sqrt"
   | Reciprocal -> "reciprocal"
+  | Exp2 -> "exp2"
+  | Log2 -> "log2"
+  | Sin -> "sin"
 
 let reduce_op_to_name = function
   | Sum -> "sum"

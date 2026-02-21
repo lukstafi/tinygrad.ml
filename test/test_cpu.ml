@@ -29,6 +29,18 @@ let test_sub_neg_sqrt_reciprocal_cpu () =
     [| 1.0 /. sqrt 3.0; 1.0 /. sqrt 5.0; 1.0 /. sqrt 7.0; 1.0 /. 3.0 |]
     out
 
+let test_exp2_log2_sin_cpu () =
+  let x = Tinygrad_ml.Tensor.from_array [| 0.0; 1.0; 2.0 |] in
+  let exp2_out = Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c (Tinygrad_ml.Tensor.exp2 x) in
+  check_array ~msg:"exp2" [| 1.0; 2.0; 4.0 |] exp2_out;
+  let y = Tinygrad_ml.Tensor.from_array [| 1.0; 2.0; 4.0 |] in
+  let log2_out = Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c (Tinygrad_ml.Tensor.log2 y) in
+  check_array ~msg:"log2" [| 0.0; 1.0; 2.0 |] log2_out;
+  let pi = Float.pi in
+  let z = Tinygrad_ml.Tensor.from_array [| 0.0; pi /. 2.0; pi |] in
+  let sin_out = Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c (Tinygrad_ml.Tensor.sin z) in
+  check_array ~msg:"sin" [| 0.0; 1.0; 0.0 |] sin_out
+
 let test_sum_cpu () =
   let x = Tinygrad_ml.Tensor.from_array [| 1.0; 2.0; 3.0 |] in
   let s = Tinygrad_ml.Tensor.sum ~device:Tinygrad_ml.Runtime.Cpu_c x in
@@ -208,9 +220,33 @@ let test_backward_reductions_cpu () =
   check_array ~msg:"reduce_axis intermediate backward" [| 1.0; 1.0; 1.0; 1.0; 1.0; 1.0 |]
     (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c dx_expr)
 
+let test_backward_unary_extra_cpu () =
+  let x = Tinygrad_ml.Tensor.from_array [| 0.0; 1.0; 2.0 |] in
+  let y = Tinygrad_ml.Tensor.exp2 x in
+  let grads = Tinygrad_ml.Tensor.backward ~wrt:[ x ] y in
+  let _, dx = List.hd grads in
+  let ln2 = Float.log 2.0 in
+  check_array ~msg:"d/dx sum(exp2(x))" [| 1.0 *. ln2; 2.0 *. ln2; 4.0 *. ln2 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c dx);
+  let z = Tinygrad_ml.Tensor.from_array [| 1.0; 2.0; 4.0 |] in
+  let w = Tinygrad_ml.Tensor.log2 z in
+  let grads2 = Tinygrad_ml.Tensor.backward ~wrt:[ z ] w in
+  let _, dz = List.hd grads2 in
+  check_array ~msg:"d/dx sum(log2(x))"
+    [| 1.0 /. (1.0 *. ln2); 1.0 /. (2.0 *. ln2); 1.0 /. (4.0 *. ln2) |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c dz);
+  let pi = Float.pi in
+  let s = Tinygrad_ml.Tensor.from_array [| 0.0; pi /. 4.0; pi /. 2.0 |] in
+  let t = Tinygrad_ml.Tensor.sin s in
+  let grads3 = Tinygrad_ml.Tensor.backward ~wrt:[ s ] t in
+  let _, ds = List.hd grads3 in
+  check_array ~msg:"d/dx sum(sin(x))" [| 1.0; Float.sqrt 2.0 /. 2.0; 0.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c ds)
+
 let () =
   test_add_mul_cpu ();
   test_sub_neg_sqrt_reciprocal_cpu ();
+  test_exp2_log2_sin_cpu ();
   test_sum_cpu ();
   test_max_mean_cpu ();
   test_fused_reductions_cpu ();
@@ -221,4 +257,5 @@ let () =
   test_backward_basic_cpu ();
   test_gradient_descent_cpu ();
   test_backward_reductions_cpu ();
+  test_backward_unary_extra_cpu ();
   Printf.printf "test_cpu: ok\n"

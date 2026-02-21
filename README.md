@@ -13,7 +13,7 @@ It intentionally does **not** reproduce Python frontend convenience APIs.
 ## Current scope
 
 - Tensor rank: flat buffers with shape metadata (supports reshape views and axis reductions in Tensor layer).
-- Ops: elementwise `add`, `sub`, `mul`, `neg`, `sqrt`, `reciprocal`,
+- Ops: elementwise `add`, `sub`, `mul`, `neg`, `sqrt`, `reciprocal`, `exp2`, `log2`, `sin`,
   compiled scalar reductions `sum`, `max`, `mean`,
   plus Tensor-layer axis reductions (`sum_axis`, `max_axis`, `mean_axis`), `reshape`,
   and a minimal reverse-mode autograd API (`backward`) including axis-reduction gradients.

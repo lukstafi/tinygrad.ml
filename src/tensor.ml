@@ -59,6 +59,9 @@ let mul a b = binop Uop.Mul a b
 let neg a = unop Uop.Neg a
 let sqrt a = unop Uop.Sqrt a
 let reciprocal a = unop Uop.Reciprocal a
+let exp2 a = unop Uop.Exp2 a
+let log2 a = unop Uop.Log2 a
+let sin a = unop Uop.Sin a
 
 let reshape t new_shape =
   if Buffer.numel new_shape <> numel t then
@@ -354,6 +357,16 @@ let local_grads t upstream =
   | Unop (Uop.Reciprocal, x) ->
       let scale = neg (mul t t) in
       [ (x, mul scale upstream) ]
+  | Unop (Uop.Exp2, x) ->
+      let ln2 = full_with_shape t.shape (Float.log 2.0) in
+      [ (x, mul upstream (mul t ln2)) ]
+  | Unop (Uop.Log2, x) ->
+      let ln2 = full_with_shape x.shape (Float.log 2.0) in
+      [ (x, mul upstream (reciprocal (mul x ln2))) ]
+  | Unop (Uop.Sin, x) ->
+      let half_pi = full_with_shape x.shape (Float.pi /. 2.0) in
+      let cos_x = sin (sub half_pi x) in
+      [ (x, mul upstream cos_x) ]
   | Binop (Uop.Add, a, b) -> [ (a, upstream); (b, upstream) ]
   | Binop (Uop.Sub, a, b) -> [ (a, upstream); (b, neg upstream) ]
   | Binop (Uop.Mul, a, b) -> [ (a, mul upstream b); (b, mul upstream a) ]

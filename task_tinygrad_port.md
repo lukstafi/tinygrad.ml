@@ -135,3 +135,17 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
   - Intermediate reduction expression case (`add(sum_axis(x), 1)`) to exercise `Reduce_axis` as a non-root node in forward/backward paths.
 - Kept approach intentionally AST-host-centric:
   - Reduction backward remains implemented in host OCaml index space for clarity and educational value, instead of compiling extra reduction-gradient kernels.
+
+## Codex round 15 decisions
+
+- Added unary transcendental ops across the expression stack:
+  - `Uop.unop`: added `Exp2`, `Log2`, `Sin`.
+  - Tensor API: added `Tensor.exp2`, `Tensor.log2`, `Tensor.sin`.
+  - Renderers: CPU/CUDA/Metal codegen now emits `exp2*`, `log2*`, `sin*` intrinsics.
+- Extended autograd rules for new unary ops:
+  - `d/dx exp2(x) = exp2(x) * ln(2)`
+  - `d/dx log2(x) = 1 / (x * ln(2))`
+  - `d/dx sin(x) = cos(x)` implemented as `sin(pi/2 - x)` using existing ops.
+- Added CPU coverage for both forward and backward behavior:
+  - forward numerics for `exp2`, `log2`, `sin`
+  - gradient checks for `sum(exp2(x))`, `sum(log2(x))`, and `sum(sin(x))`.

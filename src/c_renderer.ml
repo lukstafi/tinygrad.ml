@@ -11,6 +11,9 @@ let rec render_expr = function
   | Uop.Unop (Uop.Neg, x) -> Printf.sprintf "(-(%s))" (render_expr x)
   | Uop.Unop (Uop.Sqrt, x) -> Printf.sprintf "sqrtf(%s)" (render_expr x)
   | Uop.Unop (Uop.Reciprocal, x) -> Printf.sprintf "(1.0f/(%s))" (render_expr x)
+  | Uop.Unop (Uop.Exp2, x) -> Printf.sprintf "exp2f(%s)" (render_expr x)
+  | Uop.Unop (Uop.Log2, x) -> Printf.sprintf "log2f(%s)" (render_expr x)
+  | Uop.Unop (Uop.Sin, x) -> Printf.sprintf "sinf(%s)" (render_expr x)
 
 let render_expr_kernel ~(expr : Uop.expr) ~(ninputs : int) ~(length : int) : Program_spec.t =
   let expression_key = Uop.expr_to_key expr in
