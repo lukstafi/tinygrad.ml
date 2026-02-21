@@ -174,6 +174,63 @@ let test_matmul_cpu () =
     [| 1.0; 2.0; 3.0; 4.0; 2.0; 4.0; 6.0; 8.0; 2.0; 1.0; 4.0; 3.0 |]
     (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c c_batched)
 
+let test_where_cmp_relu_cpu () =
+  let x = Tinygrad_ml.Tensor.from_array [| -2.0; -0.5; 0.0; 1.5 |] in
+  let z = Tinygrad_ml.Tensor.zeros_like x in
+  let cond = Tinygrad_ml.Tensor.lt z x in
+  check_array ~msg:"lt mask"
+    [| 0.0; 0.0; 0.0; 1.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c cond);
+  let y = Tinygrad_ml.Tensor.where_ cond x z in
+  check_array ~msg:"where relu-like"
+    [| 0.0; 0.0; 0.0; 1.5 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c y);
+  let y_relu = Tinygrad_ml.Tensor.relu x in
+  check_array ~msg:"relu forward"
+    [| 0.0; 0.0; 0.0; 1.5 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c y_relu);
+  let grads = Tinygrad_ml.Tensor.backward ~wrt:[ x ] y_relu in
+  let _, dx = List.hd grads in
+  check_array ~msg:"d/dx sum(relu(x))"
+    [| 0.0; 0.0; 0.0; 1.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c dx)
+
+let test_linear_layer_training_cpu () =
+  let x_data = [| 1.0; 0.0; 0.0; 1.0; 1.0; 1.0 |] in
+  let target_data = [| 2.0; 3.0; 5.0 |] in
+  let lr = 0.05 in
+  let w = ref [| 0.1; 0.1 |] in
+  for _step = 1 to 100 do
+    let x =
+      Tinygrad_ml.Tensor.reshape
+        (Tinygrad_ml.Tensor.from_array x_data)
+        [| 3; 2 |]
+    in
+    let target =
+      Tinygrad_ml.Tensor.reshape
+        (Tinygrad_ml.Tensor.from_array target_data)
+        [| 3; 1 |]
+    in
+    let w_t =
+      Tinygrad_ml.Tensor.reshape
+        (Tinygrad_ml.Tensor.from_array !w)
+        [| 2; 1 |]
+    in
+    let pred = Tinygrad_ml.Tensor.matmul x w_t in
+    let diff = Tinygrad_ml.Tensor.sub pred target in
+    let loss = Tinygrad_ml.Tensor.mean_axis ~axes:[ 0; 1 ] (Tinygrad_ml.Tensor.mul diff diff) in
+    let grads = Tinygrad_ml.Tensor.backward ~wrt:[ w_t ] loss in
+    let _, dw = List.hd grads in
+    let dw_arr = Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c dw in
+    for i = 0 to Array.length !w - 1 do
+      (!w).(i) <- (!w).(i) -. (lr *. dw_arr.(i))
+    done
+  done;
+  if Float.abs ((!w).(0) -. 2.0) > 0.1 then
+    failwith (Printf.sprintf "linear matmul w0: expected ~2.0, got %.8f" (!w).(0));
+  if Float.abs ((!w).(1) -. 3.0) > 0.1 then
+    failwith (Printf.sprintf "linear matmul w1: expected ~3.0, got %.8f" (!w).(1))
+
 let test_noncontiguous_axis_reductions_cpu () =
   let a =
     Tinygrad_ml.Tensor.reshape
@@ -389,10 +446,12 @@ let () =
   test_expand_cpu ();
   test_permute_cpu ();
   test_matmul_cpu ();
+  test_where_cmp_relu_cpu ();
   test_noncontiguous_axis_reductions_cpu ();
   test_reshape_preserves_realize_cache_cpu ();
   test_backward_basic_cpu ();
   test_gradient_descent_cpu ();
+  test_linear_layer_training_cpu ();
   test_backward_reductions_cpu ();
   test_backward_expand_cpu ();
   test_backward_permute_cpu ();

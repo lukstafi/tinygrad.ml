@@ -61,12 +61,26 @@ let unop op a = { shape = Array.copy a.shape; node = Unop (op, a); cache = [] }
 let add a b = binop Uop.Add a b
 let sub a b = binop Uop.Sub a b
 let mul a b = binop Uop.Mul a b
+let lt a b = binop Uop.Lt a b
+let eq a b = binop Uop.Eq a b
+let ne a b = binop Uop.Ne a b
 let neg a = unop Uop.Neg a
 let sqrt a = unop Uop.Sqrt a
 let reciprocal a = unop Uop.Reciprocal a
 let exp2 a = unop Uop.Exp2 a
 let log2 a = unop Uop.Log2 a
 let sin a = unop Uop.Sin a
+
+let where_ cond t f =
+  assert_same_shape cond t;
+  assert_same_shape t f;
+  (* cond is expected to be 0/1 mask (e.g. from comparisons). *)
+  let one = ones_like cond in
+  add (mul cond t) (mul (sub one cond) f)
+
+let relu t =
+  let zero = zeros_like t in
+  where_ (lt zero t) t zero
 
 let reshape t new_shape =
   if Buffer.numel new_shape <> numel t then
@@ -550,6 +564,8 @@ let local_grads t upstream =
   | Binop (Uop.Add, a, b) -> [ (a, upstream); (b, upstream) ]
   | Binop (Uop.Sub, a, b) -> [ (a, upstream); (b, neg upstream) ]
   | Binop (Uop.Mul, a, b) -> [ (a, mul upstream b); (b, mul upstream a) ]
+  | Binop (Uop.Lt, a, b) | Binop (Uop.Eq, a, b) | Binop (Uop.Ne, a, b) ->
+      [ (a, zeros_like a); (b, zeros_like b) ]
 
 let backward ?grad ~wrt output =
   let root_grad =

@@ -1,4 +1,4 @@
-type binop = Add | Sub | Mul
+type binop = Add | Sub | Mul | Lt | Eq | Ne
 
 type unop = Neg | Sqrt | Reciprocal | Exp2 | Log2 | Sin
 
@@ -14,11 +14,17 @@ let binop_to_name = function
   | Add -> "add"
   | Sub -> "sub"
   | Mul -> "mul"
+  | Lt -> "lt"
+  | Eq -> "eq"
+  | Ne -> "ne"
 
 let binop_to_symbol = function
   | Add -> "+"
   | Sub -> "-"
   | Mul -> "*"
+  | Lt -> "<"
+  | Eq -> "=="
+  | Ne -> "!="
 
 let unop_to_name = function
   | Neg -> "neg"

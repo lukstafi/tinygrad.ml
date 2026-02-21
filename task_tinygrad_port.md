@@ -189,3 +189,19 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
   - Batched matmul with batch-prefix broadcasting.
   - Backward gradients for `sum(matmul(a,b))` wrt both operands.
 - Strengthened permute-backward coverage with a weighted test (`sum(permute(x) * w)`) so gradient routing correctness depends on inverse-axis mapping, not just permutation-invariant sums.
+
+## Codex round 19 decisions
+
+- Added comparison ops to expression/UOp layer:
+  - `Uop.binop` now includes `Lt`, `Eq`, `Ne` with renderer support across CPU/CUDA/Metal codegen paths.
+- Added tensor-level conditional primitives:
+  - `Tensor.lt`, `Tensor.eq`, `Tensor.ne`
+  - `Tensor.where_` implemented via mask arithmetic (`cond*t + (1-cond)*f`)
+  - `Tensor.relu` implemented as `where_(lt(0,x), x, 0)`.
+- Added autograd behavior for comparisons:
+  - Gradients for `Lt`/`Eq`/`Ne` are explicitly zero for both inputs (non-differentiable logical ops treated as stop-grad masks).
+- Added CPU tests for new functionality:
+  - comparison mask forward,
+  - `where_` forward,
+  - `relu` forward and backward mask behavior.
+- Added an end-to-end matmul training loop regression in CPU tests (`y = x @ w`, MSE + SGD for 100 steps) to exercise multi-step forward/backward/update dynamics.
