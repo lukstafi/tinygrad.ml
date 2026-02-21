@@ -71,10 +71,14 @@ module CPU : Backend = struct
     let src_ba = bigarray_of_ptr array1 n Bigarray.char src_p in
     Bigarray.Array1.blit src_ba dst
 
+  let compile_counter = ref 0
+
   let compile name src =
     let tmpdir = Filename.get_temp_dir_name () in
-    let src_file = Filename.concat tmpdir (name ^ ".c") in
-    let so_file = Filename.concat tmpdir (name ^ ".so") in
+    let uid = !compile_counter in
+    incr compile_counter;
+    let src_file = Filename.concat tmpdir (Printf.sprintf "%s_%d.c" name uid) in
+    let so_file = Filename.concat tmpdir (Printf.sprintf "%s_%d.so" name uid) in
     let oc = open_out src_file in
     output_string oc src;
     close_out oc;

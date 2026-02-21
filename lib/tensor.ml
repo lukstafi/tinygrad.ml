@@ -182,7 +182,7 @@ let contiguous (t : t) =
     2. Compile and execute kernels
     3. Replace tensor's UOp with a BUFFER reference to the realized data *)
 let realize (t : t) =
-  let schedule = Schedule.create_schedule ~device:t.device [t.uop] in
+  let schedule = Schedule.create_schedule ~device:t.device ~numel:(Helpers.prod t.shape) [t.uop] in
   Realize.run_schedule schedule;
   (* After realization, check if a result buffer was stored for this root UOp.
      If so, replace the tensor's UOp with a BUFFER node pointing to the result,
