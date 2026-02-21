@@ -14,7 +14,7 @@
     - Execution: realize, to_float_list *)
 
 type t = {
-  uop: Uop.t;
+  mutable uop: Uop.t;
   shape: int list;
   dtype: Dtype.t;
   device: string;
@@ -180,20 +180,36 @@ let contiguous (t : t) =
     This is where lazy evaluation ends and actual work begins.
     1. Schedule the computation graph
     2. Compile and execute kernels
-    3. Return the tensor with realized data *)
+    3. Replace tensor's UOp with a BUFFER reference to the realized data *)
 let realize (t : t) =
   let schedule = Schedule.create_schedule ~device:t.device [t.uop] in
   Realize.run_schedule schedule;
+  (* After realization, check if a result buffer was stored for this root UOp.
+     If so, replace the tensor's UOp with a BUFFER node pointing to the result,
+     so that subsequent operations referencing this tensor can find the data. *)
+  (match Schedule.get_realized t.uop.id with
+   | Some _buf ->
+     let buf_id = fresh_buf_id () in
+     let buf_uop = Uop.buffer buf_id (Dtype.ptr ~size:(Helpers.prod t.shape) t.dtype) in
+     Schedule.store_realized buf_uop.id _buf;
+     t.uop <- buf_uop
+   | None -> ());
   t
 
-(** Find the buffer UOp in the graph and return the realized Device.buffer *)
+(** Find the realized Device.buffer for this tensor.
+    First checks if the root UOp itself was realized (computed result),
+    then falls back to looking for BUFFER nodes (input data). *)
 let find_realized_buffer (t : t) : Device.buffer option =
-  let uops = Uop.toposort1 t.uop in
-  (* Look for BUFFER nodes that have been realized *)
-  List.find_map (fun (u : Uop.t) ->
-    if u.op = Ops.BUFFER then Schedule.get_realized u.id
-    else None
-  ) uops
+  (* Check if the root UOp was realized (result of a kernel computation) *)
+  match Schedule.get_realized t.uop.id with
+  | Some buf -> Some buf
+  | None ->
+    (* Fall back to looking for BUFFER nodes in the graph *)
+    let uops = Uop.toposort1 t.uop in
+    List.find_map (fun (u : Uop.t) ->
+      if u.op = Ops.BUFFER then Schedule.get_realized u.id
+      else None
+    ) uops
 
 (** Convert to flat float list (triggers realize if needed) *)
 let to_float_list (t : t) =
@@ -203,9 +219,9 @@ let to_float_list (t : t) =
     let data = Device.copyout_floats buf in
     Array.to_list data
   | None ->
-    (* No realized buffer found — return zeros as fallback *)
-    let numel = Helpers.prod t.shape in
-    List.init numel (fun _ -> 0.0)
+    failwith (Printf.sprintf
+      "Tensor.to_float_list: no realized buffer found for Tensor(shape=[%s], device=%s)"
+      (String.concat "," (List.map string_of_int t.shape)) t.device)
 
 (** OCaml operator overloads *)
 let ( + ) = add
