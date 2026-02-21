@@ -543,7 +543,39 @@ let test_fused_reduction () =
   let expected = sqrt 11.0 +. sqrt 44.0 +. sqrt 99.0 +. sqrt 176.0 in
   check_float "fused sum(sqrt((a+b)*a))" (List.nth result 0) expected 1e-4
 
-(* ---- Test 23: CUDA backend registration ---- *)
+(* ---- Test 23: Chained reduction with different intermediate shapes ---- *)
+let test_chained_reduction () =
+  Printf.printf "\n=== Chained Reduction ===\n%!";
+  Schedule.reset ();
+  (* [2;3;4] tensor, sum(axis=2) → [2;3;1], then sum(axis=0) → [1;3;1]
+     Data: 1..24
+
+     Step 1: sum(axis=2) on [2;3;4]:
+       row(0,0): 1+2+3+4 = 10
+       row(0,1): 5+6+7+8 = 26
+       row(0,2): 9+10+11+12 = 42
+       row(1,0): 13+14+15+16 = 58
+       row(1,1): 17+18+19+20 = 74
+       row(1,2): 21+22+23+24 = 90
+     → [2;3;1] = [10, 26, 42, 58, 74, 90]
+
+     Step 2: sum(axis=0) on [2;3;1]:
+       col0: 10+58 = 68
+       col1: 26+74 = 100
+       col2: 42+90 = 132
+     → [1;3;1] = [68, 100, 132] *)
+  let data = List.init 24 (fun i -> Float.of_int (i + 1)) in
+  let a = Tensor.from_float_list [2; 3; 4] data in
+  let inner = Tensor.sum ~axes:[2] a in    (* [2;3;1], numel=6 *)
+  let outer = Tensor.sum ~axes:[0] inner in (* [1;3;1], numel=3 *)
+  check "chained shape" (outer.shape = [1; 3; 1]);
+  let result = Tensor.to_float_list outer in
+  check "chained length" (List.length result = 3);
+  check_float "chained sum col0" (List.nth result 0) 68.0 1e-4;
+  check_float "chained sum col1" (List.nth result 1) 100.0 1e-4;
+  check_float "chained sum col2" (List.nth result 2) 132.0 1e-4
+
+(* ---- Test 24: CUDA backend registration ---- *)
 let test_cuda_backend () =
   Printf.printf "\n=== CUDA Backend ===\n%!";
   (* Verify CUDA backend is recognized and returns a module *)
@@ -597,6 +629,7 @@ let () =
   run_test "multi_axis_reduction" test_multi_axis_reduction;
   run_test "noncontig_multi_axis" test_noncontig_multi_axis;
   run_test "fused_reduction" test_fused_reduction;
+  run_test "chained_reduction" test_chained_reduction;
   run_test "cuda_backend" test_cuda_backend;
   Printf.printf "\n============================\n%!";
   Printf.printf "Results: %d passed, %d failed\n%!" !pass_count !fail_count;
