@@ -954,7 +954,120 @@ let test_expand_mul () =
   check_float "expand_mul[4]" (List.nth vals 4) 30.0 1e-6;
   check_float "expand_mul[5]" (List.nth vals 5) 40.0 1e-6
 
-(* ---- Test 35: CUDA backend registration ---- *)
+(* ---- Test 35: Matmul forward ---- *)
+let test_matmul_forward () =
+  Printf.printf "\n=== Matmul Forward ===\n%!";
+  Schedule.reset ();
+  (* a = [[1, 2],    b = [[5, 6],     a @ b = [[1*5+2*7, 1*6+2*8],
+          [3, 4]]         [7, 8]]               [3*5+4*7, 3*6+4*8]]
+                                             = [[19, 22],
+                                                [43, 50]] *)
+  let a = Tensor.from_float_list [2; 2] [1.0; 2.0; 3.0; 4.0] in
+  let b = Tensor.from_float_list [2; 2] [5.0; 6.0; 7.0; 8.0] in
+  let c = Tensor.matmul a b in
+  let vals = Tensor.to_float_list c in
+  check "matmul shape" (c.shape = [2; 2]);
+  check "matmul length" (List.length vals = 4);
+  check_float "matmul[0,0]" (List.nth vals 0) 19.0 1e-4;
+  check_float "matmul[0,1]" (List.nth vals 1) 22.0 1e-4;
+  check_float "matmul[1,0]" (List.nth vals 2) 43.0 1e-4;
+  check_float "matmul[1,1]" (List.nth vals 3) 50.0 1e-4
+
+(* ---- Test 36: Matmul non-square ---- *)
+let test_matmul_nonsquare () =
+  Printf.printf "\n=== Matmul Non-Square ===\n%!";
+  Schedule.reset ();
+  (* a = [[1, 2, 3]]  (1x3)    b = [[1],    a @ b = [[1+4+9]] = [[14]]
+                                     [2],
+                                     [3]]    (3x1) *)
+  let a = Tensor.from_float_list [1; 3] [1.0; 2.0; 3.0] in
+  let b = Tensor.from_float_list [3; 1] [1.0; 2.0; 3.0] in
+  let c = Tensor.matmul a b in
+  check "matmul_ns shape" (c.shape = [1; 1]);
+  let vals = Tensor.to_float_list c in
+  check_float "matmul_ns dot" (List.nth vals 0) 14.0 1e-4;
+  (* Also test 2x3 @ 3x2 *)
+  Schedule.reset ();
+  let a2 = Tensor.from_float_list [2; 3] [1.0; 2.0; 3.0; 4.0; 5.0; 6.0] in
+  let b2 = Tensor.from_float_list [3; 2] [1.0; 4.0; 2.0; 5.0; 3.0; 6.0] in
+  let c2 = Tensor.matmul a2 b2 in
+  check "matmul_ns2 shape" (c2.shape = [2; 2]);
+  let vals2 = Tensor.to_float_list c2 in
+  (* [1*1+2*2+3*3, 1*4+2*5+3*6] = [14, 32]
+     [4*1+5*2+6*3, 4*4+5*5+6*6] = [32, 77] *)
+  check_float "matmul_ns2[0,0]" (List.nth vals2 0) 14.0 1e-4;
+  check_float "matmul_ns2[0,1]" (List.nth vals2 1) 32.0 1e-4;
+  check_float "matmul_ns2[1,0]" (List.nth vals2 2) 32.0 1e-4;
+  check_float "matmul_ns2[1,1]" (List.nth vals2 3) 77.0 1e-4
+
+(* ---- Test 37: Matmul gradient ---- *)
+let test_matmul_gradient () =
+  Printf.printf "\n=== Matmul Gradient ===\n%!";
+  Schedule.reset ();
+  (* loss = sum(a @ b). For a[N,K] @ b[K,M]:
+     d(loss)/d(a) = ones[N,M] @ b^T = ones @ b^T
+     d(loss)/d(b) = a^T @ ones[N,M] = a^T @ ones
+     With a=[[1,2],[3,4]] b=[[5,6],[7,8]]:
+     d/da = ones[2,2] @ [[5,7],[6,8]] = [[11,15],[11,15]]
+     d/db = [[1,3],[2,4]] @ ones[2,2] = [[4,4],[6,6]] *)
+  let a = Tensor.from_float_list [2; 2] [1.0; 2.0; 3.0; 4.0] in
+  let b = Tensor.from_float_list [2; 2] [5.0; 6.0; 7.0; 8.0] in
+  let c = Tensor.matmul a b in
+  let loss = Tensor.sum c in
+  let grads = Tensor.backward loss [a; b] in
+  let (_, da) = List.nth grads 0 in
+  let (_, db) = List.nth grads 1 in
+  let da_vals = Tensor.to_float_list da in
+  let db_vals = Tensor.to_float_list db in
+  check "matmul grad a length" (List.length da_vals = 4);
+  check "matmul grad b length" (List.length db_vals = 4);
+  (* d/da = [[5+6, 7+8], [5+6, 7+8]] = [[11, 15], [11, 15]] *)
+  check_float "da[0,0]" (List.nth da_vals 0) 11.0 1e-4;
+  check_float "da[0,1]" (List.nth da_vals 1) 15.0 1e-4;
+  check_float "da[1,0]" (List.nth da_vals 2) 11.0 1e-4;
+  check_float "da[1,1]" (List.nth da_vals 3) 15.0 1e-4;
+  (* d/db = [[1+3, 1+3], [2+4, 2+4]] = [[4, 4], [6, 6]] *)
+  check_float "db[0,0]" (List.nth db_vals 0) 4.0 1e-4;
+  check_float "db[0,1]" (List.nth db_vals 1) 4.0 1e-4;
+  check_float "db[1,0]" (List.nth db_vals 2) 6.0 1e-4;
+  check_float "db[1,1]" (List.nth db_vals 3) 6.0 1e-4
+
+(* ---- Test 38: Linear layer (matmul + gradient descent) ---- *)
+let test_linear_layer () =
+  Printf.printf "\n=== Linear Layer Training ===\n%!";
+  (* Train a single linear layer: y = x @ w to fit target.
+     x = [[1, 0], [0, 1], [1, 1]]  (3 samples, 2 features)
+     target = [[2], [3], [5]]  (3 samples, 1 output)
+     This should learn w ≈ [[2], [3]] since target = x @ [2, 3]^T.
+     We use MSE loss and SGD.
+     Note: x, target, and w are recreated each step because
+     Schedule.reset() clears the buffer_data table. *)
+  let x_data = [1.0; 0.0; 0.0; 1.0; 1.0; 1.0] in
+  let target_data = [2.0; 3.0; 5.0] in
+  let lr = 0.05 in
+  let w_vals = ref [0.1; 0.1] in
+  (* Train for 100 steps *)
+  for _step = 1 to 100 do
+    Schedule.reset ();
+    let x = Tensor.from_float_list [3; 2] x_data in
+    let target = Tensor.from_float_list [3; 1] target_data in
+    let w = Tensor.from_float_list [2; 1] !w_vals in
+    let pred = Tensor.matmul x w in  (* [3;1] *)
+    let diff = Tensor.sub pred target in  (* [3;1] *)
+    let loss = Tensor.mean (Tensor.mul diff diff) in  (* scalar *)
+    let grads = Tensor.backward loss [w] in
+    let (_, dw) = List.hd grads in
+    let dw_v = Tensor.to_float_list dw in
+    (* SGD update *)
+    w_vals := List.map2 (fun wi dwi -> wi -. lr *. dwi) !w_vals dw_v
+  done;
+  Printf.printf "    w_final = [%s]\n%!"
+    (String.concat ", " (List.map (Printf.sprintf "%.4f") !w_vals));
+  (* Should converge to w ≈ [2, 3] *)
+  check_float "w[0] ≈ 2" (List.nth !w_vals 0) 2.0 0.1;
+  check_float "w[1] ≈ 3" (List.nth !w_vals 1) 3.0 0.1
+
+(* ---- Test 39: CUDA backend registration ---- *)
 let test_cuda_backend () =
   Printf.printf "\n=== CUDA Backend ===\n%!";
   (* Verify CUDA backend is recognized and returns a module *)
@@ -1025,6 +1138,10 @@ let () =
   run_test "gradient_expand" test_gradient_expand;
   run_test "gradient_where" test_gradient_where;
   run_test "expand_mul" test_expand_mul;
+  run_test "matmul_forward" test_matmul_forward;
+  run_test "matmul_nonsquare" test_matmul_nonsquare;
+  run_test "matmul_gradient" test_matmul_gradient;
+  run_test "linear_layer" test_linear_layer;
   run_test "cuda_backend" test_cuda_backend;
   Printf.printf "\n============================\n%!";
   Printf.printf "Results: %d passed, %d failed\n%!" !pass_count !fail_count;
