@@ -7,3 +7,11 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - Backends limited exactly to requested set: CPU C, CUDA via `cudajit`, Metal via `metal`.
 - Scope reduced to 1D buffers for first runnable baseline; architecture leaves room to extend shapes/ops incrementally.
 - Renderers kept explicit and readable for educational value rather than exhaustive tinygrad feature parity in round 1.
+
+## Codex round 2 decisions
+
+- Addressed major feedback by moving from pairwise binop execution to fused expression execution (`Uop.expr`) at realize time.
+- Added per-device tensor cache entries (list keyed by device), replacing single-slot cache.
+- Added additional ops (`sub`, `neg`, `sqrt`, `reciprocal`) to improve educational/functional value without exploding frontend scope.
+- Added CPU kernel compilation cache keyed by expression digest to avoid recompiling equivalent fused kernels.
+- Kept CUDA/Metal default stubs for local buildability; real backends remain in `experimental/` pending optional dependency wiring in dune.

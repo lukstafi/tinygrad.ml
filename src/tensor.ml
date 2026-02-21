@@ -1,18 +1,22 @@
 type node =
   | Data of Buffer.t
+  | Const of float
   | Binop of Uop.binop * t * t
+  | Unop of Uop.unop * t
 
 and t = {
   shape : int array;
   node : node;
-  mutable cached : (Runtime.device * Buffer.t) option;
+  mutable cache : (Runtime.device * Buffer.t) list;
 }
 
-let make_data b = { shape = Array.copy b.Buffer.shape; node = Data b; cached = None }
+let make_data b = { shape = Array.copy b.Buffer.shape; node = Data b; cache = [] }
 
 let from_array arr = make_data (Buffer.of_array arr)
-let zeros n = make_data (Buffer.zeros [| n |])
-let ones n = make_data (Buffer.ones [| n |])
+
+let full n value = { shape = [| n |]; node = Const value; cache = [] }
+let zeros n = full n 0.0
+let ones n = full n 1.0
 let shape t = Array.copy t.shape
 let numel t = Buffer.numel t.shape
 
@@ -25,31 +29,54 @@ let assert_same_shape a b =
 
 let binop op a b =
   assert_same_shape a b;
-  { shape = Array.copy a.shape; node = Binop (op, a, b); cached = None }
+  { shape = Array.copy a.shape; node = Binop (op, a, b); cache = [] }
+
+let unop op a = { shape = Array.copy a.shape; node = Unop (op, a); cache = [] }
 
 let add a b = binop Uop.Add a b
+let sub a b = binop Uop.Sub a b
 let mul a b = binop Uop.Mul a b
+let neg a = unop Uop.Neg a
+let sqrt a = unop Uop.Sqrt a
+let reciprocal a = unop Uop.Reciprocal a
 
-let rec realize_result ?device t =
+let find_cache dev entries =
+  List.find_map (fun (d, b) -> if d = dev then Some b else None) entries
+
+let update_cache dev buf entries =
+  (dev, buf) :: List.filter (fun (d, _) -> d <> dev) entries
+
+let rec lower_to_expr t inputs =
+  match t.node with
+  | Data b ->
+      let idx = List.length inputs in
+      (Uop.Input idx, inputs @ [ b ])
+  | Const c -> (Uop.Const c, inputs)
+  | Binop (op, lhs, rhs) ->
+      let lhs_expr, inputs = lower_to_expr lhs inputs in
+      let rhs_expr, inputs = lower_to_expr rhs inputs in
+      (Uop.Binop (op, lhs_expr, rhs_expr), inputs)
+  | Unop (op, x) ->
+      let x_expr, inputs = lower_to_expr x inputs in
+      (Uop.Unop (op, x_expr), inputs)
+
+let realize_result ?device t =
   let dev = Option.value device ~default:(Runtime.default_device ()) in
-  match t.cached with
-  | Some (cached_dev, buf) when cached_dev = dev -> Ok buf
-  | _ ->
+  match find_cache dev t.cache with
+  | Some b -> Ok b
+  | None ->
       let computed =
         match t.node with
         | Data buf -> Ok buf
-        | Binop (op, lhs, rhs) ->
-            let* lbuf = realize_result ~device:dev lhs in
-            let* rbuf = realize_result ~device:dev rhs in
-            Runtime.run_binop ~device:dev ~op ~a:lbuf ~b:rbuf
+        | _ ->
+            let expr, inputs = lower_to_expr t [] in
+            Runtime.run_expr ~device:dev ~expr ~inputs ~shape:t.shape
       in
       (match computed with
       | Ok buf ->
-          t.cached <- Some (dev, buf);
+          t.cache <- update_cache dev buf t.cache;
           Ok buf
       | Error _ as e -> e)
-
-and ( let* ) r f = match r with Ok x -> f x | Error _ as e -> e
 
 let realize ?device t =
   match realize_result ?device t with

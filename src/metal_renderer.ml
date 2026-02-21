@@ -1,9 +1,24 @@
-let render ~(op : Uop.binop) ~(length : int) : Program_spec.t =
-  let fname = "tg_" ^ Uop.binop_to_name op in
-  let expr =
-    match op with
-    | Uop.Add -> "a[i] + b[i]"
-    | Uop.Mul -> "a[i] * b[i]"
+let rec render_expr = function
+  | Uop.Input i -> Printf.sprintf "in%d[i]" i
+  | Uop.Const c -> Printf.sprintf "%gf" c
+  | Uop.Binop (op, a, b) ->
+      Printf.sprintf "(%s %s %s)" (render_expr a) (Uop.binop_to_symbol op) (render_expr b)
+  | Uop.Unop (Uop.Neg, x) -> Printf.sprintf "(-(%s))" (render_expr x)
+  | Uop.Unop (Uop.Sqrt, x) -> Printf.sprintf "sqrt(%s)" (render_expr x)
+  | Uop.Unop (Uop.Reciprocal, x) -> Printf.sprintf "(1.0f/(%s))" (render_expr x)
+
+let render_expr_kernel ~(expr : Uop.expr) ~(ninputs : int) ~(length : int) : Program_spec.t =
+  let expression_key = Uop.expr_to_key expr in
+  let digest = Digest.to_hex (Digest.string expression_key) in
+  let function_name = "tg_expr_" ^ String.sub digest 0 16 in
+  let input_args =
+    List.init ninputs (fun i ->
+        Printf.sprintf "device const float *in%d [[buffer(%d)]]" i (i + 1))
+    |> String.concat ",\n               "
+  in
+  let arg_block =
+    if ninputs = 0 then "constant int &n [[buffer(1)]],"
+    else Printf.sprintf "%s,\n               constant int &n [[buffer(%d)]]," input_args (ninputs + 1)
   in
   let src =
     Printf.sprintf
@@ -12,9 +27,7 @@ let render ~(op : Uop.binop) ~(length : int) : Program_spec.t =
 using namespace metal;
 
 kernel void %s(device float *out [[buffer(0)]],
-               device const float *a [[buffer(1)]],
-               device const float *b [[buffer(2)]],
-               constant int &n [[buffer(3)]],
+               %s
                uint gid [[thread_position_in_grid]]) {
   int i = int(gid);
   if (i < n) {
@@ -22,6 +35,9 @@ kernel void %s(device float *out [[buffer(0)]],
   }
 }
 |}
-      fname expr
+      function_name arg_block (render_expr expr)
   in
-  { Program_spec.function_name = fname; src; op; length }
+  { Program_spec.function_name; src; length; n_inputs = ninputs; expression_key }
+
+let render ~(op : Uop.binop) ~(length : int) : Program_spec.t =
+  render_expr_kernel ~expr:(Uop.Binop (op, Uop.Input 0, Uop.Input 1)) ~ninputs:2 ~length

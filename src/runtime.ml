@@ -30,8 +30,11 @@ let available_devices () =
     (Metal, Metal_backend.available ());
   ]
 
-let run_binop ~(device : device) ~(op : Uop.binop) ~(a : Buffer.t) ~(b : Buffer.t) =
+let run_expr ~(device : device) ~(expr : Uop.expr) ~(inputs : Buffer.t list) ~(shape : int array) =
   match device with
-  | Cpu_c -> Cpu_c_backend.run_binop ~op ~a ~b
-  | Cuda -> Cuda_backend.run_binop ~op ~a ~b
-  | Metal -> Metal_backend.run_binop ~op ~a ~b
+  | Cpu_c -> Cpu_c_backend.run_expr ~expr ~inputs ~shape
+  | Cuda -> Cuda_backend.run_expr ~expr ~inputs ~shape
+  | Metal -> Metal_backend.run_expr ~expr ~inputs ~shape
+
+let run_binop ~(device : device) ~(op : Uop.binop) ~(a : Buffer.t) ~(b : Buffer.t) =
+  run_expr ~device ~expr:(Uop.Binop (op, Uop.Input 0, Uop.Input 1)) ~inputs:[ a; b ] ~shape:a.shape

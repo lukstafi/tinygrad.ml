@@ -2,32 +2,36 @@
 
 An educational OCaml port of the tinygrad middle layer.
 
-This implementation intentionally focuses on:
-- lazy execution over a small tensor graph,
-- kernel source rendering,
+This implementation focuses on:
+- lazy expression graphs,
+- fused kernel generation from those graphs,
 - compiled runtime dispatch,
 - three backends only: CPU C, CUDA (`cudajit`), and Metal MSL (`metal`).
 
-It intentionally does **not** try to reproduce Python frontend convenience APIs.
+It intentionally does **not** reproduce Python frontend convenience APIs.
 
 ## Current scope
 
 - Tensor rank: currently 1D buffers.
-- Ops: elementwise `add`, `mul`, and `sum` reduction on realized output.
-- Execution model: lazy graph nodes (`Data` / `Binop`) realized per selected backend.
+- Ops: elementwise `add`, `sub`, `mul`, `neg`, `sqrt`, `reciprocal`, and `sum` reduction on realized output.
+- Execution model:
+  - tensors build lazy expression trees,
+  - realization lowers a tree to `Uop.expr`,
+  - renderer emits one fused kernel for the whole expression.
+- Cache behavior:
+  - tensor realization cache is per-device,
+  - CPU backend caches compiled kernels by expression key.
 - Backends:
-  - CPU C: JIT compiles tiny C kernels with system `cc` and calls them via `ctypes`.
-  - CUDA: generates CUDA C kernels, compiles with NVRTC (`cudajit.nvrtc`), launches with `cudajit.cuda`.
-  - Metal: generates MSL kernels and dispatches with `metal`.
+  - CPU C: active and tested (`cc` + `ctypes`/`dlopen`).
+  - CUDA/Metal: API stubs in default build; real implementations are staged in `experimental/` for environments with those packages available to dune.
 
 ## Layout
 
-- `src/uop.ml`: minimal UOp/binop representation.
-- `src/program_spec.ml`: renderable kernel payload.
-- `src/c_renderer.ml`, `src/cuda_renderer.ml`, `src/metal_renderer.ml`: backend kernel renderers.
-- `src/cpu_c_backend.ml`, `src/cuda_backend.ml`, `src/metal_backend.ml`: execution backends.
+- `src/uop.ml`: expression IR (`Input`, `Const`, `Binop`, `Unop`).
+- `src/tensor.ml`: minimal lazy tensor API + device-keyed cache.
+- `src/c_renderer.ml`, `src/cuda_renderer.ml`, `src/metal_renderer.ml`: expression-to-kernel renderers.
+- `src/cpu_c_backend.ml`: fused-kernel compile+execute with kernel caching.
 - `src/runtime.ml`: device selection and backend dispatch.
-- `src/tensor.ml`: minimal lazy tensor API.
 
 ## Build and test
 
@@ -45,5 +49,5 @@ TG_DEVICE=cpu dune exec tinygrad_ml_demo
 
 ## Notes
 
-- CUDA/Metal execution depends on local toolchain and device availability.
-- CPU backend requires a C compiler (`cc`) available on PATH.
+- CUDA/Metal runtime integration code exists in `experimental/`, but this repository’s default dune setup keeps buildability in environments without those optional packages.
+- CPU backend requires a C compiler (`cc`) on `PATH`.
