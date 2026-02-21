@@ -1,6 +1,11 @@
+let render_float32 (x : float) =
+  let s = Printf.sprintf "%.9g" x in
+  if String.contains s '.' || String.contains s 'e' || String.contains s 'E' then s ^ "f"
+  else s ^ ".0f"
+
 let rec render_expr = function
   | Uop.Input i -> Printf.sprintf "in%d[i]" i
-  | Uop.Const c -> Printf.sprintf "%gf" c
+  | Uop.Const c -> render_float32 c
   | Uop.Binop (op, a, b) ->
       Printf.sprintf "(%s %s %s)" (render_expr a) (Uop.binop_to_symbol op) (render_expr b)
   | Uop.Unop (Uop.Neg, x) -> Printf.sprintf "(-(%s))" (render_expr x)

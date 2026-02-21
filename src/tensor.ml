@@ -26,8 +26,11 @@ let from_flat_array_with_shape (shape : int array) (arr : float array) =
   make_data b
 
 let full n value = { shape = [| n |]; node = Const value; cache = [] }
+let full_with_shape shape value = { shape = Array.copy shape; node = Const value; cache = [] }
 let zeros n = full n 0.0
 let ones n = full n 1.0
+let zeros_like t = full_with_shape t.shape 0.0
+let ones_like t = full_with_shape t.shape 1.0
 let shape t = Array.copy t.shape
 let numel t = Buffer.numel t.shape
 
@@ -208,3 +211,83 @@ let mean ?device t =
   if n = 0 then failwith "mean of empty tensor is undefined"
   else
     sum ?device t /. float_of_int n
+
+let children t =
+  match t.node with
+  | Data _ | Const _ -> []
+  | Binop (_, a, b) -> [ a; b ]
+  | Unop (_, x) -> [ x ]
+  | Reshape x -> [ x ]
+
+let rec contains_phys x = function
+  | [] -> false
+  | y :: ys -> (x == y) || contains_phys x ys
+
+let toposort root =
+  let visited = ref [] in
+  let order = ref [] in
+  let rec dfs t =
+    if not (contains_phys t !visited) then begin
+      visited := t :: !visited;
+      List.iter dfs (children t);
+      order := t :: !order
+    end
+  in
+  dfs root;
+  List.rev !order
+
+let find_grad grads t =
+  List.find_map (fun (u, g) -> if u == t then Some g else None) !grads
+
+let add_grad grads t g =
+  let rec loop acc = function
+    | [] -> List.rev ((t, g) :: acc)
+    | ((u, existing) as pair) :: tl ->
+        if u == t then List.rev_append acc ((u, add existing g) :: tl)
+        else loop (pair :: acc) tl
+  in
+  grads := loop [] !grads
+
+let local_grads t upstream =
+  match t.node with
+  | Data _ | Const _ -> []
+  | Reshape x -> [ (x, reshape upstream x.shape) ]
+  | Unop (Uop.Neg, x) -> [ (x, neg upstream) ]
+  | Unop (Uop.Sqrt, x) ->
+      let two = full_with_shape t.shape 2.0 in
+      let denom = mul two t in
+      [ (x, mul upstream (reciprocal denom)) ]
+  | Unop (Uop.Reciprocal, x) ->
+      let scale = neg (mul t t) in
+      [ (x, mul scale upstream) ]
+  | Binop (Uop.Add, a, b) -> [ (a, upstream); (b, upstream) ]
+  | Binop (Uop.Sub, a, b) -> [ (a, upstream); (b, neg upstream) ]
+  | Binop (Uop.Mul, a, b) -> [ (a, mul upstream b); (b, mul upstream a) ]
+
+let backward ?grad ~wrt output =
+  let root_grad =
+    match grad with
+    | Some g ->
+        if Array.length g.shape <> Array.length output.shape
+           || not (Array.for_all2 ( = ) g.shape output.shape)
+        then
+          invalid_arg
+            (Printf.sprintf "backward: grad shape %s does not match output shape %s"
+               (Buffer.pp_shape g.shape) (Buffer.pp_shape output.shape));
+        g
+    | None -> ones_like output
+  in
+  let topo = toposort output in
+  let grads = ref [ (output, root_grad) ] in
+  List.iter
+    (fun t ->
+      match find_grad grads t with
+      | None -> ()
+      | Some upstream ->
+          List.iter (fun (src, gsrc) -> add_grad grads src gsrc) (local_grads t upstream))
+    (List.rev topo);
+  List.map
+    (fun target ->
+      let g = Option.value (find_grad grads target) ~default:(zeros_like target) in
+      (target, g))
+    wrt

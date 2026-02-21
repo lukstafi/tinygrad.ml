@@ -132,6 +132,45 @@ let test_reshape_preserves_realize_cache_cpu () =
       (Printf.sprintf "reshape should reuse realized cache, after_first=%d after_second=%d"
          after_first after_second)
 
+let test_backward_basic_cpu () =
+  let x = Tinygrad_ml.Tensor.from_array [| 1.0; 2.0; 3.0 |] in
+  let y = Tinygrad_ml.Tensor.mul x x in
+  let grads = Tinygrad_ml.Tensor.backward ~wrt:[ x ] y in
+  let _, dx = List.hd grads in
+  check_array ~msg:"d/dx sum(x*x)" [| 2.0; 4.0; 6.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c dx);
+  let a = Tinygrad_ml.Tensor.from_array [| 1.0; 2.0; 3.0; 4.0 |] in
+  let b = Tinygrad_ml.Tensor.from_array [| 10.0; 20.0; 30.0; 40.0 |] in
+  let z = Tinygrad_ml.Tensor.mul a b in
+  let grads2 = Tinygrad_ml.Tensor.backward ~wrt:[ a; b ] z in
+  let _, da = List.nth grads2 0 in
+  let _, db = List.nth grads2 1 in
+  check_array ~msg:"d/da sum(a*b)" [| 10.0; 20.0; 30.0; 40.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c da);
+  check_array ~msg:"d/db sum(a*b)" [| 1.0; 2.0; 3.0; 4.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c db)
+
+let test_gradient_descent_cpu () =
+  let target = [| 3.0; 5.0 |] in
+  let x = ref [| 0.0; 0.0 |] in
+  let lr = 0.1 in
+  for _step = 0 to 29 do
+    let xt = Tinygrad_ml.Tensor.from_array !x in
+    let tt = Tinygrad_ml.Tensor.from_array target in
+    let diff = Tinygrad_ml.Tensor.sub xt tt in
+    let sq = Tinygrad_ml.Tensor.mul diff diff in
+    let grads = Tinygrad_ml.Tensor.backward ~wrt:[ xt ] sq in
+    let _, dx = List.hd grads in
+    let dx_arr = Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c dx in
+    for i = 0 to Array.length !x - 1 do
+      (!x).(i) <- (!x).(i) -. (lr *. dx_arr.(i))
+    done
+  done;
+  if Float.abs ((!x).(0) -. 3.0) > 0.05 then
+    failwith (Printf.sprintf "gd x[0]: expected ~3.0, got %.8f" (!x).(0));
+  if Float.abs ((!x).(1) -. 5.0) > 0.05 then
+    failwith (Printf.sprintf "gd x[1]: expected ~5.0, got %.8f" (!x).(1))
+
 let () =
   test_add_mul_cpu ();
   test_sub_neg_sqrt_reciprocal_cpu ();
@@ -142,4 +181,6 @@ let () =
   test_reshape_and_axis_reductions_cpu ();
   test_noncontiguous_axis_reductions_cpu ();
   test_reshape_preserves_realize_cache_cpu ();
+  test_backward_basic_cpu ();
+  test_gradient_descent_cpu ();
   Printf.printf "test_cpu: ok\n"

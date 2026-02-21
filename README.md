@@ -15,7 +15,8 @@ It intentionally does **not** reproduce Python frontend convenience APIs.
 - Tensor rank: flat buffers with shape metadata (supports reshape views and axis reductions in Tensor layer).
 - Ops: elementwise `add`, `sub`, `mul`, `neg`, `sqrt`, `reciprocal`,
   compiled scalar reductions `sum`, `max`, `mean`,
-  plus Tensor-layer axis reductions (`sum_axis`, `max_axis`, `mean_axis`) and `reshape`.
+  plus Tensor-layer axis reductions (`sum_axis`, `max_axis`, `mean_axis`), `reshape`,
+  and a minimal reverse-mode autograd API (`backward`).
 - Execution model:
   - tensors build lazy expression trees,
   - realization lowers a tree to `Uop.expr`,

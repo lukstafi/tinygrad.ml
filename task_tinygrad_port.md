@@ -89,3 +89,20 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - Implemented shape-aware lowering (`lower_to_expr_with_shape`) that propagates requested output shape through `Reshape` nodes and emits input buffer views with matching shape metadata.
 - Restored strict backend input-shape validation (removed prior permissive “numel-only” acceptance) now that reshape compatibility is handled during lowering rather than backend validation.
 - Added CPU regression coverage for reshaped unrealized expressions (`reshape(add(a,b), [4;2])`) to validate the new lowering path end-to-end.
+
+## Codex round 12 decisions
+
+- Added a minimal reverse-mode autograd API to `Tensor`:
+  - `Tensor.backward ?grad ~wrt output` computes gradients of `output` with respect to selected tensors.
+  - Defaults to `ones_like(output)` upstream gradient (vector-Jacobian with an all-ones vector), which matches `sum(output)` gradients for elementwise outputs.
+- Implemented gradient rules for the current AST surface:
+  - `Binop`: `Add`, `Sub`, `Mul`
+  - `Unop`: `Neg`, `Sqrt`, `Reciprocal`
+  - `Reshape` (gradient reshaped back to source shape)
+- Added shape-aware tensor constants (`full_with_shape`, `zeros_like`, `ones_like`) used by gradient construction.
+- Added CPU autograd tests:
+  - `d/dx sum(x*x) = 2x`
+  - `d/da sum(a*b)=b` and `d/db sum(a*b)=a`
+  - Simple SGD loop minimizing `sum((x-target)^2)` from `[0,0]` toward `[3,5]`.
+- Fixed a backend-independent codegen bug exposed by autograd constants:
+  - C/CUDA/Metal expression renderers now emit valid float literals (`1.0f` instead of invalid `1f`).
