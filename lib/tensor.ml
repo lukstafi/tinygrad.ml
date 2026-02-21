@@ -15,6 +15,7 @@
 
 type t = {
   mutable uop: Uop.t;
+  mutable lazy_uop: Uop.t option;  (** Original computation graph, preserved across realize *)
   shape: int list;
   dtype: Dtype.t;
   device: string;
@@ -30,7 +31,7 @@ let fresh_buf_id () =
 
 (** Create a tensor from a pre-built UOp *)
 let of_uop ?(device="CPU") ?(requires_grad=false) shape dtype uop =
-  { uop; shape; dtype; device; requires_grad }
+  { uop; lazy_uop = None; shape; dtype; device; requires_grad }
 
 (** Tensor filled with a constant value *)
 let full ?(device="CPU") ?(dtype=Dtype.float32) shape (value : float) =
@@ -172,18 +173,19 @@ let mean ?(axes=[]) (t : t) =
   let n_inv = const_like s (1.0 /. Float.of_int n) in
   mul s n_inv
 
-(** Matrix multiply: a[..., N, K] @ b[..., K, M] = c[..., N, M].
+(** Matrix multiply: a[N, K] @ b[K, M] = c[N, M].
+    Both inputs must be exactly 2-D.
     Implemented via reshape + expand + elementwise mul + sum reduction,
     matching tinygrad's approach of decomposing matmul into primitive ops. *)
 let matmul (a : t) (b : t) =
-  let a_ndim = List.length a.shape in
-  let b_ndim = List.length b.shape in
-  if a_ndim < 2 || b_ndim < 2 then
-    failwith "matmul: both tensors must be at least 2-D";
-  let n = List.nth a.shape (a_ndim - 2) in
-  let k_a = List.nth a.shape (a_ndim - 1) in
-  let k_b = List.nth b.shape (b_ndim - 2) in
-  let m = List.nth b.shape (b_ndim - 1) in
+  if List.length a.shape <> 2 || List.length b.shape <> 2 then
+    failwith (Printf.sprintf "matmul: both tensors must be exactly 2-D, got [%s] and [%s]"
+      (String.concat "," (List.map string_of_int a.shape))
+      (String.concat "," (List.map string_of_int b.shape)));
+  let n = List.nth a.shape 0 in
+  let k_a = List.nth a.shape 1 in
+  let k_b = List.nth b.shape 0 in
+  let m = List.nth b.shape 1 in
   if k_a <> k_b then
     failwith (Printf.sprintf "matmul: inner dimensions don't match (%d vs %d)" k_a k_b);
   let k = k_a in
@@ -197,6 +199,13 @@ let matmul (a : t) (b : t) =
   let prod = mul a_exp b_exp in
   let summed = sum ~axes:[1] prod in  (* [N, 1, M] *)
   reshape summed [n; m]  (* [N, M] *)
+
+(** ReLU activation: max(0, x).
+    Implemented as where(x > 0, x, 0) using comparison + ternary select. *)
+let relu (t : t) =
+  let zero = zeros ~device:t.device ~dtype:t.dtype t.shape in
+  let cond = lt zero t in  (* 0 < x *)
+  where_ cond t zero
 
 (** Contiguous *)
 let contiguous (t : t) =
@@ -222,6 +231,8 @@ let realize (t : t) =
      let buf_id = fresh_buf_id () in
      let buf_uop = Uop.buffer buf_id (Dtype.ptr ~size:(Helpers.prod t.shape) t.dtype) in
      Schedule.store_realized ~shape:t.shape buf_uop.id _buf;
+     (* Preserve the computation graph for backward before replacing with BUFFER *)
+     if t.lazy_uop = None then t.lazy_uop <- Some t.uop;
      t.uop <- buf_uop
    | None -> ());
   t
@@ -281,12 +292,17 @@ let backward (loss : t) (targets : t list) : (t * t) list =
     failwith (Printf.sprintf
       "Tensor.backward: loss must be scalar (numel=1), got shape=[%s] (numel=%d)"
       (String.concat "," (List.map string_of_int loss.shape)) (Helpers.prod loss.shape));
-  (* Create a ones tensor as the initial gradient for the scalar loss *)
+  (* Use lazy_uop (preserved computation graph) if available, since realize
+     replaces uop with a BUFFER that has no computation graph to differentiate. *)
+  let loss_uop = match loss.lazy_uop with Some u -> u | None -> loss.uop in
   let root_grad = Uop.const loss.dtype 1.0 in
-  let target_uops = List.map (fun (t : t) -> t.uop) targets in
-  let grad_pairs = Gradient.compute_gradient loss.uop root_grad target_uops in
+  let target_uops = List.map (fun (t : t) ->
+    match t.lazy_uop with Some u -> u | None -> t.uop) targets in
+  let grad_pairs = Gradient.compute_gradient loss_uop root_grad target_uops in
   List.map (fun ((target_uop : Uop.t), grad_uop) ->
-    let target = List.find (fun (tgt : t) -> tgt.uop.Uop.id = target_uop.Uop.id) targets in
+    let target = List.find (fun (tgt : t) ->
+      let tgt_uop = match tgt.lazy_uop with Some u -> u | None -> tgt.uop in
+      tgt_uop.Uop.id = target_uop.Uop.id) targets in
     let grad_tensor = of_uop ~device:target.device target.shape target.dtype grad_uop in
     (target, grad_tensor)
   ) grad_pairs

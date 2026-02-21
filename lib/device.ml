@@ -166,6 +166,33 @@ module CPU : Backend = struct
         (ptr_of_raw_address (List.nth buf_ptrs 2))
         (ptr_of_raw_address (List.nth buf_ptrs 3))
         (ptr_of_raw_address (List.nth buf_ptrs 4))
+    | 6, 0 ->
+      let f = coerce (ptr void) (funptr (ptr void @-> ptr void @-> ptr void @-> ptr void @-> ptr void @-> ptr void @-> returning void)) fptr in
+      f (ptr_of_raw_address (List.nth buf_ptrs 0))
+        (ptr_of_raw_address (List.nth buf_ptrs 1))
+        (ptr_of_raw_address (List.nth buf_ptrs 2))
+        (ptr_of_raw_address (List.nth buf_ptrs 3))
+        (ptr_of_raw_address (List.nth buf_ptrs 4))
+        (ptr_of_raw_address (List.nth buf_ptrs 5))
+    | 7, 0 ->
+      let f = coerce (ptr void) (funptr (ptr void @-> ptr void @-> ptr void @-> ptr void @-> ptr void @-> ptr void @-> ptr void @-> returning void)) fptr in
+      f (ptr_of_raw_address (List.nth buf_ptrs 0))
+        (ptr_of_raw_address (List.nth buf_ptrs 1))
+        (ptr_of_raw_address (List.nth buf_ptrs 2))
+        (ptr_of_raw_address (List.nth buf_ptrs 3))
+        (ptr_of_raw_address (List.nth buf_ptrs 4))
+        (ptr_of_raw_address (List.nth buf_ptrs 5))
+        (ptr_of_raw_address (List.nth buf_ptrs 6))
+    | 8, 0 ->
+      let f = coerce (ptr void) (funptr (ptr void @-> ptr void @-> ptr void @-> ptr void @-> ptr void @-> ptr void @-> ptr void @-> ptr void @-> returning void)) fptr in
+      f (ptr_of_raw_address (List.nth buf_ptrs 0))
+        (ptr_of_raw_address (List.nth buf_ptrs 1))
+        (ptr_of_raw_address (List.nth buf_ptrs 2))
+        (ptr_of_raw_address (List.nth buf_ptrs 3))
+        (ptr_of_raw_address (List.nth buf_ptrs 4))
+        (ptr_of_raw_address (List.nth buf_ptrs 5))
+        (ptr_of_raw_address (List.nth buf_ptrs 6))
+        (ptr_of_raw_address (List.nth buf_ptrs 7))
     | _ ->
       failwith (Printf.sprintf "CPU.exec: unsupported arg count: %d bufs, %d vals" n_bufs n_vals)
 
