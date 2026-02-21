@@ -272,17 +272,69 @@ let test_tensor_roundtrip () =
     check_float (Printf.sprintf "tensor roundtrip %.1f" expected) got expected 1e-6
   ) result data
 
+(* ---- Test 8: Tensor lazy compute via schedule/realize ---- *)
+let test_tensor_compute () =
+  Printf.printf "\n=== Tensor Lazy Compute ===\n%!";
+  (* a + b via Tensor API, realized through schedule → kernel → execute *)
+  let a = Tensor.from_float_list [4] [1.0; 2.0; 3.0; 4.0] in
+  let b = Tensor.from_float_list [4] [10.0; 20.0; 30.0; 40.0] in
+  let c = Tensor.add a b in
+  let result = Tensor.to_float_list c in
+  check "tensor compute length" (List.length result = 4);
+  check_float "tensor a+b[0]" (List.nth result 0) 11.0 1e-6;
+  check_float "tensor a+b[1]" (List.nth result 1) 22.0 1e-6;
+  check_float "tensor a+b[2]" (List.nth result 2) 33.0 1e-6;
+  check_float "tensor a+b[3]" (List.nth result 3) 44.0 1e-6;
+
+  (* Chained: (a + b) * a — c was already realized, so c.uop is now a BUFFER *)
+  let d = Tensor.mul c a in
+  Printf.printf "  d.uop: %s\n%!" (Uop.pp_uop d.uop);
+  List.iter (fun s -> Printf.printf "    src: %s\n%!" (Uop.pp_uop s)) d.uop.src;
+  let result2 = Tensor.to_float_list d in
+  check_float "tensor (a+b)*a[0]" (List.nth result2 0) 11.0 1e-6;
+  check_float "tensor (a+b)*a[1]" (List.nth result2 1) 44.0 1e-6;
+  check_float "tensor (a+b)*a[2]" (List.nth result2 2) 99.0 1e-5;
+  check_float "tensor (a+b)*a[3]" (List.nth result2 3) 176.0 1e-4;
+
+  (* Unary: sqrt(a * a) = |a| = a (for positive a) *)
+  let e = Tensor.mul a a in
+  let f = Tensor.sqrt_ e in
+  let result3 = Tensor.to_float_list f in
+  check_float "tensor sqrt(a*a)[0]" (List.nth result3 0) 1.0 1e-5;
+  check_float "tensor sqrt(a*a)[1]" (List.nth result3 1) 2.0 1e-5;
+  check_float "tensor sqrt(a*a)[2]" (List.nth result3 2) 3.0 1e-5;
+  check_float "tensor sqrt(a*a)[3]" (List.nth result3 3) 4.0 1e-5
+
+(* ---- Test 9: Tensor compute on Metal GPU ---- *)
+let test_tensor_compute_metal () =
+  Printf.printf "\n=== Tensor Compute on Metal ===\n%!";
+  let a = Tensor.from_float_list ~device:"METAL" [3] [2.0; 4.0; 6.0] in
+  let b = Tensor.from_float_list ~device:"METAL" [3] [1.0; 2.0; 3.0] in
+  let c = Tensor.add a b in
+  let result = Tensor.to_float_list c in
+  check "metal tensor length" (List.length result = 3);
+  check_float "metal tensor a+b[0]" (List.nth result 0) 3.0 1e-6;
+  check_float "metal tensor a+b[1]" (List.nth result 1) 6.0 1e-6;
+  check_float "metal tensor a+b[2]" (List.nth result 2) 9.0 1e-6
+
+let run_test name f =
+  try f () with e ->
+    incr fail_count;
+    Printf.printf "  ERROR in %s: %s\n%!" name (Printexc.to_string e)
+
 (* ---- Main ---- *)
 let () =
   Printf.printf "tinygrad_ml end-to-end tests\n%!";
   Printf.printf "============================\n%!";
-  (try test_vector_add () with e -> Printf.printf "  ERROR: %s\n%!" (Printexc.to_string e));
-  (try test_fused_ops () with e -> Printf.printf "  ERROR: %s\n%!" (Printexc.to_string e));
-  (try test_reduction () with e -> Printf.printf "  ERROR: %s\n%!" (Printexc.to_string e));
-  (try test_unary_ops () with e -> Printf.printf "  ERROR: %s\n%!" (Printexc.to_string e));
-  (try test_multi_backend_render () with e -> Printf.printf "  ERROR: %s\n%!" (Printexc.to_string e));
-  (try test_metal_execution () with e -> Printf.printf "  ERROR: %s\n%!" (Printexc.to_string e));
-  (try test_tensor_roundtrip () with e -> Printf.printf "  ERROR: %s\n%!" (Printexc.to_string e));
+  run_test "vector_add" test_vector_add;
+  run_test "fused_ops" test_fused_ops;
+  run_test "reduction" test_reduction;
+  run_test "unary_ops" test_unary_ops;
+  run_test "multi_backend_render" test_multi_backend_render;
+  run_test "metal_execution" test_metal_execution;
+  run_test "tensor_roundtrip" test_tensor_roundtrip;
+  run_test "tensor_compute" test_tensor_compute;
+  run_test "tensor_compute_metal" test_tensor_compute_metal;
   Printf.printf "\n============================\n%!";
   Printf.printf "Results: %d passed, %d failed\n%!" !pass_count !fail_count;
   if !fail_count > 0 then exit 1
