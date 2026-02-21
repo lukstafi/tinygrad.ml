@@ -110,3 +110,13 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Chained reduction broadcast test**: `loss = sum(sum(x, axis=1)^2)` on `[2;3]` tensor exercises the full pipeline: partial reduction → elementwise square (with broadcast of [2;1] result to [2;3] in the gradient) → full reduction → backward. Verifies `d/dx = 2*sum(x, axis=1)` broadcast correctly to `[[12,12,12],[30,30,30]]`.
 - **Sin gradient test**: `d/dx sum(sin(x))` at `[0, pi/4, pi/2]` verifying `cos(x) = [1, sqrt(2)/2, 0]`.
 - Total tests: 96 unit + 171 e2e = 267 all passing.
+
+## Claude round 15 decisions
+
+- **Input buffer shape metadata in step-1 copyin**: Added `buffer_shapes` table in `schedule.ml` that stores the tensor shape alongside buffer data when `from_float_list` is called. In step-1 copyin, the shape is passed to `store_realized` so downstream kernels can use `broadcast_index` for input buffers, not just reduction outputs. Previously, input buffers fell back to the ratio heuristic if they needed broadcast indexing.
+- **`broadcast_index` validity guard**: Added explicit checks that buf_shape rank doesn't exceed out_shape rank, and that each buffer dimension is either 1 (broadcast) or matches the output dimension. Raises `invalid_arg` with descriptive messages on mismatch.
+- **Movement op pass-through in `rebuild_expr`**: Extended the scheduler's expression rebuilder to strip `PERMUTE`, `PAD`, `SHRINK`, `FLIP` movement ops alongside `RESHAPE`/`EXPAND`/`CONTIGUOUS`. This enables gradient tensors containing these ops (e.g., permute gradient) to be realized through the flat-buffer kernel pipeline.
+- **Input buffer broadcast tests**: Added two tests exercising input buffers with broadcast indexing via the step-1 path: `[1;3]` expanded to `[2;3]` (trailing broadcast) and `[3;1]` expanded to `[3;2]` (leading broadcast). Both use the stride-based `broadcast_index` with shape metadata stored during copyin.
+- **Log2 gradient test**: `d/dx sum(log2(x))` at `[1, 2, 4]` verifying `1/(x*ln2)`.
+- **Permute gradient test**: `d/dx sum(permute(x, [1;0]))` on `[2;3]` tensor verifying all-ones gradient.
+- Total tests: 96 unit + 195 e2e = 291 all passing.

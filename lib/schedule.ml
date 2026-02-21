@@ -28,6 +28,14 @@ let store_buffer_data buf_uop_id data =
 let get_buffer_data buf_uop_id =
   Hashtbl.find_opt buffer_data buf_uop_id
 
+(** Shape metadata for input buffers: maps buffer UOp id -> tensor shape.
+    Stored by from_float_list alongside buffer_data. Used in step-1 copyin
+    to populate realized_shapes so downstream kernels can use broadcast_index. *)
+let buffer_shapes : (int, int list) Hashtbl.t = Hashtbl.create 64
+
+let store_buffer_shape buf_uop_id shape =
+  Hashtbl.replace buffer_shapes buf_uop_id shape
+
 (** Realized buffer store: maps buffer UOp id -> Device.buffer.
     After a buffer is allocated and filled, it's stored here.
     Also maps output-result UOp id -> Device.buffer for computed results. *)
@@ -59,6 +67,7 @@ let fresh_kernel_name () =
     to prevent state leakage. *)
 let reset () =
   Hashtbl.clear buffer_data;
+  Hashtbl.clear buffer_shapes;
   Hashtbl.clear realized_buffers;
   Hashtbl.clear realized_shapes;
   kernel_counter := 0
@@ -71,9 +80,19 @@ let reset () =
 let broadcast_index ~(buf_shape : int list) ~(out_shape : int list) (flat_idx : Uop.t) : Uop.t =
   let ndims = List.length out_shape in
   let buf_ndims = List.length buf_shape in
-  (* Right-align buf_shape with out_shape if buf has fewer dims *)
+  if buf_ndims > ndims then
+    invalid_arg (Printf.sprintf
+      "broadcast_index: buf_shape rank %d exceeds out_shape rank %d" buf_ndims ndims);
+  (* Validate: each buf dim must be 1 or match the corresponding out dim *)
   let pad_count = ndims - buf_ndims in
   let padded_buf = List.init pad_count (fun _ -> 1) @ buf_shape in
+  List.iteri (fun i bd ->
+    let od = List.nth out_shape i in
+    if bd <> 1 && bd <> od then
+      invalid_arg (Printf.sprintf
+        "broadcast_index: buf dim %d (size %d) incompatible with out dim %d (size %d)"
+        i bd i od)
+  ) padded_buf;
   (* Compute strides for out_shape (row-major) *)
   let out_arr = Array.of_list out_shape in
   let out_strides = Array.make ndims 1 in
@@ -125,7 +144,8 @@ let rebuild_expr ~buf_id_to_load (root : Uop.t) : Uop.t =
           rebuild (List.hd u.src)
         | Ops.LOAD ->
           rebuild (List.hd u.src)
-        | Ops.RESHAPE | Ops.EXPAND | Ops.CONTIGUOUS ->
+        | Ops.RESHAPE | Ops.EXPAND | Ops.CONTIGUOUS
+        | Ops.PERMUTE | Ops.PAD | Ops.SHRINK | Ops.FLIP ->
           rebuild (List.hd u.src)
         | Ops.CAST ->
           let new_src = List.map rebuild u.src in
@@ -482,7 +502,9 @@ let create_schedule ?(device="CPU") ~output_shape (roots : Uop.t list) : exec_it
   List.iter (fun (root : Uop.t) ->
     let all_uops = Uop.toposort1 root in
 
-    (* Step 1: Realize any unrealized input buffers *)
+    (* Step 1: Realize any unrealized input buffers.
+       When from_float_list stored a shape, we pass it to store_realized
+       so downstream kernels can use broadcast_index for this buffer. *)
     List.iter (fun (u : Uop.t) ->
       if u.op = Ops.BUFFER && get_realized u.id = None then
         match get_buffer_data u.id with
@@ -494,7 +516,11 @@ let create_schedule ?(device="CPU") ~output_shape (roots : Uop.t list) : exec_it
           in
           let buf = Device.alloc_buffer
             (Device.make_buffer ~device ~size ~dtype) in
-          store_realized u.id buf;
+          let shape = match Hashtbl.find_opt buffer_shapes u.id with
+            | Some s -> s
+            | None -> [size]  (* fallback: flat 1-D shape *)
+          in
+          store_realized ~shape u.id buf;
           items := Copyin { buf; data } :: !items
         | None -> ()
     ) all_uops;

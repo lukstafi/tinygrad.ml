@@ -57,8 +57,9 @@ let from_float_list ?(device="CPU") ?(dtype=Dtype.float32) shape (data : float l
   (* Create a buffer UOp and store the data in the schedule's buffer_data table *)
   let buf_id = fresh_buf_id () in
   let buf_uop = Uop.buffer buf_id (Dtype.ptr ~size:numel dtype) in
-  (* Store data for later copyin during realize *)
+  (* Store data and shape for later copyin during realize *)
   Schedule.store_buffer_data buf_uop.id (Array.of_list data);
+  Schedule.store_buffer_shape buf_uop.id shape;
   (* Build the graph: BUFFER → INDEX → LOAD → RESHAPE *)
   let idx = Uop.const Dtype.int32 0.0 in
   let indexed = Uop.index buf_uop idx in
