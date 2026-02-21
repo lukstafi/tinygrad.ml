@@ -86,3 +86,10 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Gradient descent test**: End-to-end test optimizing `f(x) = sum((x - target)^2)` using 30 steps of SGD. Demonstrates the full forward → backward → update pipeline converging from `[0,0]` to `[3,5]` within tolerance 0.05.
 - **Gradient computation tests**: Verified `d/dx sum(x*x) = 2x` and `d/da sum(a*b) = b, d/db sum(a*b) = a`.
 - Total tests: 96 unit + 131 e2e = 227 all passing.
+
+## Claude round 12 decisions
+
+- **Full REDUCE_AXIS gradient**: Implemented proper gradient for both `ADD` (sum) and `MAX` reductions through partial-axis reductions. Sum gradient expands the incoming gradient back to `src_shape` via reshape+expand. Max gradient uses an indicator mask (`x == max_expanded`) to route gradient only to argmax positions.
+- **Better backward error**: `Tensor.backward` now gives a descriptive `failwith` message instead of `assert` when loss is not scalar.
+- **Partial-axis reduction gradient test**: Verified `d/dx sum(x*x, axis=1)` for `[2;3]` tensor produces correct `2*x` gradients for all 6 elements.
+- Total tests: 96 unit + 139 e2e = 235 all passing.

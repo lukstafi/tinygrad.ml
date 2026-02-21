@@ -250,7 +250,10 @@ let ndim (t : t) = List.length t.shape
     [loss] must be a scalar (numel=1) tensor.
     Returns list of (target, gradient_tensor) pairs. *)
 let backward (loss : t) (targets : t list) : (t * t) list =
-  assert (Helpers.prod loss.shape = 1);
+  if Helpers.prod loss.shape <> 1 then
+    failwith (Printf.sprintf
+      "Tensor.backward: loss must be scalar (numel=1), got shape=[%s] (numel=%d)"
+      (String.concat "," (List.map string_of_int loss.shape)) (Helpers.prod loss.shape));
   (* Create a ones tensor as the initial gradient for the scalar loss *)
   let root_grad = Uop.const loss.dtype 1.0 in
   let target_uops = List.map (fun (t : t) -> t.uop) targets in
