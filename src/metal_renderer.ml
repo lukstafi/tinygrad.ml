@@ -39,5 +39,49 @@ kernel void %s(device float *out [[buffer(0)]],
   in
   { Program_spec.function_name; src; length; n_inputs = ninputs; expression_key }
 
+let render_reduce_kernel ~(op : Uop.reduce_op) ~(expr : Uop.expr) ~(ninputs : int)
+    ~(length : int) : Program_spec.t =
+  let expression_key =
+    Printf.sprintf "reduce:%s:%s" (Uop.reduce_op_to_name op) (Uop.expr_to_key expr)
+  in
+  let digest = Digest.to_hex (Digest.string expression_key) in
+  let function_name = "tg_reduce_" ^ String.sub digest 0 16 in
+  let input_args =
+    List.init ninputs (fun i ->
+        Printf.sprintf "device const float *in%d [[buffer(%d)]]" i (i + 1))
+    |> String.concat ",\n               "
+  in
+  let arg_block =
+    if ninputs = 0 then "constant int *n [[buffer(1)]],"
+    else Printf.sprintf "%s,\n               constant int *n [[buffer(%d)]]," input_args (ninputs + 1)
+  in
+  let init_acc, update_acc =
+    match op with
+    | Uop.Sum -> ("0.0f", Printf.sprintf "acc += (%s);" (render_expr expr))
+    | Uop.Max ->
+        ("-INFINITY", Printf.sprintf "float v = (%s);\n      acc = max(acc, v);" (render_expr expr))
+  in
+  let src =
+    Printf.sprintf
+      {|
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void %s(device float *out [[buffer(0)]],
+               %s
+               uint gid [[thread_position_in_grid]]) {
+  if (gid == 0) {
+    float acc = %s;
+    for (int i = 0; i < *n; i++) {
+      %s
+    }
+    out[0] = acc;
+  }
+}
+|}
+      function_name arg_block init_acc update_acc
+  in
+  { Program_spec.function_name; src; length; n_inputs = ninputs; expression_key }
+
 let render ~(op : Uop.binop) ~(length : int) : Program_spec.t =
   render_expr_kernel ~expr:(Uop.Binop (op, Uop.Input 0, Uop.Input 1)) ~ninputs:2 ~length

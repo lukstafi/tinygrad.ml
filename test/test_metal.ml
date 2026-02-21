@@ -47,6 +47,15 @@ let test_chain_realize_metal () =
   let d_realized = Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Metal d in
   check_array ~msg:"metal chain d=(a+b)*a" [| 11.0; 44.0; 99.0; 176.0 |] d_realized
 
+let test_reductions_metal () =
+  let x = Tinygrad_ml.Tensor.from_array [| 2.0; 7.0; 5.0; 4.0 |] in
+  let s = Tinygrad_ml.Tensor.sum ~device:Tinygrad_ml.Runtime.Metal x in
+  check_close ~msg:"metal sum" 18.0 s;
+  let m = Tinygrad_ml.Tensor.max ~device:Tinygrad_ml.Runtime.Metal x in
+  check_close ~msg:"metal max" 7.0 m;
+  let mean = Tinygrad_ml.Tensor.mean ~device:Tinygrad_ml.Runtime.Metal x in
+  check_close ~msg:"metal mean" 4.5 mean
+
 let run_or_skip () =
   match Tinygrad_ml.Metal_backend.available () with
   | Error msg ->
@@ -57,6 +66,7 @@ let run_or_skip () =
       test_unary_chain_metal ();
       test_matches_cpu ();
       test_chain_realize_metal ();
+      test_reductions_metal ();
       Printf.printf "test_metal: ok\n%!"
 
 let () = run_or_skip ()

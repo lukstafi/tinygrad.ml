@@ -85,5 +85,19 @@ let realize ?device t =
 
 let to_array ?device t = Buffer.to_array (realize ?device t)
 
-let sum ?device t =
-  Array.fold_left ( +. ) 0.0 (to_array ?device t)
+let reduce_scalar_result ?device ~(op : Uop.reduce_op) t =
+  let dev = Option.value device ~default:(Runtime.default_device ()) in
+  let expr, inputs = lower_to_expr t [] in
+  match Runtime.run_reduce ~device:dev ~op ~expr ~inputs ~shape:t.shape with
+  | Ok v -> v
+  | Error msg -> failwith msg
+
+let sum ?device t = reduce_scalar_result ?device ~op:Uop.Sum t
+
+let max ?device t = reduce_scalar_result ?device ~op:Uop.Max t
+
+let mean ?device t =
+  let n = numel t in
+  if n = 0 then failwith "mean of empty tensor is undefined"
+  else
+    sum ?device t /. float_of_int n

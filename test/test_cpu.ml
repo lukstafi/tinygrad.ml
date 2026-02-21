@@ -34,6 +34,13 @@ let test_sum_cpu () =
   let s = Tinygrad_ml.Tensor.sum ~device:Tinygrad_ml.Runtime.Cpu_c x in
   check_close ~msg:"sum" 6.0 s
 
+let test_max_mean_cpu () =
+  let x = Tinygrad_ml.Tensor.from_array [| 2.0; 7.0; 5.0; 4.0 |] in
+  let m = Tinygrad_ml.Tensor.max ~device:Tinygrad_ml.Runtime.Cpu_c x in
+  check_close ~msg:"max" 7.0 m;
+  let mean = Tinygrad_ml.Tensor.mean ~device:Tinygrad_ml.Runtime.Cpu_c x in
+  check_close ~msg:"mean" 4.5 mean
+
 let test_kernel_cache_for_fused_expr () =
   Tinygrad_ml.Cpu_c_backend.reset_kernel_cache_for_tests ();
   let before = Tinygrad_ml.Cpu_c_backend.compiled_kernel_count () in
@@ -59,5 +66,6 @@ let () =
   test_add_mul_cpu ();
   test_sub_neg_sqrt_reciprocal_cpu ();
   test_sum_cpu ();
+  test_max_mean_cpu ();
   test_kernel_cache_for_fused_expr ();
   Printf.printf "test_cpu: ok\n"

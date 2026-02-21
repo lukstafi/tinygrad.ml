@@ -2,6 +2,8 @@ type binop = Add | Sub | Mul
 
 type unop = Neg | Sqrt | Reciprocal
 
+type reduce_op = Sum | Max
+
 type expr =
   | Input of int
   | Const of float
@@ -22,6 +24,10 @@ let unop_to_name = function
   | Neg -> "neg"
   | Sqrt -> "sqrt"
   | Reciprocal -> "reciprocal"
+
+let reduce_op_to_name = function
+  | Sum -> "sum"
+  | Max -> "max"
 
 let rec expr_to_key = function
   | Input i -> Printf.sprintf "i%d" i

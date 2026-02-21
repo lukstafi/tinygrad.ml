@@ -94,6 +94,19 @@ let run_expr ~(expr : Uop.expr) ~(inputs : Buffer.t list) ~(shape : int array) =
             Ok out)
     with exn -> Error (Printexc.to_string exn)
 
+let run_reduce ~(op : Uop.reduce_op) ~(expr : Uop.expr) ~(inputs : Buffer.t list)
+    ~(shape : int array) =
+  match run_expr ~expr ~inputs ~shape with
+  | Error _ as e -> e
+  | Ok out ->
+      let arr = Buffer.to_array out in
+      let v =
+        match op with
+        | Uop.Sum -> Array.fold_left ( +. ) 0.0 arr
+        | Uop.Max -> Array.fold_left max Float.neg_infinity arr
+      in
+      Ok v
+
 let run_binop ~(op : Uop.binop) ~(a : Buffer.t) ~(b : Buffer.t) =
   if not (Buffer.same_shape a b) then
     Error

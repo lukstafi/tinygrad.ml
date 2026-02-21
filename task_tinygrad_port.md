@@ -36,3 +36,14 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - Kept `src/cuda_backend.ml` as the default stub in this environment because `cudajit` libraries are not available in the current switch; real backend is staged for optional wiring where those libs exist.
 - Added CUDA runtime tests in `test/test_cuda.ml` with runtime skip when CUDA is unavailable.
 - Extended Metal coverage with a chained-realize test in `test/test_metal.ml` to validate multi-kernel execution with intermediate realized tensors.
+
+## Codex round 6 decisions
+
+- Added backend-level reduction execution API (`Runtime.run_reduce`) with two reduction ops: `sum` and `max`.
+- Implemented compiled reduction kernels in CPU C and Metal backends:
+  - CPU: C kernel codegen and execution via existing shared-library path.
+  - Metal: dedicated MSL reduction kernel (single-thread loop for correctness-first behavior).
+- Updated Tensor reductions to use compiled backend reduction kernels (`sum`, `max`, `mean`) instead of host-side `to_array` folding.
+- Added reduction coverage to tests:
+  - `test/test_cpu.ml`: CPU `sum`/`max`/`mean`.
+  - `test/test_metal.ml`: Metal `sum`/`max`/`mean` (runtime-skipped if Metal unavailable).

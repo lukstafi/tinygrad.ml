@@ -13,11 +13,12 @@ It intentionally does **not** reproduce Python frontend convenience APIs.
 ## Current scope
 
 - Tensor rank: currently 1D buffers.
-- Ops: elementwise `add`, `sub`, `mul`, `neg`, `sqrt`, `reciprocal`, and `sum` reduction on realized output.
+- Ops: elementwise `add`, `sub`, `mul`, `neg`, `sqrt`, `reciprocal`, and compiled scalar reductions `sum`, `max`, `mean`.
 - Execution model:
   - tensors build lazy expression trees,
   - realization lowers a tree to `Uop.expr`,
-  - renderer emits one fused kernel for the whole expression.
+  - renderer emits one fused kernel for the whole expression,
+  - reduction ops emit dedicated fused reduction kernels.
 - Cache behavior:
   - tensor realization cache is per-device,
   - CPU backend caches compiled kernels by expression key.

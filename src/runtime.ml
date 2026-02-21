@@ -36,5 +36,12 @@ let run_expr ~(device : device) ~(expr : Uop.expr) ~(inputs : Buffer.t list) ~(s
   | Cuda -> Cuda_backend.run_expr ~expr ~inputs ~shape
   | Metal -> Metal_backend.run_expr ~expr ~inputs ~shape
 
+let run_reduce ~(device : device) ~(op : Uop.reduce_op) ~(expr : Uop.expr)
+    ~(inputs : Buffer.t list) ~(shape : int array) =
+  match device with
+  | Cpu_c -> Cpu_c_backend.run_reduce ~op ~expr ~inputs ~shape
+  | Cuda -> Cuda_backend.run_reduce ~op ~expr ~inputs ~shape
+  | Metal -> Metal_backend.run_reduce ~op ~expr ~inputs ~shape
+
 let run_binop ~(device : device) ~(op : Uop.binop) ~(a : Buffer.t) ~(b : Buffer.t) =
   run_expr ~device ~expr:(Uop.Binop (op, Uop.Input 0, Uop.Input 1)) ~inputs:[ a; b ] ~shape:a.shape

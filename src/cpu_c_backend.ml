@@ -109,6 +109,26 @@ let run_expr ~(expr : Uop.expr) ~(inputs : Buffer.t list) ~(shape : int array) =
       Ok out
     with exn -> Error (Printexc.to_string exn)
 
+let run_reduce ~(op : Uop.reduce_op) ~(expr : Uop.expr) ~(inputs : Buffer.t list) ~(shape : int array) =
+  if not (validate_inputs ~shape inputs) then
+    Error "input shape mismatch in cpu run_reduce"
+  else
+    try
+      let n = Buffer.numel shape in
+      if n = 0 then
+        Ok (match op with Uop.Sum -> 0.0 | Uop.Max -> Float.neg_infinity)
+      else
+        let spec = C_renderer.render_reduce_kernel ~op ~expr ~ninputs:(List.length inputs) ~length:n in
+        let compiled = ensure_compiled spec in
+        let out = Buffer.create [| 1 |] in
+        let out_ptr = Ctypes.bigarray_start Ctypes.array1 out.Buffer.data in
+        let input_ptrs =
+          List.map (fun b -> Ctypes.bigarray_start Ctypes.array1 b.Buffer.data) inputs
+        in
+        call_kernel compiled ~out_ptr ~input_ptrs ~n;
+        Ok out.Buffer.data.{0}
+    with exn -> Error (Printexc.to_string exn)
+
 let run_binop ~(op : Uop.binop) ~(a : Buffer.t) ~(b : Buffer.t) =
   if not (Buffer.same_shape a b) then
     Error
