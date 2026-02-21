@@ -7,7 +7,8 @@
   unix
   ctypes
   ctypes.foreign
-  sexplib0))
+  sexplib0
+  metal))
 
 (executable
  (name demo)

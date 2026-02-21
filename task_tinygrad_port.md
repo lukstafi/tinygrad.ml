@@ -15,3 +15,10 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - Added additional ops (`sub`, `neg`, `sqrt`, `reciprocal`) to improve educational/functional value without exploding frontend scope.
 - Added CPU kernel compilation cache keyed by expression digest to avoid recompiling equivalent fused kernels.
 - Kept CUDA/Metal default stubs for local buildability; real backends remain in `experimental/` pending optional dependency wiring in dune.
+
+## Codex round 3 decisions
+
+- Integrated real Metal backend into default `src/` path (`src/metal_backend.ml`) with `run_expr` support for fused expression kernels.
+- Updated dune library deps to include `metal` (`src/dune`) so runtime dispatch can target CPU and Metal in the main build.
+- Kept CUDA as stub in this branch due unresolved `cudajit` dune package availability in this environment.
+- Verified CPU build/test path remains green after Metal integration; Metal execution was not fully verified here due local runtime blocking during manual demo invocation.
