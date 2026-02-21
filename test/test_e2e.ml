@@ -575,7 +575,76 @@ let test_chained_reduction () =
   check_float "chained sum col1" (List.nth result 1) 100.0 1e-4;
   check_float "chained sum col2" (List.nth result 2) 132.0 1e-4
 
-(* ---- Test 24: CUDA backend registration ---- *)
+(* ---- Test 24: Gradient computation ---- *)
+let test_gradient () =
+  Printf.printf "\n=== Gradient (backward) ===\n%!";
+  Schedule.reset ();
+
+  (* Test 1: d/dx sum(x * x) at x=[1,2,3] should give grad=[2,4,6] *)
+  let x = Tensor.from_float_list [3] [1.0; 2.0; 3.0] in
+  let x_sq = Tensor.mul x x in
+  let loss = Tensor.sum x_sq in
+  let grads = Tensor.backward loss [x] in
+  check "grad count" (List.length grads = 1);
+  let (_, dx) = List.hd grads in
+  let dx_vals = Tensor.to_float_list dx in
+  check "grad length" (List.length dx_vals = 3);
+  check_float "d/dx sum(x*x)[0]" (List.nth dx_vals 0) 2.0 1e-5;
+  check_float "d/dx sum(x*x)[1]" (List.nth dx_vals 1) 4.0 1e-5;
+  check_float "d/dx sum(x*x)[2]" (List.nth dx_vals 2) 6.0 1e-5;
+
+  (* Test 2: d/dx sum(x * y) should give grad_x=y, grad_y=x *)
+  Schedule.reset ();
+  let a = Tensor.from_float_list [4] [1.0; 2.0; 3.0; 4.0] in
+  let b = Tensor.from_float_list [4] [10.0; 20.0; 30.0; 40.0] in
+  let ab = Tensor.mul a b in
+  let loss2 = Tensor.sum ab in
+  let grads2 = Tensor.backward loss2 [a; b] in
+  check "grad2 count" (List.length grads2 = 2);
+  let (_, da) = List.nth grads2 0 in
+  let (_, db) = List.nth grads2 1 in
+  let da_vals = Tensor.to_float_list da in
+  let db_vals = Tensor.to_float_list db in
+  (* d/da sum(a*b) = b *)
+  check_float "d/da sum(a*b)[0]" (List.nth da_vals 0) 10.0 1e-5;
+  check_float "d/da sum(a*b)[1]" (List.nth da_vals 1) 20.0 1e-5;
+  check_float "d/da sum(a*b)[2]" (List.nth da_vals 2) 30.0 1e-5;
+  check_float "d/da sum(a*b)[3]" (List.nth da_vals 3) 40.0 1e-5;
+  (* d/db sum(a*b) = a *)
+  check_float "d/db sum(a*b)[0]" (List.nth db_vals 0) 1.0 1e-5;
+  check_float "d/db sum(a*b)[1]" (List.nth db_vals 1) 2.0 1e-5;
+  check_float "d/db sum(a*b)[2]" (List.nth db_vals 2) 3.0 1e-5;
+  check_float "d/db sum(a*b)[3]" (List.nth db_vals 3) 4.0 1e-5
+
+(* ---- Test 25: Simple gradient descent ---- *)
+let test_gradient_descent () =
+  Printf.printf "\n=== Gradient Descent ===\n%!";
+  Schedule.reset ();
+  (* Minimize f(x) = sum((x - target)^2) using gradient descent.
+     target = [3.0; 5.0], starting from x = [0.0; 0.0].
+     d/dx sum((x-t)^2) = 2*(x-t)
+     With lr=0.1 and enough steps, x should converge toward target. *)
+  let target = [3.0; 5.0] in
+  let lr = 0.1 in
+  let x_vals = ref [0.0; 0.0] in
+  for _step = 0 to 29 do
+    Schedule.reset ();
+    let x = Tensor.from_float_list [2] !x_vals in
+    let t = Tensor.from_float_list [2] target in
+    let diff = Tensor.sub x t in
+    let sq = Tensor.mul diff diff in
+    let loss = Tensor.sum sq in
+    let grads = Tensor.backward loss [x] in
+    let (_, dx) = List.hd grads in
+    let dx_vals = Tensor.to_float_list dx in
+    (* SGD update: x = x - lr * grad *)
+    x_vals := List.map2 (fun xv gv -> xv -. lr *. gv) !x_vals dx_vals
+  done;
+  (* After 30 steps of GD with lr=0.1 on quadratic: (1-0.2)^30 ≈ 0.001 *)
+  check_float "gd x[0]→3.0" (List.nth !x_vals 0) 3.0 0.05;
+  check_float "gd x[1]→5.0" (List.nth !x_vals 1) 5.0 0.05
+
+(* ---- Test 26: CUDA backend registration ---- *)
 let test_cuda_backend () =
   Printf.printf "\n=== CUDA Backend ===\n%!";
   (* Verify CUDA backend is recognized and returns a module *)
@@ -630,6 +699,8 @@ let () =
   run_test "noncontig_multi_axis" test_noncontig_multi_axis;
   run_test "fused_reduction" test_fused_reduction;
   run_test "chained_reduction" test_chained_reduction;
+  run_test "gradient" test_gradient;
+  run_test "gradient_descent" test_gradient_descent;
   run_test "cuda_backend" test_cuda_backend;
   Printf.printf "\n============================\n%!";
   Printf.printf "Results: %d passed, %d failed\n%!" !pass_count !fail_count;
