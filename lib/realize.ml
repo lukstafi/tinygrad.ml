@@ -18,6 +18,8 @@ let run_schedule (schedule : Schedule.exec_item list) =
         | _ -> Cstyle.clang_config
       in
       let pspec = Cstyle.render_uops cfg uops in
+      if String.length (Sys.getenv_opt "TINYGRAD_DEBUG" |> Option.value ~default:"") > 0 then
+        Printf.eprintf "=== Kernel %s ===\n%s\n%!" name pspec.src;
       let module B = (val Device.get_backend device : Device.Backend) in
       let binary = B.compile name pspec.src in
       (* Reorder buffers according to pspec.globals (rendered param order) *)

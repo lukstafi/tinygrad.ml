@@ -441,7 +441,51 @@ let test_tensor_mean () =
   check "mean length" (List.length result = 1);
   check_float "mean([2,4,6,8])" (List.nth result 0) 5.0 1e-5
 
-(* ---- Test 18: CUDA backend registration ---- *)
+(* ---- Test 18: Partial-axis reduction ---- *)
+let test_partial_reduction () =
+  Printf.printf "\n=== Partial-Axis Reduction ===\n%!";
+  Schedule.reset ();
+  (* Create a [3;4] tensor and sum along axis 1 → [3;1] *)
+  let data = [1.0; 2.0; 3.0; 4.0;   (* row 0: sum=10 *)
+              5.0; 6.0; 7.0; 8.0;   (* row 1: sum=26 *)
+              9.0; 10.0; 11.0; 12.0] (* row 2: sum=42 *) in
+  let a = Tensor.from_float_list [3; 4] data in
+  let s = Tensor.sum ~axes:[1] a in
+  check "partial sum shape" (s.shape = [3; 1]);
+  let result = Tensor.to_float_list s in
+  check "partial sum length" (List.length result = 3);
+  check_float "partial sum row0" (List.nth result 0) 10.0 1e-5;
+  check_float "partial sum row1" (List.nth result 1) 26.0 1e-5;
+  check_float "partial sum row2" (List.nth result 2) 42.0 1e-5;
+
+  (* Max along axis 0 of [3;4] → [1;4] *)
+  Schedule.reset ();
+  let b = Tensor.from_float_list [3; 4] data in
+  let m = Tensor.max_ ~axes:[0] b in
+  check "partial max shape" (m.shape = [1; 4]);
+  let mresult = Tensor.to_float_list m in
+  check "partial max length" (List.length mresult = 4);
+  check_float "partial max col0" (List.nth mresult 0) 9.0 1e-5;
+  check_float "partial max col1" (List.nth mresult 1) 10.0 1e-5;
+  check_float "partial max col2" (List.nth mresult 2) 11.0 1e-5;
+  check_float "partial max col3" (List.nth mresult 3) 12.0 1e-5
+
+(* ---- Test 19: Mean along axis ---- *)
+let test_partial_mean () =
+  Printf.printf "\n=== Partial-Axis Mean ===\n%!";
+  Schedule.reset ();
+  (* [2;4] tensor, mean along axis 1 → [2;1] *)
+  let data = [2.0; 4.0; 6.0; 8.0;   (* row 0: mean=5 *)
+              10.0; 20.0; 30.0; 40.0] (* row 1: mean=25 *) in
+  let a = Tensor.from_float_list [2; 4] data in
+  let m = Tensor.mean ~axes:[1] a in
+  check "partial mean shape" (m.shape = [2; 1]);
+  let result = Tensor.to_float_list m in
+  check "partial mean length" (List.length result = 2);
+  check_float "partial mean row0" (List.nth result 0) 5.0 1e-5;
+  check_float "partial mean row1" (List.nth result 1) 25.0 1e-5
+
+(* ---- Test 20: CUDA backend registration ---- *)
 let test_cuda_backend () =
   Printf.printf "\n=== CUDA Backend ===\n%!";
   (* Verify CUDA backend is recognized and returns a module *)
@@ -490,6 +534,8 @@ let () =
   run_test "tensor_sum" test_tensor_sum;
   run_test "tensor_max" test_tensor_max;
   run_test "tensor_mean" test_tensor_mean;
+  run_test "partial_reduction" test_partial_reduction;
+  run_test "partial_mean" test_partial_mean;
   run_test "cuda_backend" test_cuda_backend;
   Printf.printf "\n============================\n%!";
   Printf.printf "Results: %d passed, %d failed\n%!" !pass_count !fail_count;

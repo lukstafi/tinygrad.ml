@@ -44,3 +44,13 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - Fixed `Dtype.Ptr` pattern match bug: constructor field order is `Ptr(base, addr_space, size)`, not `Ptr(base, size, addr_space)`. The round 5 code had the wrong field order, causing a type error.
 - Added CUDA backend e2e test: verifies stub module name and that rendered CUDA source has `__global__` and `extern "C"` markers.
 - Total tests: 96 unit + 83 e2e = 179 all passing.
+
+## Claude round 7 decisions
+
+- **Per-REDUCE_AXIS input_numel**: Moved reduction sizing from `tensor.ml` into `schedule.ml`. Each REDUCE_AXIS node now infers its own `input_numel` from source buffer sizes via `infer_reduce_input_numel`. Removed the fragile root-level `~input_numel` parameter from `create_schedule`.
+- **Partial-axis reductions**: Extended `lower_reduce_kernel` to handle `output_numel > 1`. Uses stride-aware indexing: `flat_idx = (o / inner_numel) * stride + r * inner_numel + (o % inner_numel)` where `inner_numel` = product of dims after the reduced axis. This correctly handles both last-axis reductions (`sum(axis=-1)`) and non-last-axis reductions (`max(axis=0)`).
+- **Accumulator linearization fix**: Inner-loop accumulator LOAD depends on the inner loop variable via `o + (r - r)` trick, forcing the renderer to place it inside the inner loop (same pattern used in full reductions).
+- **CPU allocator GC fix**: Added `ba_roots` hashtable to keep Bigarray backing memory alive while raw pointers reference it. Previously, the GC could collect the Bigarray and reassign the same memory to a new allocation, causing buffer aliasing. This was a latent bug affecting all multi-kernel pipelines.
+- **Scheduler takes `~output_shape`** instead of just `~numel`, enabling stride computation for partial reductions from the tensor's shape + reduce axes.
+- **TINYGRAD_DEBUG env var**: `realize.ml` prints generated kernel source when `TINYGRAD_DEBUG=1`.
+- Total tests: 96 unit + 98 e2e = 194 all passing.

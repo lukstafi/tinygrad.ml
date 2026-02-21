@@ -182,34 +182,10 @@ let contiguous (t : t) =
     2. Compile and execute kernels
     3. Replace tensor's UOp with a BUFFER reference to the realized data *)
 let realize (t : t) =
-  (* For reductions and mean (MUL over reduced result), we need to pass
-     the input numel so the scheduler knows the reduction loop bound. *)
-  let input_numel = match t.uop.op with
-    | Ops.REDUCE_AXIS ->
-      (* The source tensor had more elements; infer from BUFFER sizes in the graph *)
-      let src_uops = Uop.toposort1 (List.hd t.uop.src) in
-      List.fold_left (fun acc (u : Uop.t) ->
-        match u.dtype with
-        | Dtype.Ptr (_, _, sz) when sz > 0 -> max acc sz
-        | _ -> acc
-      ) (Helpers.prod t.shape) src_uops
-    | _ ->
-      (* Check if any child is a REDUCE_AXIS (e.g., mean = sum * 1/n) *)
-      let all = Uop.toposort1 t.uop in
-      let reduce_input = List.fold_left (fun acc (u : Uop.t) ->
-        if u.op = Ops.REDUCE_AXIS then
-          let src_uops = Uop.toposort1 (List.hd u.src) in
-          let n = List.fold_left (fun a (su : Uop.t) ->
-            match su.dtype with
-            | Dtype.Ptr (_, _, sz) when sz > 0 -> max a sz
-            | _ -> a
-          ) 0 src_uops in
-          max acc n
-        else acc
-      ) 0 all in
-      if reduce_input > 0 then reduce_input else Helpers.prod t.shape
-  in
-  let schedule = Schedule.create_schedule ~device:t.device ~numel:(Helpers.prod t.shape) ~input_numel [t.uop] in
+  (* Each REDUCE_AXIS node in the graph infers its own input_numel from
+     source buffer sizes inside create_schedule. The output_shape provides
+     stride information for partial-axis reductions. *)
+  let schedule = Schedule.create_schedule ~device:t.device ~output_shape:t.shape [t.uop] in
   Realize.run_schedule schedule;
   (* After realization, check if a result buffer was stored for this root UOp.
      If so, replace the tensor's UOp with a BUFFER node pointing to the result,
