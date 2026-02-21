@@ -406,6 +406,41 @@ let test_tensor_const () =
   check_float "ones[0]" (List.nth ro 0) 1.0 1e-6;
   check_float "ones[1]" (List.nth ro 1) 1.0 1e-6
 
+(* ---- Test 15: Tensor sum reduction ---- *)
+let test_tensor_sum () =
+  Printf.printf "\n=== Tensor Sum Reduction ===\n%!";
+  let a = Tensor.from_float_list [5] [1.0; 2.0; 3.0; 4.0; 5.0] in
+  let s = Tensor.sum a in
+  let result = Tensor.to_float_list s in
+  check "sum length" (List.length result = 1);
+  check_float "sum([1..5])" (List.nth result 0) 15.0 1e-4;
+
+  (* Sum of computed expression: sum(a + b) *)
+  let b = Tensor.from_float_list [4] [10.0; 20.0; 30.0; 40.0] in
+  let c = Tensor.from_float_list [4] [1.0; 2.0; 3.0; 4.0] in
+  let d = Tensor.add b c in
+  let s2 = Tensor.sum d in
+  let result2 = Tensor.to_float_list s2 in
+  check_float "sum(b+c)" (List.nth result2 0) 110.0 1e-4
+
+(* ---- Test 16: Tensor max reduction ---- *)
+let test_tensor_max () =
+  Printf.printf "\n=== Tensor Max Reduction ===\n%!";
+  let a = Tensor.from_float_list [5] [3.0; 1.0; 5.0; 2.0; 4.0] in
+  let m = Tensor.max_ a in
+  let result = Tensor.to_float_list m in
+  check "max length" (List.length result = 1);
+  check_float "max([3,1,5,2,4])" (List.nth result 0) 5.0 1e-6
+
+(* ---- Test 17: Tensor mean reduction ---- *)
+let test_tensor_mean () =
+  Printf.printf "\n=== Tensor Mean Reduction ===\n%!";
+  let a = Tensor.from_float_list [4] [2.0; 4.0; 6.0; 8.0] in
+  let m = Tensor.mean a in
+  let result = Tensor.to_float_list m in
+  check "mean length" (List.length result = 1);
+  check_float "mean([2,4,6,8])" (List.nth result 0) 5.0 1e-5
+
 let run_test name f =
   try f () with e ->
     incr fail_count;
@@ -431,6 +466,9 @@ let () =
   run_test "tensor_deep_chain" test_tensor_deep_chain;
   run_test "metal_chain" test_metal_chain;
   run_test "tensor_const" test_tensor_const;
+  run_test "tensor_sum" test_tensor_sum;
+  run_test "tensor_max" test_tensor_max;
+  run_test "tensor_mean" test_tensor_mean;
   Printf.printf "\n============================\n%!";
   Printf.printf "Results: %d passed, %d failed\n%!" !pass_count !fail_count;
   if !fail_count > 0 then exit 1
