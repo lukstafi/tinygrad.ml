@@ -17,8 +17,8 @@ let render_expr_kernel ~(expr : Uop.expr) ~(ninputs : int) ~(length : int) : Pro
     |> String.concat ",\n               "
   in
   let arg_block =
-    if ninputs = 0 then "constant int &n [[buffer(1)]],"
-    else Printf.sprintf "%s,\n               constant int &n [[buffer(%d)]]," input_args (ninputs + 1)
+    if ninputs = 0 then "constant int *n [[buffer(1)]],"
+    else Printf.sprintf "%s,\n               constant int *n [[buffer(%d)]]," input_args (ninputs + 1)
   in
   let src =
     Printf.sprintf
@@ -30,7 +30,7 @@ kernel void %s(device float *out [[buffer(0)]],
                %s
                uint gid [[thread_position_in_grid]]) {
   int i = int(gid);
-  if (i < n) {
+  if (i < *n) {
     out[i] = %s;
   }
 }

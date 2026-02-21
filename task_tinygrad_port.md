@@ -22,3 +22,10 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - Updated dune library deps to include `metal` (`src/dune`) so runtime dispatch can target CPU and Metal in the main build.
 - Kept CUDA as stub in this branch due unresolved `cudajit` dune package availability in this environment.
 - Verified CPU build/test path remains green after Metal integration; Metal execution was not fully verified here due local runtime blocking during manual demo invocation.
+
+## Codex round 4 decisions
+
+- Added dedicated Metal runtime tests in `test/test_metal.ml` to validate fused binary and unary expression execution on the GPU backend.
+- Wired Metal tests into `test/dune` so `dune test` now exercises both CPU and Metal execution paths.
+- Tightened Metal kernel ABI semantics by switching the generated length arg in MSL from `constant int &n` to `constant int *n`, matching host-side `set_bytes` usage.
+- Kept CUDA backend as a stub for now because `cudajit` libraries are present in local source checkout but not installed in this switch (`ocamlfind list` does not expose `cudajit.cuda` / `cudajit.nvrtc`).

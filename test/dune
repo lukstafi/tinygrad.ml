@@ -1,3 +1,7 @@
 (test
  (name test_cpu)
  (libraries tinygrad_ml))
+
+(test
+ (name test_metal)
+ (libraries tinygrad_ml))
