@@ -1,0 +1,16 @@
+(library
+ (name tinygrad_ml)
+ (public_name tinygrad_ml)
+ (modules :standard \ Demo)
+ (libraries
+  bigarray
+  unix
+  ctypes
+  ctypes.foreign
+  sexplib0))
+
+(executable
+ (name demo)
+ (public_name tinygrad_ml_demo)
+ (modules Demo)
+ (libraries tinygrad_ml))
