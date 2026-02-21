@@ -33,11 +33,20 @@ let get_buffer_data buf_uop_id =
     Also maps output-result UOp id -> Device.buffer for computed results. *)
 let realized_buffers : (int, Device.buffer) Hashtbl.t = Hashtbl.create 64
 
-let store_realized buf_uop_id dbuf =
-  Hashtbl.replace realized_buffers buf_uop_id dbuf
+(** Shape metadata for realized buffers: maps buffer UOp id -> shape.
+    Used for correct broadcast indexing when a realized buffer is smaller
+    than the kernel's iteration space. *)
+let realized_shapes : (int, int list) Hashtbl.t = Hashtbl.create 64
+
+let store_realized ?(shape=[]) buf_uop_id dbuf =
+  Hashtbl.replace realized_buffers buf_uop_id dbuf;
+  if shape <> [] then Hashtbl.replace realized_shapes buf_uop_id shape
 
 let get_realized buf_uop_id =
   Hashtbl.find_opt realized_buffers buf_uop_id
+
+let get_realized_shape buf_uop_id =
+  Hashtbl.find_opt realized_shapes buf_uop_id
 
 (** Monotonic counter for unique kernel names *)
 let kernel_counter = ref 0
@@ -51,7 +60,52 @@ let fresh_kernel_name () =
 let reset () =
   Hashtbl.clear buffer_data;
   Hashtbl.clear realized_buffers;
+  Hashtbl.clear realized_shapes;
   kernel_counter := 0
+
+(** Compute a broadcast-aware index UOp for loading from a buffer with
+    [buf_shape] when the kernel iterates over [out_shape].
+    Uses stride-based decomposition: for each dimension, if buf_shape[d]=1
+    (broadcast), contribute 0; otherwise contribute the coordinate * buf_stride.
+    [flat_idx] is the UOp for the flat iteration index over out_shape. *)
+let broadcast_index ~(buf_shape : int list) ~(out_shape : int list) (flat_idx : Uop.t) : Uop.t =
+  let ndims = List.length out_shape in
+  let buf_ndims = List.length buf_shape in
+  (* Right-align buf_shape with out_shape if buf has fewer dims *)
+  let pad_count = ndims - buf_ndims in
+  let padded_buf = List.init pad_count (fun _ -> 1) @ buf_shape in
+  (* Compute strides for out_shape (row-major) *)
+  let out_arr = Array.of_list out_shape in
+  let out_strides = Array.make ndims 1 in
+  for i = ndims - 2 downto 0 do
+    out_strides.(i) <- out_strides.(i + 1) * out_arr.(i + 1)
+  done;
+  (* Compute strides for buf_shape (row-major, skipping broadcast dims) *)
+  let buf_arr = Array.of_list padded_buf in
+  let buf_strides = Array.make ndims 1 in
+  for i = ndims - 2 downto 0 do
+    buf_strides.(i) <- buf_strides.(i + 1) * buf_arr.(i + 1)
+  done;
+  (* Build the index expression *)
+  let result = ref (Uop.const_int Dtype.int32 0) in
+  let remaining = ref flat_idx in
+  for d = 0 to ndims - 1 do
+    let dim_size = out_arr.(d) in
+    let coord = if d = ndims - 1 then !remaining
+      else Uop.idiv !remaining (Uop.const_int Dtype.int32 out_strides.(d)) in
+    if d < ndims - 1 then
+      remaining := Uop.mod_ !remaining (Uop.const_int Dtype.int32 out_strides.(d));
+    (* Only contribute if buf dim is not broadcast *)
+    if buf_arr.(d) > 1 then begin
+      if buf_strides.(d) = 1 then
+        result := Uop.add !result coord
+      else
+        result := Uop.add !result (Uop.mul coord (Uop.const_int Dtype.int32 buf_strides.(d)));
+      (* Wrap coord if buf dim < out dim (shouldn't happen for valid broadcasts) *)
+      ignore dim_size
+    end
+  done;
+  !result
 
 (** Recursively rebuild a UOp expression, replacing BUFFER→INDEX→LOAD chains
     with PARAM-based loads. Movement ops are passed through (identity indexing
@@ -103,7 +157,7 @@ let rebuild_expr ~buf_id_to_load (root : Uop.t) : Uop.t =
     - The list of Device.buffers in param order
 
     Returns (kernel_uops, param_bufs, output_buf) or None if already realized. *)
-let lower_to_kernel ~device ~numel ~kname (root : Uop.t) : (Uop.t list * Device.buffer list * Device.buffer) option =
+let lower_to_kernel ~device ~numel ~output_shape ~kname (root : Uop.t) : (Uop.t list * Device.buffer list * Device.buffer) option =
   (* Check if this root is already realized *)
   match get_realized root.id with
   | Some _ -> None
@@ -132,14 +186,19 @@ let lower_to_kernel ~device ~numel ~kname (root : Uop.t) : (Uop.t list * Device.
 
     (* Map realized UOp IDs to their PARAM → INDEX → LOAD chain.
        For buffers smaller than numel (e.g., reduction results expanded via
-       broadcast), compute a broadcast index: idx / (numel / buf_size). *)
+       broadcast), compute a stride-based broadcast index using the buffer's
+       realized shape metadata. *)
     let buf_id_to_load : (int, Uop.t) Hashtbl.t = Hashtbl.create 16 in
     List.iteri (fun idx (buf_id, dbuf) ->
       let param = List.nth input_params idx in
       let idx_expr =
         if dbuf.Device.size < numel && dbuf.Device.size > 0 then
-          if dbuf.Device.size = 1 then Uop.const_int Dtype.int32 0
-          else Uop.idiv i (Uop.const_int Dtype.int32 (numel / dbuf.Device.size))
+          match get_realized_shape buf_id with
+          | Some buf_shape ->
+            broadcast_index ~buf_shape ~out_shape:output_shape i
+          | None ->
+            if dbuf.Device.size = 1 then Uop.const_int Dtype.int32 0
+            else Uop.idiv i (Uop.const_int Dtype.int32 (numel / dbuf.Device.size))
         else i in
       let indexed = Uop.index param idx_expr in
       let loaded = Uop.load indexed in
@@ -214,8 +273,12 @@ let lower_reduce_kernel ~device ~input_numel ~output_numel ~reduce_axes ~input_s
         let param = List.nth input_params idx in
         let idx_expr =
           if dbuf.Device.size < input_numel && dbuf.Device.size > 0 then
-            if dbuf.Device.size = 1 then Uop.const_int Dtype.int32 0
-            else Uop.idiv i (Uop.const_int Dtype.int32 (input_numel / dbuf.Device.size))
+            match get_realized_shape buf_id with
+            | Some buf_shape ->
+              broadcast_index ~buf_shape ~out_shape:input_shape i
+            | None ->
+              if dbuf.Device.size = 1 then Uop.const_int Dtype.int32 0
+              else Uop.idiv i (Uop.const_int Dtype.int32 (input_numel / dbuf.Device.size))
           else i in
         let indexed = Uop.index param idx_expr in
         let loaded = Uop.load indexed in
@@ -365,12 +428,13 @@ let lower_reduce_kernel ~device ~input_numel ~output_numel ~reduce_axes ~input_s
         let param = List.nth input_params idx in
         let idx_expr =
           if dbuf.Device.size < input_numel && dbuf.Device.size > 0 then
-            if dbuf.Device.size = 1 then Uop.const_int Dtype.int32 0
-            else if dbuf.Device.size = output_numel then
-              (* Buffer matches output shape — index by outer loop var *)
-              o
-            else
-              Uop.idiv flat_idx (Uop.const_int Dtype.int32 (input_numel / dbuf.Device.size))
+            match get_realized_shape buf_id with
+            | Some buf_shape ->
+              broadcast_index ~buf_shape ~out_shape:input_shape flat_idx
+            | None ->
+              if dbuf.Device.size = 1 then Uop.const_int Dtype.int32 0
+              else if dbuf.Device.size = output_numel then o
+              else Uop.idiv flat_idx (Uop.const_int Dtype.int32 (input_numel / dbuf.Device.size))
           else flat_idx in
         let indexed = Uop.index param idx_expr in
         let loaded = Uop.load indexed in
@@ -473,11 +537,16 @@ let create_schedule ?(device="CPU") ~output_shape (roots : Uop.t list) : exec_it
             ) 1 (List.mapi (fun i d -> (i, d)) src_shape)
           else numel
         in
+        let reduce_out_shape =
+          if src_shape <> [] then
+            List.mapi (fun i d -> if List.mem i reduce_axes then 1 else d) src_shape
+          else [output_numel]
+        in
         let kname = fresh_kernel_name () in
         match lower_reduce_kernel ~device ~input_numel:reduce_input_numel ~output_numel ~reduce_axes ~input_shape ~kname reduce_op source_uop u with
         | Some (kernel_uops, param_bufs, out_buf) ->
           items := Kernel { name = kname; uops = kernel_uops; bufs = param_bufs } :: !items;
-          store_realized u.id out_buf
+          store_realized ~shape:reduce_out_shape u.id out_buf
         | None -> ()
       end
     ) all_uops;
@@ -491,10 +560,10 @@ let create_schedule ?(device="CPU") ~output_shape (roots : Uop.t list) : exec_it
     let is_reduce = root.op = Ops.REDUCE_AXIS in
     if (has_alu || is_const_graph) && not is_reduce then begin
       let kname = fresh_kernel_name () in
-      match lower_to_kernel ~device ~numel ~kname root with
+      match lower_to_kernel ~device ~numel ~output_shape ~kname root with
       | Some (kernel_uops, param_bufs, out_buf) ->
         items := Kernel { name = kname; uops = kernel_uops; bufs = param_bufs } :: !items;
-        store_realized root.id out_buf
+        store_realized ~shape:output_shape root.id out_buf
       | None -> ()
     end
   ) roots;

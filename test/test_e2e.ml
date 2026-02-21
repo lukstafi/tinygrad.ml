@@ -744,6 +744,51 @@ let test_gradient_unary () =
   check_float "exp2 grad[1]" (List.nth dx2_vals 1) (2.0 *. ln2) 1e-5;
   check_float "exp2 grad[2]" (List.nth dx2_vals 2) (4.0 *. ln2) 1e-4
 
+(* ---- Test 25d: Gradient through chained reductions with broadcast ---- *)
+let test_gradient_chained_reduce () =
+  Printf.printf "\n=== Gradient (chained reduce broadcast) ===\n%!";
+  Schedule.reset ();
+  (* x = [2;3] tensor, y = sum(x, axis=1) → [2;1],
+     z = y * y → [2;1] (elementwise square of partial sums),
+     loss = sum(z).
+     Forward: x = [[1,2,3],[4,5,6]], y = [6, 15], z = [36, 225], loss = 261.
+     d/dz sum(z) = [1, 1]
+     d/dy y*y = 2y → [12, 30]
+     d/dx sum(x, axis=1) = expand [12, 30] to [[12,12,12],[30,30,30]]
+     This exercises broadcast indexing: the y buffer (size 2) must be correctly
+     broadcast-indexed when used in a size-6 kernel. *)
+  let x = Tensor.from_float_list [2; 3] [1.0; 2.0; 3.0; 4.0; 5.0; 6.0] in
+  let y = Tensor.sum ~axes:[1] x in          (* [2;1] = [6, 15] *)
+  let z = Tensor.mul y y in                   (* [2;1] = [36, 225] *)
+  let loss = Tensor.sum z in                  (* scalar = 261 *)
+  let grads = Tensor.backward loss [x] in
+  let (_, dx) = List.hd grads in
+  let dx_vals = Tensor.to_float_list dx in
+  check "chained reduce broadcast grad length" (List.length dx_vals = 6);
+  (* d/dx = 2 * sum(x, axis=1) broadcast back to [2;3] *)
+  check_float "chained reduce bcast[0]" (List.nth dx_vals 0) 12.0 1e-4;
+  check_float "chained reduce bcast[1]" (List.nth dx_vals 1) 12.0 1e-4;
+  check_float "chained reduce bcast[2]" (List.nth dx_vals 2) 12.0 1e-4;
+  check_float "chained reduce bcast[3]" (List.nth dx_vals 3) 30.0 1e-4;
+  check_float "chained reduce bcast[4]" (List.nth dx_vals 4) 30.0 1e-4;
+  check_float "chained reduce bcast[5]" (List.nth dx_vals 5) 30.0 1e-4
+
+(* ---- Test 25e: Gradient through sin ---- *)
+let test_gradient_sin () =
+  Printf.printf "\n=== Gradient (sin) ===\n%!";
+  Schedule.reset ();
+  (* d/dx sum(sin(x)) at x=[0, pi/4, pi/2] = cos(x) = [1, sqrt(2)/2, 0] *)
+  let pi = Float.pi in
+  let x = Tensor.from_float_list [3] [0.0; pi /. 4.0; pi /. 2.0] in
+  let y = Tensor.sin_ x in
+  let loss = Tensor.sum y in
+  let grads = Tensor.backward loss [x] in
+  let (_, dx) = List.hd grads in
+  let dx_vals = Tensor.to_float_list dx in
+  check_float "sin grad[0]" (List.nth dx_vals 0) 1.0 1e-4;
+  check_float "sin grad[1]" (List.nth dx_vals 1) (Float.sqrt 2.0 /. 2.0) 1e-4;
+  check_float "sin grad[2]" (List.nth dx_vals 2) 0.0 1e-4
+
 (* ---- Test 26: CUDA backend registration ---- *)
 let test_cuda_backend () =
   Printf.printf "\n=== CUDA Backend ===\n%!";
@@ -804,6 +849,8 @@ let () =
   run_test "gradient_descent" test_gradient_descent;
   run_test "gradient_max_reduce" test_gradient_max_reduce;
   run_test "gradient_unary" test_gradient_unary;
+  run_test "gradient_chained_reduce" test_gradient_chained_reduce;
+  run_test "gradient_sin" test_gradient_sin;
   run_test "cuda_backend" test_cuda_backend;
   Printf.printf "\n============================\n%!";
   Printf.printf "Results: %d passed, %d failed\n%!" !pass_count !fail_count;
