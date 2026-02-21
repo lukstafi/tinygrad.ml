@@ -194,7 +194,7 @@ let realize (t : t) =
    | Some _buf ->
      let buf_id = fresh_buf_id () in
      let buf_uop = Uop.buffer buf_id (Dtype.ptr ~size:(Helpers.prod t.shape) t.dtype) in
-     Schedule.store_realized buf_uop.id _buf;
+     Schedule.store_realized ~shape:t.shape buf_uop.id _buf;
      t.uop <- buf_uop
    | None -> ());
   t

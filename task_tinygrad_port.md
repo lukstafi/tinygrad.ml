@@ -102,3 +102,11 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Max reduction backward tests**: Full-reduction max gradient (no ties), tie-splitting test (`[3,7,7,2]` verifying `[0, 0.5, 0.5, 0]`), and partial-axis max gradient (`max(axis=1)` on `[2;3]` tensor).
 - **Unary gradient tests**: `d/dx sum(sqrt(x))` and `d/dx sum(exp2(x))` with analytical verification.
 - Total tests: 96 unit + 161 e2e = 257 all passing.
+
+## Claude round 14 decisions
+
+- **Stride-based broadcast indexing**: Replaced the fragile ratio-based `idx / (numel / buf_size)` heuristic with proper stride-based coordinate decomposition via `broadcast_index`. For each dimension, decomposes the flat iteration index into per-axis coordinates and maps them through the buffer's strides, zeroing out broadcast dimensions (where `buf_shape[d] = 1`). This correctly handles both leading-axis broadcasts (`[1;N]` → `[M;N]`) and trailing-axis broadcasts (`[M;1]` → `[M;N]`).
+- **Shape metadata for realized buffers**: Added `realized_shapes` table alongside `realized_buffers` in the scheduler. Reduction outputs and elementwise kernel outputs now store their shape when realized, enabling correct broadcast index computation in downstream kernels.
+- **Chained reduction broadcast test**: `loss = sum(sum(x, axis=1)^2)` on `[2;3]` tensor exercises the full pipeline: partial reduction → elementwise square (with broadcast of [2;1] result to [2;3] in the gradient) → full reduction → backward. Verifies `d/dx = 2*sum(x, axis=1)` broadcast correctly to `[[12,12,12],[30,30,30]]`.
+- **Sin gradient test**: `d/dx sum(sin(x))` at `[0, pi/4, pi/2]` verifying `cos(x) = [1, sqrt(2)/2, 0]`.
+- Total tests: 96 unit + 171 e2e = 267 all passing.
