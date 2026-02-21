@@ -23,7 +23,8 @@ It intentionally does **not** reproduce Python frontend convenience APIs.
   - CPU backend caches compiled kernels by expression key.
 - Backends:
   - CPU C: active and tested (`cc` + `ctypes`/`dlopen`).
-  - CUDA/Metal: API stubs in default build; real implementations are staged in `experimental/` for environments with those packages available to dune.
+  - Metal: active and tested (`metal` package).
+  - CUDA: default build uses a stub backend; a real `cudajit` implementation is provided in `experimental/cuda_backend_real.ml` for environments that wire in `cudajit.cuda` + `cudajit.nvrtc`.
 
 ## Layout
 
@@ -31,6 +32,8 @@ It intentionally does **not** reproduce Python frontend convenience APIs.
 - `src/tensor.ml`: minimal lazy tensor API + device-keyed cache.
 - `src/c_renderer.ml`, `src/cuda_renderer.ml`, `src/metal_renderer.ml`: expression-to-kernel renderers.
 - `src/cpu_c_backend.ml`: fused-kernel compile+execute with kernel caching.
+- `src/cuda_backend.ml`: default CUDA stub backend.
+- `experimental/cuda_backend_real.ml`: real `cudajit` CUDA backend implementation (staged for optional integration).
 - `src/runtime.ml`: device selection and backend dispatch.
 
 ## Build and test
@@ -49,5 +52,5 @@ TG_DEVICE=cpu dune exec tinygrad_ml_demo
 
 ## Notes
 
-- CUDA/Metal runtime integration code exists in `experimental/`, but this repository’s default dune setup keeps buildability in environments without those optional packages.
 - CPU backend requires a C compiler (`cc`) on `PATH`.
+- CUDA tests skip cleanly when no CUDA backend is available at runtime.

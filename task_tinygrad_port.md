@@ -29,3 +29,10 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - Wired Metal tests into `test/dune` so `dune test` now exercises both CPU and Metal execution paths.
 - Tightened Metal kernel ABI semantics by switching the generated length arg in MSL from `constant int &n` to `constant int *n`, matching host-side `set_bytes` usage.
 - Kept CUDA backend as a stub for now because `cudajit` libraries are present in local source checkout but not installed in this switch (`ocamlfind list` does not expose `cudajit.cuda` / `cudajit.nvrtc`).
+
+## Codex round 5 decisions
+
+- Implemented fused-expression CUDA execution path in `experimental/cuda_backend_real.ml` (NVRTC compile, CUDA module/function cache, H2D/D2H transfers, kernel launch).
+- Kept `src/cuda_backend.ml` as the default stub in this environment because `cudajit` libraries are not available in the current switch; real backend is staged for optional wiring where those libs exist.
+- Added CUDA runtime tests in `test/test_cuda.ml` with runtime skip when CUDA is unavailable.
+- Extended Metal coverage with a chained-realize test in `test/test_metal.ml` to validate multi-kernel execution with intermediate realized tensors.

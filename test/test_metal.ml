@@ -37,6 +37,16 @@ let test_matches_cpu () =
   let metal = Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Metal expr in
   check_array ~msg:"metal matches cpu for fused expr" cpu metal
 
+let test_chain_realize_metal () =
+  let a = Tinygrad_ml.Tensor.from_array [| 1.0; 2.0; 3.0; 4.0 |] in
+  let b = Tinygrad_ml.Tensor.from_array [| 10.0; 20.0; 30.0; 40.0 |] in
+  let c = Tinygrad_ml.Tensor.add a b in
+  let c_realized = Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Metal c in
+  check_array ~msg:"metal chain c=a+b" [| 11.0; 22.0; 33.0; 44.0 |] c_realized;
+  let d = Tinygrad_ml.Tensor.mul c a in
+  let d_realized = Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Metal d in
+  check_array ~msg:"metal chain d=(a+b)*a" [| 11.0; 44.0; 99.0; 176.0 |] d_realized
+
 let run_or_skip () =
   match Tinygrad_ml.Metal_backend.available () with
   | Error msg ->
@@ -46,6 +56,7 @@ let run_or_skip () =
       test_add_mul_metal ();
       test_unary_chain_metal ();
       test_matches_cpu ();
+      test_chain_realize_metal ();
       Printf.printf "test_metal: ok\n%!"
 
 let () = run_or_skip ()

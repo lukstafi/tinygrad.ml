@@ -3,5 +3,9 @@
  (libraries tinygrad_ml))
 
 (test
+ (name test_cuda)
+ (libraries tinygrad_ml))
+
+(test
  (name test_metal)
  (libraries tinygrad_ml))
