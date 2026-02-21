@@ -9,3 +9,30 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - CUDA backend not implemented (cudajit package not installed on this machine). Renderer generates valid CUDA code but no runtime execution.
 - Metal backend uses loop-based kernels (1 threadgroup) since the scheduler doesn't yet emit SPECIAL ops for GPU thread indexing. Correct but not optimal.
 - Extended CPU exec dispatch to handle 4-5 buffer arguments.
+
+## Claude round 3 decisions
+
+- Implemented full schedule/realize pipeline for lazy tensor compute: `lower_to_kernel` converts ALU expression graphs into executable kernel UOps with PARAM→INDEX→LOAD chains.
+- Fixed `to_float_list` to fail hard on missing realized buffer instead of returning silent zeros.
+- Fixed test harness: exceptions now increment `fail_count` via `run_test` wrapper.
+- Fixed chained compute: `tensor.uop` is mutable, `realize` replaces it with a BUFFER node pointing to computed results.
+
+## Claude round 4 decisions
+
+- Fixed kernel name collision bug: CPU backend cached compiled `.so` by path, which was the same for all kernels named "tensor_kernel". Fixed by giving each kernel a unique name (`tk_0`, `tk_1`, ...) and unique `.so` filenames.
+- Fixed `numel` inference: now passed from tensor shape via `create_schedule ~numel` instead of heuristic max over buffer sizes.
+- Added `Schedule.reset()` for test isolation (clears `buffer_data` and `realized_buffers` tables).
+- Refactored `rebuild_expr` into standalone function for clarity.
+- Added CONST-only graph support: `full/zeros/ones` tensors now realize through a fill kernel (no input buffers, just CONST→STORE).
+- Added CAST handling in the rebuild function.
+- Expanded e2e tests from 47 to 73: neg, reciprocal, exp2, div (mul+reciprocal fusion), 3-stage chained compute, Metal chained compute, const/zeros/ones tensors.
+- CUDA backend still not wired (cudajit not installed on macOS, no NVIDIA GPU).
+
+## Claude round 5 decisions
+
+- Implemented Tensor reduction kernels through the scheduler: `sum`, `max`, `mean` now compile and execute through the full UOp→render→compile→exec pipeline.
+- Reduction lowering generates accumulator-based kernels: init output to identity (0 for ADD, -inf for MAX), loop over input, accumulate.
+- Multi-pass scheduling: `create_schedule` first schedules inner REDUCE_AXIS nodes (for `mean = sum * 1/n`), then the outer elementwise expression. Realized REDUCE_AXIS nodes are treated as input buffers in subsequent kernels.
+- Made `test_e2e` a proper `(test)` in dune so `dune test` catches regressions.
+- Completed `Schedule.reset` to also reset `kernel_counter` for deterministic test isolation.
+- Total tests: 96 unit + 80 e2e = 176 all passing.
