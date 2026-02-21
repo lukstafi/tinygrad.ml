@@ -61,3 +61,15 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
   - Metal vs CPU (`test/test_metal.ml`)
   - CUDA vs CPU (`test/test_cuda.ml`, runtime-skipped when CUDA unavailable).
 - Tightened CPU test tolerance to relative form (`max(1e-6, 1e-6 * abs(expected))`) for numeric stability parity with CUDA tests.
+
+## Codex round 9 decisions
+
+- Added Tensor `reshape` support (metadata view with numel check) and relaxed backend input validation to allow shape-mismatched-but-numel-equal inputs for reshape-compatible elementwise execution.
+- Added Tensor-layer axis reductions returning tensors:
+  - `sum_axis ~axes`
+  - `max_axis ~axes`
+  - `mean_axis ~axes`
+  implemented as host-side reductions over realized data for correctness and broad axis support.
+- Added tests for reshape + axis reductions and backend consistency:
+  - CPU: reshape elementwise + `sum_axis`/`max_axis`/`mean_axis`
+  - Metal/CUDA: axis-reduction consistency checks against CPU (CUDA path runtime-skipped when unavailable).

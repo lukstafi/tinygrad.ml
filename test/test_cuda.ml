@@ -54,6 +54,22 @@ let test_fused_reductions_cuda_vs_cpu () =
   check_close ~msg:"cuda fused sum matches cpu" cpu_sum cuda_sum;
   check_close ~msg:"cuda fused max matches cpu" cpu_max cuda_max
 
+let test_axis_reductions_cuda_vs_cpu () =
+  let a =
+    Tinygrad_ml.Tensor.reshape
+      (Tinygrad_ml.Tensor.from_array [| 1.0; 2.0; 3.0; 4.0; 5.0; 6.0; 7.0; 8.0 |])
+      [| 2; 4 |]
+  in
+  let cpu_sum_axis =
+    Tinygrad_ml.Tensor.sum_axis ~device:Tinygrad_ml.Runtime.Cpu_c ~axes:[ 1 ] a
+    |> Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c
+  in
+  let cuda_sum_axis =
+    Tinygrad_ml.Tensor.sum_axis ~device:Tinygrad_ml.Runtime.Cuda ~axes:[ 1 ] a
+    |> Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c
+  in
+  check_array ~msg:"cuda sum_axis matches cpu" cpu_sum_axis cuda_sum_axis
+
 let run_or_skip () =
   match Tinygrad_ml.Cuda_backend.available () with
   | Error msg ->
@@ -64,6 +80,7 @@ let run_or_skip () =
       test_chain_cuda ();
       test_reductions_cuda ();
       test_fused_reductions_cuda_vs_cpu ();
+      test_axis_reductions_cuda_vs_cpu ();
       Printf.printf "test_cuda: ok\n%!"
 
 let () = run_or_skip ()

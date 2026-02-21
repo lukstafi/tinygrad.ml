@@ -14,6 +14,16 @@ let make_data b = { shape = Array.copy b.Buffer.shape; node = Data b; cache = []
 
 let from_array arr = make_data (Buffer.of_array arr)
 
+let from_flat_array_with_shape (shape : int array) (arr : float array) =
+  let expected = Buffer.numel shape in
+  if Array.length arr <> expected then
+    invalid_arg
+      (Printf.sprintf "from_flat_array_with_shape: data length %d does not match shape numel %d"
+         (Array.length arr) expected);
+  let b = Buffer.create shape in
+  Array.iteri (fun i v -> b.data.{i} <- v) arr;
+  make_data b
+
 let full n value = { shape = [| n |]; node = Const value; cache = [] }
 let zeros n = full n 0.0
 let ones n = full n 1.0
@@ -39,6 +49,13 @@ let mul a b = binop Uop.Mul a b
 let neg a = unop Uop.Neg a
 let sqrt a = unop Uop.Sqrt a
 let reciprocal a = unop Uop.Reciprocal a
+
+let reshape t new_shape =
+  if Buffer.numel new_shape <> numel t then
+    invalid_arg
+      (Printf.sprintf "reshape: numel mismatch %s -> %s"
+         (Buffer.pp_shape t.shape) (Buffer.pp_shape new_shape));
+  { shape = Array.copy new_shape; node = t.node; cache = [] }
 
 let find_cache dev entries =
   List.find_map (fun (d, b) -> if d = dev then Some b else None) entries
@@ -84,6 +101,72 @@ let realize ?device t =
   | Error msg -> failwith msg
 
 let to_array ?device t = Buffer.to_array (realize ?device t)
+
+let normalize_axes (shape : int array) (axes : int list) =
+  let ndim = Array.length shape in
+  let normalized =
+    List.map
+      (fun ax ->
+        let a = if ax < 0 then ndim + ax else ax in
+        if a < 0 || a >= ndim then
+          invalid_arg
+            (Printf.sprintf "axis %d out of bounds for tensor with ndim=%d" ax ndim);
+        a)
+      axes
+  in
+  List.sort_uniq compare normalized
+
+let compute_strides (shape : int array) =
+  let n = Array.length shape in
+  let strides = Array.make n 1 in
+  for i = n - 2 downto 0 do
+    strides.(i) <- strides.(i + 1) * shape.(i + 1)
+  done;
+  strides
+
+let reduce_axis_host ?device ~(axes : int list) ~(op : Uop.reduce_op) t =
+  let in_arr = to_array ?device t in
+  let in_shape = t.shape in
+  let ndim = Array.length in_shape in
+  let axes = if axes = [] then List.init ndim Fun.id else normalize_axes in_shape axes in
+  let is_reduced = Array.make ndim false in
+  List.iter (fun a -> is_reduced.(a) <- true) axes;
+  let out_shape = Array.mapi (fun i d -> if is_reduced.(i) then 1 else d) in_shape in
+  let in_strides = compute_strides in_shape in
+  let out_strides = compute_strides out_shape in
+  let out_numel = Buffer.numel out_shape in
+  let out =
+    match op with
+    | Uop.Sum -> Array.make out_numel 0.0
+    | Uop.Max -> Array.make out_numel Float.neg_infinity
+  in
+  for idx = 0 to Array.length in_arr - 1 do
+    let rem = ref idx in
+    let out_idx = ref 0 in
+    for d = 0 to ndim - 1 do
+      let coord = !rem / in_strides.(d) in
+      rem := !rem mod in_strides.(d);
+      if not is_reduced.(d) then
+        out_idx := !out_idx + (coord * out_strides.(d))
+    done;
+    begin
+      match op with
+      | Uop.Sum -> out.(!out_idx) <- out.(!out_idx) +. in_arr.(idx)
+      | Uop.Max -> out.(!out_idx) <- max out.(!out_idx) in_arr.(idx)
+    end
+  done;
+  from_flat_array_with_shape out_shape out
+
+let sum_axis ?device ~axes t = reduce_axis_host ?device ~axes ~op:Uop.Sum t
+let max_axis ?device ~axes t = reduce_axis_host ?device ~axes ~op:Uop.Max t
+let mean_axis ?device ~axes t =
+  let out = reduce_axis_host ?device ~axes ~op:Uop.Sum t in
+  let ndim = Array.length t.shape in
+  let axes = if axes = [] then List.init ndim Fun.id else normalize_axes t.shape axes in
+  let factor = List.fold_left (fun acc a -> acc * t.shape.(a)) 1 axes in
+  if factor = 0 then failwith "mean_axis: invalid zero reduction factor";
+  let scaled = Array.map (fun v -> v /. float_of_int factor) (to_array out) in
+  from_flat_array_with_shape out.shape scaled
 
 let reduce_scalar_result ?device ~(op : Uop.reduce_op) t =
   let dev = Option.value device ~default:(Runtime.default_device ()) in

@@ -55,10 +55,12 @@ let compile_reduce ~(op : Uop.reduce_op) ~(expr : Uop.expr) ~(ninputs : int) ~(l
   compile_spec spec
 
 let validate_inputs ~shape (inputs : Buffer.t list) =
+  let target_numel = Buffer.numel shape in
   List.for_all
     (fun (b : Buffer.t) ->
-      Array.length b.shape = Array.length shape
-      && Array.for_all2 ( = ) b.shape shape)
+      (Array.length b.shape = Array.length shape
+       && Array.for_all2 ( = ) b.shape shape)
+      || Buffer.numel b.shape = target_numel)
     inputs
 
 let alloc_input_devs (inputs : Buffer.t list) =

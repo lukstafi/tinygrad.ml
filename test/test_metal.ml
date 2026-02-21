@@ -70,6 +70,31 @@ let test_fused_reductions_metal_vs_cpu () =
   check_close ~msg:"metal fused sum matches cpu" cpu_sum metal_sum;
   check_close ~msg:"metal fused max matches cpu" cpu_max metal_max
 
+let test_axis_reductions_metal_vs_cpu () =
+  let a =
+    Tinygrad_ml.Tensor.reshape
+      (Tinygrad_ml.Tensor.from_array [| 1.0; 2.0; 3.0; 4.0; 5.0; 6.0; 7.0; 8.0 |])
+      [| 2; 4 |]
+  in
+  let cpu_sum_axis =
+    Tinygrad_ml.Tensor.sum_axis ~device:Tinygrad_ml.Runtime.Cpu_c ~axes:[ 1 ] a
+    |> Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c
+  in
+  let metal_sum_axis =
+    Tinygrad_ml.Tensor.sum_axis ~device:Tinygrad_ml.Runtime.Metal ~axes:[ 1 ] a
+    |> Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c
+  in
+  check_array ~msg:"metal sum_axis matches cpu" cpu_sum_axis metal_sum_axis;
+  let cpu_max_axis =
+    Tinygrad_ml.Tensor.max_axis ~device:Tinygrad_ml.Runtime.Cpu_c ~axes:[ 0 ] a
+    |> Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c
+  in
+  let metal_max_axis =
+    Tinygrad_ml.Tensor.max_axis ~device:Tinygrad_ml.Runtime.Metal ~axes:[ 0 ] a
+    |> Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c
+  in
+  check_array ~msg:"metal max_axis matches cpu" cpu_max_axis metal_max_axis
+
 let run_or_skip () =
   match Tinygrad_ml.Metal_backend.available () with
   | Error msg ->
@@ -82,6 +107,7 @@ let run_or_skip () =
       test_chain_realize_metal ();
       test_reductions_metal ();
       test_fused_reductions_metal_vs_cpu ();
+      test_axis_reductions_metal_vs_cpu ();
       Printf.printf "test_metal: ok\n%!"
 
 let () = run_or_skip ()

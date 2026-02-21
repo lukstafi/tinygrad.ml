@@ -74,6 +74,30 @@ let test_kernel_cache_for_fused_expr () =
       (Printf.sprintf "expected compiled kernel cache hit, after_first=%d after_second=%d"
          after_first after_second)
 
+let test_reshape_and_axis_reductions_cpu () =
+  let a =
+    Tinygrad_ml.Tensor.reshape
+      (Tinygrad_ml.Tensor.from_array [| 1.0; 2.0; 3.0; 4.0; 5.0; 6.0; 7.0; 8.0 |])
+      [| 2; 4 |]
+  in
+  let b =
+    Tinygrad_ml.Tensor.reshape
+      (Tinygrad_ml.Tensor.from_array [| 8.0; 7.0; 6.0; 5.0; 4.0; 3.0; 2.0; 1.0 |])
+      [| 2; 4 |]
+  in
+  let c = Tinygrad_ml.Tensor.add a b in
+  let c_arr = Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c c in
+  check_array ~msg:"reshape add" [| 9.0; 9.0; 9.0; 9.0; 9.0; 9.0; 9.0; 9.0 |] c_arr;
+  let s = Tinygrad_ml.Tensor.sum_axis ~device:Tinygrad_ml.Runtime.Cpu_c ~axes:[ 1 ] a in
+  check_array ~msg:"sum_axis axis=1" [| 10.0; 26.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c s);
+  let m = Tinygrad_ml.Tensor.max_axis ~device:Tinygrad_ml.Runtime.Cpu_c ~axes:[ 0 ] a in
+  check_array ~msg:"max_axis axis=0" [| 5.0; 6.0; 7.0; 8.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c m);
+  let mean = Tinygrad_ml.Tensor.mean_axis ~device:Tinygrad_ml.Runtime.Cpu_c ~axes:[ 1 ] a in
+  check_array ~msg:"mean_axis axis=1" [| 2.5; 6.5 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c mean)
+
 let () =
   test_add_mul_cpu ();
   test_sub_neg_sqrt_reciprocal_cpu ();
@@ -81,4 +105,5 @@ let () =
   test_max_mean_cpu ();
   test_fused_reductions_cpu ();
   test_kernel_cache_for_fused_expr ();
+  test_reshape_and_axis_reductions_cpu ();
   Printf.printf "test_cpu: ok\n"
