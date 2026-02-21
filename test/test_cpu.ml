@@ -98,6 +98,37 @@ let test_reshape_and_axis_reductions_cpu () =
   check_array ~msg:"mean_axis axis=1" [| 2.5; 6.5 |]
     (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c mean)
 
+let test_noncontiguous_axis_reductions_cpu () =
+  let a =
+    Tinygrad_ml.Tensor.reshape
+      (Tinygrad_ml.Tensor.from_array (Array.init 24 (fun i -> float_of_int (i + 1))))
+      [| 2; 3; 4 |]
+  in
+  let s = Tinygrad_ml.Tensor.sum_axis ~device:Tinygrad_ml.Runtime.Cpu_c ~axes:[ 0; 2 ] a in
+  check_array ~msg:"sum_axis axes=[0;2]" [| 68.0; 100.0; 132.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c s);
+  let m = Tinygrad_ml.Tensor.max_axis ~device:Tinygrad_ml.Runtime.Cpu_c ~axes:[ 0; 2 ] a in
+  check_array ~msg:"max_axis axes=[0;2]" [| 16.0; 20.0; 24.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c m);
+  let mean = Tinygrad_ml.Tensor.mean_axis ~device:Tinygrad_ml.Runtime.Cpu_c ~axes:[ 0; 2 ] a in
+  check_array ~msg:"mean_axis axes=[0;2]" [| 8.5; 12.5; 16.5 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c mean)
+
+let test_reshape_preserves_realize_cache_cpu () =
+  Tinygrad_ml.Cpu_c_backend.reset_kernel_cache_for_tests ();
+  let a = Tinygrad_ml.Tensor.from_array [| 1.0; 2.0; 3.0; 4.0 |] in
+  let b = Tinygrad_ml.Tensor.from_array [| 10.0; 20.0; 30.0; 40.0 |] in
+  let expr = Tinygrad_ml.Tensor.add a b in
+  ignore (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c expr);
+  let after_first = Tinygrad_ml.Cpu_c_backend.compiled_kernel_count () in
+  let reshaped = Tinygrad_ml.Tensor.reshape expr [| 2; 2 |] in
+  ignore (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c reshaped);
+  let after_second = Tinygrad_ml.Cpu_c_backend.compiled_kernel_count () in
+  if after_second <> after_first then
+    failwith
+      (Printf.sprintf "reshape should reuse realized cache, after_first=%d after_second=%d"
+         after_first after_second)
+
 let () =
   test_add_mul_cpu ();
   test_sub_neg_sqrt_reciprocal_cpu ();
@@ -106,4 +137,6 @@ let () =
   test_fused_reductions_cpu ();
   test_kernel_cache_for_fused_expr ();
   test_reshape_and_axis_reductions_cpu ();
+  test_noncontiguous_axis_reductions_cpu ();
+  test_reshape_preserves_realize_cache_cpu ();
   Printf.printf "test_cpu: ok\n"

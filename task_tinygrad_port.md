@@ -73,3 +73,12 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - Added tests for reshape + axis reductions and backend consistency:
   - CPU: reshape elementwise + `sum_axis`/`max_axis`/`mean_axis`
   - Metal/CUDA: axis-reduction consistency checks against CPU (CUDA path runtime-skipped when unavailable).
+
+## Codex round 10 decisions
+
+- Improved reshape semantics in `Tensor` by preserving realized per-device cache across reshape (with remapped cached buffer shapes), avoiding unnecessary re-realization after metadata-only view changes.
+- Optimized `mean_axis` host reduction path to avoid a second `to_array` realization pass by scaling reduction output in-memory before wrapping as tensor data.
+- Extended axis-reduction correctness tests:
+  - CPU non-contiguous multi-axis checks (`axes=[0;2]` on `[2;3;4]`) for `sum_axis`, `max_axis`, `mean_axis`.
+  - Metal/CUDA non-contiguous `sum_axis` consistency checks against CPU.
+- Harmonized Metal test tolerance with relative epsilon style used in CPU/CUDA tests.

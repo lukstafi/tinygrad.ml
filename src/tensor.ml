@@ -55,7 +55,17 @@ let reshape t new_shape =
     invalid_arg
       (Printf.sprintf "reshape: numel mismatch %s -> %s"
          (Buffer.pp_shape t.shape) (Buffer.pp_shape new_shape));
-  { shape = Array.copy new_shape; node = t.node; cache = [] }
+  let node =
+    match t.node with
+    | Data (b : Buffer.t) -> Data { b with shape = Array.copy new_shape }
+    | _ -> t.node
+  in
+  let cache =
+    List.map
+      (fun (dev, (b : Buffer.t)) -> (dev, { b with shape = Array.copy new_shape }))
+      t.cache
+  in
+  { shape = Array.copy new_shape; node; cache }
 
 let find_cache dev entries =
   List.find_map (fun (d, b) -> if d = dev then Some b else None) entries
@@ -124,7 +134,7 @@ let compute_strides (shape : int array) =
   done;
   strides
 
-let reduce_axis_host ?device ~(axes : int list) ~(op : Uop.reduce_op) t =
+let reduce_axis_host_data ?device ~(axes : int list) ~(op : Uop.reduce_op) t =
   let in_arr = to_array ?device t in
   let in_shape = t.shape in
   let ndim = Array.length in_shape in
@@ -155,18 +165,25 @@ let reduce_axis_host ?device ~(axes : int list) ~(op : Uop.reduce_op) t =
       | Uop.Max -> out.(!out_idx) <- max out.(!out_idx) in_arr.(idx)
     end
   done;
+  (out_shape, out)
+
+let reduce_axis_host ?device ~(axes : int list) ~(op : Uop.reduce_op) t =
+  let out_shape, out = reduce_axis_host_data ?device ~axes ~op t in
   from_flat_array_with_shape out_shape out
 
 let sum_axis ?device ~axes t = reduce_axis_host ?device ~axes ~op:Uop.Sum t
 let max_axis ?device ~axes t = reduce_axis_host ?device ~axes ~op:Uop.Max t
 let mean_axis ?device ~axes t =
-  let out = reduce_axis_host ?device ~axes ~op:Uop.Sum t in
+  let out_shape, out_sum = reduce_axis_host_data ?device ~axes ~op:Uop.Sum t in
   let ndim = Array.length t.shape in
   let axes = if axes = [] then List.init ndim Fun.id else normalize_axes t.shape axes in
   let factor = List.fold_left (fun acc a -> acc * t.shape.(a)) 1 axes in
   if factor = 0 then failwith "mean_axis: invalid zero reduction factor";
-  let scaled = Array.map (fun v -> v /. float_of_int factor) (to_array out) in
-  from_flat_array_with_shape out.shape scaled
+  let inv = 1.0 /. float_of_int factor in
+  for i = 0 to Array.length out_sum - 1 do
+    out_sum.(i) <- out_sum.(i) *. inv
+  done;
+  from_flat_array_with_shape out_shape out_sum
 
 let reduce_scalar_result ?device ~(op : Uop.reduce_op) t =
   let dev = Option.value device ~default:(Runtime.default_device ()) in

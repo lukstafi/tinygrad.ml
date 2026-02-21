@@ -1,5 +1,5 @@
 let check_close ~msg a b =
-  let eps = 1e-5 in
+  let eps = max 1e-6 (1e-6 *. Float.abs a) in
   if Float.abs (a -. b) > eps then
     failwith (Printf.sprintf "%s: expected %.8f, got %.8f" msg a b)
 
@@ -93,7 +93,21 @@ let test_axis_reductions_metal_vs_cpu () =
     Tinygrad_ml.Tensor.max_axis ~device:Tinygrad_ml.Runtime.Metal ~axes:[ 0 ] a
     |> Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c
   in
-  check_array ~msg:"metal max_axis matches cpu" cpu_max_axis metal_max_axis
+  check_array ~msg:"metal max_axis matches cpu" cpu_max_axis metal_max_axis;
+  let b =
+    Tinygrad_ml.Tensor.reshape
+      (Tinygrad_ml.Tensor.from_array (Array.init 24 (fun i -> float_of_int (i + 1))))
+      [| 2; 3; 4 |]
+  in
+  let cpu_noncontig =
+    Tinygrad_ml.Tensor.sum_axis ~device:Tinygrad_ml.Runtime.Cpu_c ~axes:[ 0; 2 ] b
+    |> Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c
+  in
+  let metal_noncontig =
+    Tinygrad_ml.Tensor.sum_axis ~device:Tinygrad_ml.Runtime.Metal ~axes:[ 0; 2 ] b
+    |> Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c
+  in
+  check_array ~msg:"metal noncontig sum_axis matches cpu" cpu_noncontig metal_noncontig
 
 let run_or_skip () =
   match Tinygrad_ml.Metal_backend.available () with
