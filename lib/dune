@@ -1,0 +1,4 @@
+(library
+ (name tinygrad_ml)
+ (wrapped false)
+ (libraries unix str ctypes ctypes-foreign))
