@@ -163,3 +163,17 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - Added CPU tests:
   - Forward: `expand` values and `expand` used as intermediate node in elementwise expressions.
   - Backward: `d/dx sum(expand(x))` and `d/dx sum(expand(x)^2)`.
+
+## Codex round 17 decisions
+
+- Added lazy `Permute` movement op to Tensor AST:
+  - New `Permute` node with axis validation (rank match, in-range, no duplicates).
+  - `Tensor.permute` API added for axis reordering.
+- Implemented host realization for `Permute`:
+  - Added stride-based `permute_host_data` that remaps output coordinates back to source coordinates using inverse permutation.
+  - Lowering handles `Permute` like `Expand`/`Reduce_axis` (realize first, then use as input buffer).
+- Added `Permute` autograd rule:
+  - Backward uses inverse permutation (`permute(upstream, inverse_axes)`).
+- Added CPU tests:
+  - Forward `permute` correctness on `[2;3] -> [3;2]`.
+  - Backward `d/dx sum(permute(x)) = ones_like(x)`.

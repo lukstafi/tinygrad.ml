@@ -133,6 +133,17 @@ let test_expand_cpu () =
     [| 2.0; 20.0; 3.0; 30.0; 4.0; 40.0 |]
     (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c prod)
 
+let test_permute_cpu () =
+  let a =
+    Tinygrad_ml.Tensor.reshape
+      (Tinygrad_ml.Tensor.from_array [| 1.0; 2.0; 3.0; 4.0; 5.0; 6.0 |])
+      [| 2; 3 |]
+  in
+  let ap = Tinygrad_ml.Tensor.permute a [| 1; 0 |] in
+  check_array ~msg:"permute forward"
+    [| 1.0; 4.0; 2.0; 5.0; 3.0; 6.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c ap)
+
 let test_noncontiguous_axis_reductions_cpu () =
   let a =
     Tinygrad_ml.Tensor.reshape
@@ -259,6 +270,19 @@ let test_backward_expand_cpu () =
     [| 18.0; 24.0 |]
     (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c dx2)
 
+let test_backward_permute_cpu () =
+  let x =
+    Tinygrad_ml.Tensor.reshape
+      (Tinygrad_ml.Tensor.from_array [| 1.0; 2.0; 3.0; 4.0; 5.0; 6.0 |])
+      [| 2; 3 |]
+  in
+  let xp = Tinygrad_ml.Tensor.permute x [| 1; 0 |] in
+  let grads = Tinygrad_ml.Tensor.backward ~wrt:[ x ] xp in
+  let _, dx = List.hd grads in
+  check_array ~msg:"d/dx sum(permute(x))"
+    [| 1.0; 1.0; 1.0; 1.0; 1.0; 1.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c dx)
+
 let test_backward_unary_extra_cpu () =
   let x = Tinygrad_ml.Tensor.from_array [| 0.0; 1.0; 2.0 |] in
   let y = Tinygrad_ml.Tensor.exp2 x in
@@ -292,11 +316,13 @@ let () =
   test_kernel_cache_for_fused_expr ();
   test_reshape_and_axis_reductions_cpu ();
   test_expand_cpu ();
+  test_permute_cpu ();
   test_noncontiguous_axis_reductions_cpu ();
   test_reshape_preserves_realize_cache_cpu ();
   test_backward_basic_cpu ();
   test_gradient_descent_cpu ();
   test_backward_reductions_cpu ();
   test_backward_expand_cpu ();
+  test_backward_permute_cpu ();
   test_backward_unary_extra_cpu ();
   Printf.printf "test_cpu: ok\n"
