@@ -105,10 +105,34 @@ let grad_for_op (ctx : Uop.t) (ret : Uop.t) : Uop.t option list =
     in
     [Some (Uop.permute ctx inv_axes)]
   | Ops.REDUCE_AXIS ->
-    let reduce_op = match ret.arg with Uop.Axis_arg (_, op, _) -> op | _ -> Ops.ADD in
+    let reduce_op, reduce_axes, src_shape = match ret.arg with
+      | Uop.Axis_arg (axes, op, src_shape) -> (op, axes, src_shape)
+      | _ -> (Ops.ADD, [], [])
+    in
     begin match reduce_op with
-    | Ops.ADD -> [Some ctx]  (* broadcast back *)
-    | _ -> [Some ctx]  (* simplified *)
+    | Ops.ADD ->
+      (* d/dx sum(x, axes) = expand gradient back to src_shape.
+         ctx has shape with 1s at reduced positions; expand to src_shape. *)
+      if src_shape <> [] then
+        [Some (Uop.expand (Uop.reshape ctx (List.mapi (fun i d ->
+          if List.mem i reduce_axes then 1 else d) src_shape)) src_shape)]
+      else
+        [Some ctx]  (* fallback: no shape info *)
+    | Ops.MAX ->
+      (* d/dx max(x, axes) = gradient flows only to argmax positions.
+         Simplified: use indicator mask (x == max_expanded) * ctx_expanded. *)
+      if src_shape <> [] then begin
+        let out_shape = List.mapi (fun i d ->
+          if List.mem i reduce_axes then 1 else d) src_shape in
+        let ctx_expanded = Uop.expand (Uop.reshape ctx out_shape) src_shape in
+        let ret_expanded = Uop.expand (Uop.reshape ret out_shape) src_shape in
+        let x = List.hd ret.src in
+        let mask = Uop.cmpeq x ret_expanded in
+        let zero = Uop.const ctx.dtype 0.0 in
+        [Some (Uop.where_ mask ctx_expanded zero)]
+      end else
+        [Some ctx]
+    | _ -> [Some ctx]
     end
   | _ ->
     (* No gradient defined *)

@@ -616,6 +616,31 @@ let test_gradient () =
   check_float "d/db sum(a*b)[2]" (List.nth db_vals 2) 3.0 1e-5;
   check_float "d/db sum(a*b)[3]" (List.nth db_vals 3) 4.0 1e-5
 
+(* ---- Test 24b: Gradient through partial-axis reduction ---- *)
+let test_gradient_partial_reduce () =
+  Printf.printf "\n=== Gradient (partial reduce) ===\n%!";
+  Schedule.reset ();
+  (* x = [2;3] tensor, y = sum(x * x, axis=1) → [2;1]
+     loss = sum(y) = sum of all x_i^2
+     d/dx_i loss = 2 * x_i (same as full sum of squares)
+     Data: [[1,2,3],[4,5,6]] *)
+  let x = Tensor.from_float_list [2; 3] [1.0; 2.0; 3.0; 4.0; 5.0; 6.0] in
+  let xsq = Tensor.mul x x in
+  let y = Tensor.sum ~axes:[1] xsq in  (* [2;1] = [14, 77] *)
+  let loss = Tensor.sum y in            (* scalar = 91 *)
+  let grads = Tensor.backward loss [x] in
+  check "partial reduce grad count" (List.length grads = 1);
+  let (_, dx) = List.hd grads in
+  let dx_vals = Tensor.to_float_list dx in
+  check "partial reduce grad length" (List.length dx_vals = 6);
+  (* d/dx_i = 2*x_i *)
+  check_float "grad partial[0]" (List.nth dx_vals 0) 2.0 1e-5;
+  check_float "grad partial[1]" (List.nth dx_vals 1) 4.0 1e-5;
+  check_float "grad partial[2]" (List.nth dx_vals 2) 6.0 1e-5;
+  check_float "grad partial[3]" (List.nth dx_vals 3) 8.0 1e-5;
+  check_float "grad partial[4]" (List.nth dx_vals 4) 10.0 1e-5;
+  check_float "grad partial[5]" (List.nth dx_vals 5) 12.0 1e-5
+
 (* ---- Test 25: Simple gradient descent ---- *)
 let test_gradient_descent () =
   Printf.printf "\n=== Gradient Descent ===\n%!";
@@ -700,6 +725,7 @@ let () =
   run_test "fused_reduction" test_fused_reduction;
   run_test "chained_reduction" test_chained_reduction;
   run_test "gradient" test_gradient;
+  run_test "gradient_partial_reduce" test_gradient_partial_reduce;
   run_test "gradient_descent" test_gradient_descent;
   run_test "cuda_backend" test_cuda_backend;
   Printf.printf "\n============================\n%!";
