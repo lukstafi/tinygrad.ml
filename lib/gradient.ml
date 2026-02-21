@@ -62,17 +62,42 @@ let grad_for_op (ctx : Uop.t) (ret : Uop.t) : Uop.t option list =
   | Ops.CONTIGUOUS ->
     [Some ctx]
   | Ops.RESHAPE ->
-    let src = List.hd ret.src in
-    (* Need to figure out src shape from the arg *)
-    let src_shape = match src.arg with
-      | Uop.Shape s -> s
-      | _ -> []  (* fallback *)
+    (* gradient of reshape is reshape back to source shape *)
+    let src_shape = match ret.arg with
+      | Uop.Shape _ ->
+        (* ret.arg has the output shape; we need the source shape.
+           The source UOp carries its own shape in its arg if it's a RESHAPE,
+           or we infer from EXPAND/original. For the general case, look at
+           the source node's shape arg. *)
+        (match (List.hd ret.src).arg with
+         | Uop.Shape s -> s
+         | _ -> [])  (* fallback: src has no shape info *)
+      | _ -> []
     in
-    ignore src_shape;
-    [Some (Uop.reshape ctx []);  (* placeholder — needs src shape *) None]
+    if src_shape <> [] then
+      [Some (Uop.reshape ctx src_shape)]
+    else
+      (* Can't determine source shape — pass gradient through unchanged *)
+      [Some ctx]
   | Ops.EXPAND ->
-    (* gradient of expand is reduce_sum over expanded dims *)
-    [Some ctx; None]  (* simplified — full version reduces expanded dims *)
+    (* gradient of expand is reduce_sum over expanded dims.
+       Expanded dims are those where src had size 1 but output has size > 1. *)
+    let out_shape = match ret.arg with Uop.Shape s -> s | _ -> [] in
+    let src = List.hd ret.src in
+    let src_shape = match src.arg with Uop.Shape s -> s | _ -> [] in
+    if src_shape <> [] && out_shape <> [] then begin
+      (* Find dims that were expanded: src[i]=1 but out[i]>1 *)
+      let expanded_axes = List.filter_map (fun i ->
+        if List.nth src_shape i = 1 && List.nth out_shape i > 1 then Some i
+        else None
+      ) (List.init (List.length src_shape) Fun.id) in
+      if expanded_axes = [] then [Some ctx]
+      else
+        (* Reduce sum over expanded dims, then reshape back to src_shape *)
+        let reduced = Uop.reduce_axis ~src_shape:out_shape ctx Ops.ADD expanded_axes in
+        [Some (Uop.reshape reduced src_shape)]
+    end else
+      [Some ctx]  (* fallback: pass through *)
   | Ops.PERMUTE ->
     let inv_axes = match ret.arg with
       | Uop.Int_list axes -> Helpers.argsort axes

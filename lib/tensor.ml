@@ -245,3 +245,18 @@ let numel (t : t) = Helpers.prod t.shape
 
 (** Number of dimensions *)
 let ndim (t : t) = List.length t.shape
+
+(** Compute gradients of a scalar loss w.r.t. target tensors.
+    [loss] must be a scalar (numel=1) tensor.
+    Returns list of (target, gradient_tensor) pairs. *)
+let backward (loss : t) (targets : t list) : (t * t) list =
+  assert (Helpers.prod loss.shape = 1);
+  (* Create a ones tensor as the initial gradient for the scalar loss *)
+  let root_grad = Uop.const loss.dtype 1.0 in
+  let target_uops = List.map (fun (t : t) -> t.uop) targets in
+  let grad_pairs = Gradient.compute_gradient loss.uop root_grad target_uops in
+  List.map (fun ((target_uop : Uop.t), grad_uop) ->
+    let target = List.find (fun (tgt : t) -> tgt.uop.Uop.id = target_uop.Uop.id) targets in
+    let grad_tensor = of_uop ~device:target.device target.shape target.dtype grad_uop in
+    (target, grad_tensor)
+  ) grad_pairs

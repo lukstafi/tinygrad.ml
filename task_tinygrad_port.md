@@ -77,3 +77,12 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Realized REDUCE_AXIS as reduction inputs**: `lower_reduce_kernel` now scans for realized `REDUCE_AXIS` nodes (not just `BUFFER` nodes) as input sources, allowing reductions to chain through realized intermediate results.
 - **Added chained reduction test**: `sum(axis=2)` then `sum(axis=0)` on `[2;3;4]` → `[1;3;1]` verifying that intermediate `[2;3;1]` is correctly used as input to the second reduction.
 - Total tests: 96 unit + 115 e2e = 211 all passing.
+
+## Claude round 11 decisions
+
+- **Tensor-level `backward` API**: Added `Tensor.backward loss targets` that performs reverse-mode autodiff through the UOp graph and returns gradient tensors. Takes a scalar loss tensor and list of target tensors, returns `(target, gradient_tensor)` pairs that can be realized and used for parameter updates.
+- **Fixed RESHAPE gradient**: Now correctly reshapes the incoming gradient back to the source shape using shape metadata from the UOp arg.
+- **Fixed EXPAND gradient**: Now reduces (sums) over expanded dimensions and reshapes back to the source shape, correctly implementing the transpose of broadcast.
+- **Gradient descent test**: End-to-end test optimizing `f(x) = sum((x - target)^2)` using 30 steps of SGD. Demonstrates the full forward → backward → update pipeline converging from `[0,0]` to `[3,5]` within tolerance 0.05.
+- **Gradient computation tests**: Verified `d/dx sum(x*x) = 2x` and `d/da sum(a*b) = b, d/db sum(a*b) = a`.
+- Total tests: 96 unit + 131 e2e = 227 all passing.
