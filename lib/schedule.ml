@@ -39,6 +39,19 @@ let store_realized buf_uop_id dbuf =
 let get_realized buf_uop_id =
   Hashtbl.find_opt realized_buffers buf_uop_id
 
+(** Reset all scheduler state. Call between independent test runs
+    to prevent state leakage. *)
+let reset () =
+  Hashtbl.clear buffer_data;
+  Hashtbl.clear realized_buffers
+
+(** Monotonic counter for unique kernel names *)
+let kernel_counter = ref 0
+let fresh_kernel_name () =
+  let n = !kernel_counter in
+  incr kernel_counter;
+  Printf.sprintf "tk_%d" n
+
 (** Lower a lazy UOp expression tree into a concrete kernel UOp graph.
     Given a root UOp that represents a lazy computation (ALU ops over
     BUFFER→INDEX→LOAD chains), produce:
@@ -106,9 +119,12 @@ let lower_to_kernel ~device ~numel (root : Uop.t) : (Uop.t list * Device.buffer 
               (* Replace with the rebuilt source (which should be a BUFFER → our load) *)
               rebuild (List.hd u.src)
             | Ops.RESHAPE | Ops.EXPAND | Ops.CONTIGUOUS ->
-              (* Movement ops: pass through the source for now
-                 (proper implementation would adjust indexing) *)
+              (* Movement ops: pass through the source for elementwise kernels.
+                 For 1-D elementwise ops over flat buffers, indexing is identity. *)
               rebuild (List.hd u.src)
+            | Ops.CAST ->
+              let new_src = List.map rebuild u.src in
+              Uop.cast u.dtype (List.hd new_src)
             | _ when Ops.Group.is_alu u.op ->
               (* ALU op: rebuild sources *)
               let new_src = List.map rebuild u.src in
@@ -139,8 +155,9 @@ let lower_to_kernel ~device ~numel (root : Uop.t) : (Uop.t list * Device.buffer 
   end
 
 (** Create schedule for a UOp root.
-    Handles both input buffer realization and expression computation. *)
-let create_schedule ?(device="CPU") (roots : Uop.t list) : exec_item list =
+    Handles both input buffer realization and expression computation.
+    [numel] is the number of elements in the output tensor (from tensor shape). *)
+let create_schedule ?(device="CPU") ~numel (roots : Uop.t list) : exec_item list =
   let items = ref [] in
 
   List.iter (fun (root : Uop.t) ->
@@ -166,18 +183,10 @@ let create_schedule ?(device="CPU") (roots : Uop.t list) : exec_item list =
     (* Step 2: Check if there are ALU ops that need computation *)
     let has_alu = List.exists (fun (u : Uop.t) -> Ops.Group.is_alu u.op) all_uops in
     if has_alu then begin
-      (* Find the numel from shape info or buffer sizes *)
-      let numel = List.fold_left (fun acc (u : Uop.t) ->
-        if u.op = Ops.BUFFER then
-          match get_realized u.id with
-          | Some dbuf -> max acc dbuf.size
-          | None -> acc
-        else acc
-      ) 1 all_uops in
-
+      let kname = fresh_kernel_name () in
       match lower_to_kernel ~device ~numel root with
       | Some (kernel_uops, param_bufs, out_buf) ->
-        items := Kernel { name = "tensor_kernel"; uops = kernel_uops; bufs = param_bufs } :: !items;
+        items := Kernel { name = kname; uops = kernel_uops; bufs = param_bufs } :: !items;
         store_realized root.id out_buf
       | None -> ()
     end

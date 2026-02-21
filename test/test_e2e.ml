@@ -288,8 +288,6 @@ let test_tensor_compute () =
 
   (* Chained: (a + b) * a — c was already realized, so c.uop is now a BUFFER *)
   let d = Tensor.mul c a in
-  Printf.printf "  d.uop: %s\n%!" (Uop.pp_uop d.uop);
-  List.iter (fun s -> Printf.printf "    src: %s\n%!" (Uop.pp_uop s)) d.uop.src;
   let result2 = Tensor.to_float_list d in
   check_float "tensor (a+b)*a[0]" (List.nth result2 0) 11.0 1e-6;
   check_float "tensor (a+b)*a[1]" (List.nth result2 1) 44.0 1e-6;
@@ -317,6 +315,97 @@ let test_tensor_compute_metal () =
   check_float "metal tensor a+b[1]" (List.nth result 1) 6.0 1e-6;
   check_float "metal tensor a+b[2]" (List.nth result 2) 9.0 1e-6
 
+(* ---- Test 10: Tensor const, neg, reciprocal ---- *)
+let test_tensor_unary_ops () =
+  Printf.printf "\n=== Tensor Unary Ops ===\n%!";
+  let a = Tensor.from_float_list [4] [2.0; 4.0; 5.0; 10.0] in
+
+  (* neg *)
+  let n = Tensor.neg_ a in
+  let rn = Tensor.to_float_list n in
+  check_float "neg[0]" (List.nth rn 0) (-2.0) 1e-6;
+  check_float "neg[1]" (List.nth rn 1) (-4.0) 1e-6;
+
+  (* reciprocal *)
+  let r = Tensor.reciprocal a in
+  let rr = Tensor.to_float_list r in
+  check_float "recip[0]" (List.nth rr 0) 0.5 1e-6;
+  check_float "recip[1]" (List.nth rr 1) 0.25 1e-6;
+  check_float "recip[3]" (List.nth rr 3) 0.1 1e-6;
+
+  (* exp2 *)
+  let e = Tensor.from_float_list [3] [0.0; 1.0; 3.0] in
+  let e2 = Tensor.exp2_ e in
+  let re = Tensor.to_float_list e2 in
+  check_float "exp2(0)" (List.nth re 0) 1.0 1e-6;
+  check_float "exp2(1)" (List.nth re 1) 2.0 1e-6;
+  check_float "exp2(3)" (List.nth re 2) 8.0 1e-5
+
+(* ---- Test 11: Tensor div (mul + reciprocal fusion) ---- *)
+let test_tensor_div () =
+  Printf.printf "\n=== Tensor Div ===\n%!";
+  let a = Tensor.from_float_list [4] [10.0; 20.0; 30.0; 40.0] in
+  let b = Tensor.from_float_list [4] [2.0; 4.0; 5.0; 8.0] in
+  let c = Tensor.div a b in
+  let result = Tensor.to_float_list c in
+  check_float "div[0]" (List.nth result 0) 5.0 1e-5;
+  check_float "div[1]" (List.nth result 1) 5.0 1e-5;
+  check_float "div[2]" (List.nth result 2) 6.0 1e-5;
+  check_float "div[3]" (List.nth result 3) 5.0 1e-5
+
+(* ---- Test 12: Deep chained compute (3 stages) ---- *)
+let test_tensor_deep_chain () =
+  Printf.printf "\n=== Tensor Deep Chain ===\n%!";
+  (* a=1,2,3 b=10,20,30 *)
+  (* c = a+b = 11,22,33 — realize *)
+  (* d = c*a = 11,44,99 — realize *)
+  (* e = d-b = 1,24,69 *)
+  let a = Tensor.from_float_list [3] [1.0; 2.0; 3.0] in
+  let b = Tensor.from_float_list [3] [10.0; 20.0; 30.0] in
+  let c = Tensor.add a b in
+  let _ = Tensor.to_float_list c in  (* force realize of c *)
+  let d = Tensor.mul c a in
+  let _ = Tensor.to_float_list d in  (* force realize of d *)
+  let e = Tensor.sub d b in
+  let result = Tensor.to_float_list e in
+  check_float "deep chain[0] (c-b)" (List.nth result 0) 1.0 1e-5;
+  check_float "deep chain[1]" (List.nth result 1) 24.0 1e-5;
+  check_float "deep chain[2]" (List.nth result 2) 69.0 1e-4
+
+(* ---- Test 13: Metal chained compute ---- *)
+let test_metal_chain () =
+  Printf.printf "\n=== Metal Chained Compute ===\n%!";
+  let a = Tensor.from_float_list ~device:"METAL" [3] [3.0; 6.0; 9.0] in
+  let b = Tensor.from_float_list ~device:"METAL" [3] [1.0; 2.0; 3.0] in
+  let c = Tensor.add a b in
+  let _ = Tensor.to_float_list c in
+  let d = Tensor.mul c b in
+  let result = Tensor.to_float_list d in
+  check_float "metal chain (a+b)*b[0]" (List.nth result 0) 4.0 1e-5;   (* (3+1)*1 = 4 *)
+  check_float "metal chain (a+b)*b[1]" (List.nth result 1) 16.0 1e-5;  (* (6+2)*2 = 16 *)
+  check_float "metal chain (a+b)*b[2]" (List.nth result 2) 36.0 1e-4   (* (9+3)*3 = 36 *)
+
+(* ---- Test 14: Tensor const_like and full ---- *)
+let test_tensor_const () =
+  Printf.printf "\n=== Tensor Const ===\n%!";
+  let t = Tensor.full [3] 7.0 in
+  let result = Tensor.to_float_list t in
+  check "const length" (List.length result = 3);
+  check_float "full(7)[0]" (List.nth result 0) 7.0 1e-6;
+  check_float "full(7)[1]" (List.nth result 1) 7.0 1e-6;
+  check_float "full(7)[2]" (List.nth result 2) 7.0 1e-6;
+
+  (* zeros/ones *)
+  let z = Tensor.zeros [2] in
+  let rz = Tensor.to_float_list z in
+  check_float "zeros[0]" (List.nth rz 0) 0.0 1e-6;
+  check_float "zeros[1]" (List.nth rz 1) 0.0 1e-6;
+
+  let o = Tensor.ones [2] in
+  let ro = Tensor.to_float_list o in
+  check_float "ones[0]" (List.nth ro 0) 1.0 1e-6;
+  check_float "ones[1]" (List.nth ro 1) 1.0 1e-6
+
 let run_test name f =
   try f () with e ->
     incr fail_count;
@@ -326,15 +415,22 @@ let run_test name f =
 let () =
   Printf.printf "tinygrad_ml end-to-end tests\n%!";
   Printf.printf "============================\n%!";
+  (* Low-level UOp kernel tests *)
   run_test "vector_add" test_vector_add;
   run_test "fused_ops" test_fused_ops;
   run_test "reduction" test_reduction;
   run_test "unary_ops" test_unary_ops;
   run_test "multi_backend_render" test_multi_backend_render;
   run_test "metal_execution" test_metal_execution;
+  (* Tensor API tests *)
   run_test "tensor_roundtrip" test_tensor_roundtrip;
   run_test "tensor_compute" test_tensor_compute;
   run_test "tensor_compute_metal" test_tensor_compute_metal;
+  run_test "tensor_unary_ops" test_tensor_unary_ops;
+  run_test "tensor_div" test_tensor_div;
+  run_test "tensor_deep_chain" test_tensor_deep_chain;
+  run_test "metal_chain" test_metal_chain;
+  run_test "tensor_const" test_tensor_const;
   Printf.printf "\n============================\n%!";
   Printf.printf "Results: %d passed, %d failed\n%!" !pass_count !fail_count;
   if !fail_count > 0 then exit 1
