@@ -1,0 +1,11 @@
+(test
+ (name test_all)
+ (libraries tinygrad_ml str))
+
+(executable
+ (name test_quick)
+ (libraries tinygrad_ml))
+
+(executable
+ (name test_e2e)
+ (libraries tinygrad_ml str))

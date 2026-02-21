@@ -1,0 +1,228 @@
+(** End-to-end execution tests for tinygrad_ml.
+    Tests the full pipeline: UOp IR → render C → compile → execute → verify *)
+
+let pass_count = ref 0
+let fail_count = ref 0
+
+let check name cond =
+  if cond then (incr pass_count; Printf.printf "  PASS: %s\n%!" name)
+  else (incr fail_count; Printf.printf "  FAIL: %s\n%!" name)
+
+let check_float name got expected tolerance =
+  let ok = Float.abs (got -. expected) <= tolerance in
+  if not ok then Printf.printf "    got %f, expected %f\n%!" got expected;
+  check name ok
+
+(** Helper: build, compile, and run a kernel on CPU.
+    [bufs] is indexed by param number (param 0 = bufs[0], param 1 = bufs[1], etc.)
+    The renderer may reorder params in the function signature; we use pspec.globals
+    to map from function argument order to the caller's param indices. *)
+let run_cpu_kernel kernel_name uops bufs =
+  let pspec = Cstyle.render_uops Cstyle.clang_config uops in
+  let module B = (val Device.get_backend "CPU" : Device.Backend) in
+  let so_path = B.compile kernel_name pspec.src in
+  (* pspec.globals gives param indices in function signature order *)
+  let ordered_ptrs = List.map (fun idx ->
+    let b = List.nth bufs idx in
+    (b : Device.buffer).ptr
+  ) pspec.globals in
+  B.exec kernel_name so_path ordered_ptrs [];
+  pspec
+
+(* ---- Test 1: Vector Add ---- *)
+let test_vector_add () =
+  Printf.printf "\n=== Vector Add ===\n%!";
+  let n = 256 in
+  (* Kernel: out[i] = a[i] + b[i] *)
+  let a_param = Uop.param 0 (Dtype.ptr Dtype.float32) in
+  let b_param = Uop.param 1 (Dtype.ptr Dtype.float32) in
+  let out_param = Uop.param 2 (Dtype.ptr Dtype.float32) in
+  let i = Uop.range (Uop.const_int Dtype.int32 n) [0; 0] in
+  let a_val = Uop.load (Uop.index a_param i) in
+  let b_val = Uop.load (Uop.index b_param i) in
+  let sum = Uop.add a_val b_val in
+  let st = Uop.store (Uop.index out_param i) sum in
+  let end_r = Uop.end_ i in
+  let kernel = Uop.sink ~name:"vec_add" [st; end_r] in
+  let uops = Uop.toposort1 kernel in
+
+  (* Allocate buffers *)
+  let a_buf = Device.alloc_buffer (Device.make_buffer ~device:"CPU" ~size:n ~dtype:Dtype.float32) in
+  let b_buf = Device.alloc_buffer (Device.make_buffer ~device:"CPU" ~size:n ~dtype:Dtype.float32) in
+  let out_buf = Device.alloc_buffer (Device.make_buffer ~device:"CPU" ~size:n ~dtype:Dtype.float32) in
+
+  (* Fill: a[i] = i, b[i] = 100-i *)
+  Device.copyin_floats a_buf (Array.init n Float.of_int);
+  Device.copyin_floats b_buf (Array.init n (fun i -> 100.0 -. Float.of_int i));
+
+  (* Execute — bufs indexed by param number: param0=a, param1=b, param2=out *)
+  let _pspec = run_cpu_kernel "vec_add" uops [a_buf; b_buf; out_buf] in
+
+  (* Verify: out[i] = i + (100-i) = 100.0 *)
+  let out = Device.copyout_floats out_buf in
+  let all_correct = Array.for_all (fun v -> Float.abs (v -. 100.0) < 1e-6) out in
+  check "vec_add all correct" all_correct;
+  check_float "vec_add[0]" out.(0) 100.0 1e-6;
+  check_float "vec_add[255]" out.(255) 100.0 1e-6
+
+(* ---- Test 2: Elementwise chain: out = (a + b) * c ---- *)
+let test_fused_ops () =
+  Printf.printf "\n=== Fused Ops: (a+b)*c ===\n%!";
+  let n = 128 in
+  let a_param = Uop.param 0 (Dtype.ptr Dtype.float32) in
+  let b_param = Uop.param 1 (Dtype.ptr Dtype.float32) in
+  let c_param = Uop.param 2 (Dtype.ptr Dtype.float32) in
+  let out_param = Uop.param 3 (Dtype.ptr Dtype.float32) in
+  let i = Uop.range (Uop.const_int Dtype.int32 n) [0; 0] in
+  let a_val = Uop.load (Uop.index a_param i) in
+  let b_val = Uop.load (Uop.index b_param i) in
+  let c_val = Uop.load (Uop.index c_param i) in
+  let sum = Uop.add a_val b_val in
+  let prod = Uop.mul sum c_val in
+  let st = Uop.store (Uop.index out_param i) prod in
+  let end_r = Uop.end_ i in
+  let kernel = Uop.sink ~name:"fused_add_mul" [st; end_r] in
+  let uops = Uop.toposort1 kernel in
+
+  let a_buf = Device.alloc_buffer (Device.make_buffer ~device:"CPU" ~size:n ~dtype:Dtype.float32) in
+  let b_buf = Device.alloc_buffer (Device.make_buffer ~device:"CPU" ~size:n ~dtype:Dtype.float32) in
+  let c_buf = Device.alloc_buffer (Device.make_buffer ~device:"CPU" ~size:n ~dtype:Dtype.float32) in
+  let out_buf = Device.alloc_buffer (Device.make_buffer ~device:"CPU" ~size:n ~dtype:Dtype.float32) in
+
+  (* a=2, b=3, c=4 → (2+3)*4 = 20 *)
+  Device.copyin_floats a_buf (Array.make n 2.0);
+  Device.copyin_floats b_buf (Array.make n 3.0);
+  Device.copyin_floats c_buf (Array.make n 4.0);
+
+  (* Execute with 4 buffers — bufs indexed by param number *)
+  let _pspec = run_cpu_kernel "fused_add_mul" uops [a_buf; b_buf; c_buf; out_buf] in
+
+  let result = Device.copyout_floats out_buf in
+  let all_correct = Array.for_all (fun v -> Float.abs (v -. 20.0) < 1e-6) result in
+  check "fused (2+3)*4=20" all_correct;
+  check_float "fused[0]" result.(0) 20.0 1e-6;
+  check_float "fused[127]" result.(127) 20.0 1e-6
+
+(* ---- Test 3: Reduction (sum) ---- *)
+let test_reduction () =
+  Printf.printf "\n=== Sum Reduction ===\n%!";
+  let n = 256 in
+  (* Kernel: out[0] = sum(in[i]) for i in 0..n
+     We use a local accumulator variable approach to avoid the
+     "load outside loop" problem. The init store sets out[0]=0,
+     then inside the loop we read out[0], add in[i], and write back. *)
+  let in_param = Uop.param 0 (Dtype.ptr Dtype.float32) in
+  let out_param = Uop.param 1 (Dtype.ptr Dtype.float32) in
+  let zero_idx = Uop.const_int Dtype.int32 0 in
+  let out_idx = Uop.index out_param zero_idx in
+  let init_store = Uop.store out_idx (Uop.const Dtype.float32 0.0) in
+  (* Loop — build a fresh INDEX inside the loop so the LOAD is inside *)
+  let i = Uop.range (Uop.const_int Dtype.int32 n) [0; 0] in
+  let in_val = Uop.load (Uop.index in_param i) in
+  (* Create a new INDEX node for reading inside the loop, dependent on i
+     so that it sorts after RANGE. We use an ADD of 0 to create a data
+     dependency on i while keeping the index value at 0. *)
+  let loop_out_idx = Uop.index out_param (Uop.sub i i) in
+  let cur = Uop.load loop_out_idx in
+  let new_val = Uop.add cur in_val in
+  let st = Uop.store loop_out_idx new_val in
+  let end_r = Uop.end_ i in
+  let kernel = Uop.sink ~name:"reduce_sum" [init_store; st; end_r] in
+  let uops = Uop.toposort1 kernel in
+
+  let in_buf = Device.alloc_buffer (Device.make_buffer ~device:"CPU" ~size:n ~dtype:Dtype.float32) in
+  let out_buf = Device.alloc_buffer (Device.make_buffer ~device:"CPU" ~size:1 ~dtype:Dtype.float32) in
+
+  (* Fill with 1.0 → sum should be 256.0 *)
+  Device.copyin_floats in_buf (Array.make n 1.0);
+  Device.copyin_floats out_buf (Array.make 1 0.0);
+
+  let _pspec = run_cpu_kernel "reduce_sum" uops [in_buf; out_buf] in
+
+  let result = Device.copyout_floats out_buf in
+  check_float "reduce_sum" result.(0) (Float.of_int n) 1e-4;
+
+  (* Also test with i values: sum(i for i in 0..n) = n*(n-1)/2 *)
+  Device.copyin_floats in_buf (Array.init n Float.of_int);
+  Device.copyin_floats out_buf (Array.make 1 0.0);
+  let _pspec = run_cpu_kernel "reduce_sum" uops [in_buf; out_buf] in
+  let result2 = Device.copyout_floats out_buf in
+  let expected = Float.of_int (n * (n - 1) / 2) in
+  check_float "reduce_sum(0..255)" result2.(0) expected 1e-1
+
+(* ---- Test 4: Unary ops ---- *)
+let test_unary_ops () =
+  Printf.printf "\n=== Unary Ops ===\n%!";
+  let n = 64 in
+  (* Kernel: out[i] = sqrt(in[i]) *)
+  let in_param = Uop.param 0 (Dtype.ptr Dtype.float32) in
+  let out_param = Uop.param 1 (Dtype.ptr Dtype.float32) in
+  let i = Uop.range (Uop.const_int Dtype.int32 n) [0; 0] in
+  let in_val = Uop.load (Uop.index in_param i) in
+  let result = Uop.sqrt_ in_val in
+  let st = Uop.store (Uop.index out_param i) result in
+  let end_r = Uop.end_ i in
+  let kernel = Uop.sink ~name:"sqrt_kernel" [st; end_r] in
+  let uops = Uop.toposort1 kernel in
+
+  let in_buf = Device.alloc_buffer (Device.make_buffer ~device:"CPU" ~size:n ~dtype:Dtype.float32) in
+  let out_buf = Device.alloc_buffer (Device.make_buffer ~device:"CPU" ~size:n ~dtype:Dtype.float32) in
+
+  Device.copyin_floats in_buf (Array.init n (fun i -> Float.of_int (i * i)));
+  let _pspec = run_cpu_kernel "sqrt_kernel" uops [in_buf; out_buf] in
+  let result = Device.copyout_floats out_buf in
+
+  check_float "sqrt(0)" result.(0) 0.0 1e-6;
+  check_float "sqrt(1)" result.(1) 1.0 1e-6;
+  check_float "sqrt(4)" result.(2) 2.0 1e-6;
+  check_float "sqrt(9)" result.(3) 3.0 1e-5;
+  check_float "sqrt(3969)" result.(63) 63.0 1e-3
+
+(* ---- Test 5: Multi-backend rendering ---- *)
+let test_multi_backend_render () =
+  Printf.printf "\n=== Multi-backend Rendering ===\n%!";
+  let n = 1024 in
+  let in_param = Uop.param 0 (Dtype.ptr Dtype.float32) in
+  let out_param = Uop.param 1 (Dtype.ptr Dtype.float32) in
+  let i = Uop.range (Uop.const_int Dtype.int32 n) [0; 0] in
+  let in_val = Uop.load (Uop.index in_param i) in
+  let result = Uop.mul in_val (Uop.const Dtype.float32 2.0) in
+  let st = Uop.store (Uop.index out_param i) result in
+  let end_r = Uop.end_ i in
+  let kernel = Uop.sink ~name:"scale2x" [st; end_r] in
+  let uops = Uop.toposort1 kernel in
+
+  (* CPU *)
+  let cpu_pspec = Cstyle.render_uops Cstyle.clang_config uops in
+  let has_void = try ignore (Str.search_forward (Str.regexp_string "void") cpu_pspec.src 0); true with Not_found -> false in
+  check "CPU has void" has_void;
+
+  (* CUDA *)
+  let cuda_pspec = Cstyle.render_uops (Cstyle.cuda_config ~arch:"sm_80") uops in
+  let has_global = try ignore (Str.search_forward (Str.regexp_string "__global__") cuda_pspec.src 0); true with Not_found -> false in
+  check "CUDA has __global__" has_global;
+  let has_extern = try ignore (Str.search_forward (Str.regexp_string {|extern "C"|}) cuda_pspec.src 0); true with Not_found -> false in
+  check "CUDA has extern C" has_extern;
+
+  (* Metal *)
+  let metal_pspec = Cstyle.render_uops Cstyle.metal_config uops in
+  let has_kernel = try ignore (Str.search_forward (Str.regexp_string "kernel void") metal_pspec.src 0); true with Not_found -> false in
+  check "Metal has kernel void" has_kernel;
+  let has_device = try ignore (Str.search_forward (Str.regexp_string "device float") metal_pspec.src 0); true with Not_found -> false in
+  check "Metal has device prefix" has_device;
+  let has_gid = try ignore (Str.search_forward (Str.regexp_string "threadgroup_position_in_grid") metal_pspec.src 0); true with Not_found -> false in
+  check "Metal has gid attribute" has_gid;
+  ()
+
+(* ---- Main ---- *)
+let () =
+  Printf.printf "tinygrad_ml end-to-end tests\n%!";
+  Printf.printf "============================\n%!";
+  (try test_vector_add () with e -> Printf.printf "  ERROR: %s\n%!" (Printexc.to_string e));
+  (try test_fused_ops () with e -> Printf.printf "  ERROR: %s\n%!" (Printexc.to_string e));
+  (try test_reduction () with e -> Printf.printf "  ERROR: %s\n%!" (Printexc.to_string e));
+  (try test_unary_ops () with e -> Printf.printf "  ERROR: %s\n%!" (Printexc.to_string e));
+  (try test_multi_backend_render () with e -> Printf.printf "  ERROR: %s\n%!" (Printexc.to_string e));
+  Printf.printf "\n============================\n%!";
+  Printf.printf "Results: %d passed, %d failed\n%!" !pass_count !fail_count;
+  if !fail_count > 0 then exit 1
