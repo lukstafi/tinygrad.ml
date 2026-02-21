@@ -865,7 +865,96 @@ let test_gradient_permute () =
     check_float (Printf.sprintf "permute grad[%d]" i) v 1.0 1e-6
   ) dx_vals
 
-(* ---- Test 30: CUDA backend registration ---- *)
+(* ---- Test 30: Where + comparison ops (elementwise max via where) ---- *)
+let test_where_cmp () =
+  Printf.printf "\n=== Where + Comparison ===\n%!";
+  Schedule.reset ();
+  (* where(a < b, b, a) = elementwise max(a, b) *)
+  let a = Tensor.from_float_list [4] [3.0; 1.0; 4.0; 2.0] in
+  let b = Tensor.from_float_list [4] [2.0; 5.0; 1.0; 2.0] in
+  let cond = Tensor.lt a b in  (* [true, false, false, false] = [1, 0, 0, 0] *)
+  let result = Tensor.where_ cond b a in  (* select b where a<b, else a *)
+  let vals = Tensor.to_float_list result in
+  check "where length" (List.length vals = 4);
+  (* max(3,2)=3, max(1,5)=5, max(4,1)=4, max(2,2)=2 *)
+  check_float "where[0]" (List.nth vals 0) 3.0 1e-6;
+  check_float "where[1]" (List.nth vals 1) 5.0 1e-6;
+  check_float "where[2]" (List.nth vals 2) 4.0 1e-6;
+  check_float "where[3]" (List.nth vals 3) 2.0 1e-6
+
+(* ---- Test 31: Cast bool→float forward ---- *)
+let test_cast_forward () =
+  Printf.printf "\n=== Cast Forward ===\n%!";
+  Schedule.reset ();
+  (* cast(a < b, float32) should give [1.0, 0.0, 0.0, 1.0] *)
+  let a = Tensor.from_float_list [4] [1.0; 5.0; 3.0; 0.0] in
+  let b = Tensor.from_float_list [4] [2.0; 3.0; 3.0; 1.0] in
+  let cond = Tensor.lt a b in
+  let cond_f = Tensor.cast Dtype.float32 cond in
+  let vals = Tensor.to_float_list cond_f in
+  check "cast length" (List.length vals = 4);
+  check_float "cast[0]" (List.nth vals 0) 1.0 1e-6;
+  check_float "cast[1]" (List.nth vals 1) 0.0 1e-6;
+  check_float "cast[2]" (List.nth vals 2) 0.0 1e-6;
+  check_float "cast[3]" (List.nth vals 3) 1.0 1e-6
+
+(* ---- Test 32: Expand gradient ---- *)
+let test_gradient_expand () =
+  Printf.printf "\n=== Gradient (expand) ===\n%!";
+  Schedule.reset ();
+  (* x is [1;3], expand to [2;3], then sum all.
+     d/dx sum(expand(x, [2;3])) = [2, 2, 2] because each element of x
+     appears twice in the expansion, so gradient is 2 per element. *)
+  let x = Tensor.from_float_list [1; 3] [10.0; 20.0; 30.0] in
+  let x_exp = Tensor.expand x [2; 3] in
+  let loss = Tensor.sum x_exp in
+  let grads = Tensor.backward loss [x] in
+  let (_, dx) = List.hd grads in
+  let dx_vals = Tensor.to_float_list dx in
+  check "expand grad length" (List.length dx_vals = 3);
+  check_float "expand grad[0]" (List.nth dx_vals 0) 2.0 1e-6;
+  check_float "expand grad[1]" (List.nth dx_vals 1) 2.0 1e-6;
+  check_float "expand grad[2]" (List.nth dx_vals 2) 2.0 1e-6
+
+(* ---- Test 33: Where gradient ---- *)
+let test_gradient_where () =
+  Printf.printf "\n=== Gradient (where) ===\n%!";
+  Schedule.reset ();
+  (* relu(x) = where(x > 0, x, 0). d/dx sum(relu(x)) = where(x > 0, 1, 0) *)
+  let x = Tensor.from_float_list [4] [~-.2.0; 3.0; ~-.1.0; 5.0] in
+  let zero = Tensor.zeros [4] in
+  let cond = Tensor.lt zero x in  (* 0 < x = [false, true, false, true] *)
+  let relu = Tensor.where_ cond x zero in
+  let loss = Tensor.sum relu in
+  let grads = Tensor.backward loss [x] in
+  let (_, dx) = List.hd grads in
+  let dx_vals = Tensor.to_float_list dx in
+  check "where grad length" (List.length dx_vals = 4);
+  check_float "relu grad[0]" (List.nth dx_vals 0) 0.0 1e-6;
+  check_float "relu grad[1]" (List.nth dx_vals 1) 1.0 1e-6;
+  check_float "relu grad[2]" (List.nth dx_vals 2) 0.0 1e-6;
+  check_float "relu grad[3]" (List.nth dx_vals 3) 1.0 1e-6
+
+(* ---- Test 34: Expand + mul forward (non-trivial broadcast expression) ---- *)
+let test_expand_mul () =
+  Printf.printf "\n=== Expand + Mul Forward ===\n%!";
+  Schedule.reset ();
+  (* x=[1;3], expand to [2;3], multiply with y=[2;3].
+     Tests that expand + elementwise works correctly through the scheduler. *)
+  let x = Tensor.from_float_list [1; 3] [2.0; 3.0; 4.0] in
+  let y = Tensor.from_float_list [2; 3] [1.0; 1.0; 1.0; 10.0; 10.0; 10.0] in
+  let x_exp = Tensor.expand x [2; 3] in
+  let result = Tensor.mul x_exp y in
+  let vals = Tensor.to_float_list result in
+  check "expand_mul length" (List.length vals = 6);
+  check_float "expand_mul[0]" (List.nth vals 0) 2.0 1e-6;
+  check_float "expand_mul[1]" (List.nth vals 1) 3.0 1e-6;
+  check_float "expand_mul[2]" (List.nth vals 2) 4.0 1e-6;
+  check_float "expand_mul[3]" (List.nth vals 3) 20.0 1e-6;
+  check_float "expand_mul[4]" (List.nth vals 4) 30.0 1e-6;
+  check_float "expand_mul[5]" (List.nth vals 5) 40.0 1e-6
+
+(* ---- Test 35: CUDA backend registration ---- *)
 let test_cuda_backend () =
   Printf.printf "\n=== CUDA Backend ===\n%!";
   (* Verify CUDA backend is recognized and returns a module *)
@@ -931,6 +1020,11 @@ let () =
   run_test "leading_axis_broadcast" test_leading_axis_broadcast;
   run_test "gradient_log2" test_gradient_log2;
   run_test "gradient_permute" test_gradient_permute;
+  run_test "where_cmp" test_where_cmp;
+  run_test "cast_forward" test_cast_forward;
+  run_test "gradient_expand" test_gradient_expand;
+  run_test "gradient_where" test_gradient_where;
+  run_test "expand_mul" test_expand_mul;
   run_test "cuda_backend" test_cuda_backend;
   Printf.printf "\n============================\n%!";
   Printf.printf "Results: %d passed, %d failed\n%!" !pass_count !fail_count;

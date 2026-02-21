@@ -120,3 +120,13 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Log2 gradient test**: `d/dx sum(log2(x))` at `[1, 2, 4]` verifying `1/(x*ln2)`.
 - **Permute gradient test**: `d/dx sum(permute(x, [1;0]))` on `[2;3]` tensor verifying all-ones gradient.
 - Total tests: 96 unit + 195 e2e = 291 all passing.
+
+## Claude round 16 decisions
+
+- **Where + comparison e2e test**: `where(a < b, b, a)` = elementwise max, verifying `WHERE`, `CMPLT` ops work end-to-end through the scheduler/renderer/compiler pipeline.
+- **Cast forward test**: `cast(a < b, float32)` verifying bool→float cast through the full pipeline.
+- **Expand gradient test**: `d/dx sum(expand(x, [2;3]))` where `x` is `[1;3]`, verifying gradient is `[2, 2, 2]` (each element contributes twice via expansion). Exercises the `EXPAND` gradient rule (reduce_sum over expanded dims).
+- **Where gradient test (ReLU)**: `relu(x) = where(x > 0, x, 0)`, `d/dx sum(relu(x))` verifying gradient is `[0, 1, 0, 1]`. Exercises the `WHERE` gradient rule through the full backward pipeline.
+- **Expand + mul forward test**: `expand([1;3] → [2;3]) * [2;3]` verifying broadcast elementwise computation works correctly.
+- **Documented movement op flattening**: Added comment in `rebuild_expr` explaining that PERMUTE/PAD/SHRINK/FLIP pass-through is correct for gradient UOp graphs over flat realized buffers, but would need proper index remapping for general forward computation.
+- Total tests: 96 unit + 221 e2e = 317 all passing.

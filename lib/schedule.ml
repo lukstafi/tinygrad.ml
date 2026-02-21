@@ -146,6 +146,13 @@ let rebuild_expr ~buf_id_to_load (root : Uop.t) : Uop.t =
           rebuild (List.hd u.src)
         | Ops.RESHAPE | Ops.EXPAND | Ops.CONTIGUOUS
         | Ops.PERMUTE | Ops.PAD | Ops.SHRINK | Ops.FLIP ->
+          (* Movement ops are stripped because the scheduler operates on flat
+             buffers. RESHAPE/EXPAND/CONTIGUOUS are always safe (flat layout
+             unchanged or handled by broadcast_index). PERMUTE/PAD/SHRINK/FLIP
+             are safe when they appear in gradient UOp graphs over
+             already-realized flat buffers (the movement is a no-op on flat
+             data). For general forward computation these would need proper
+             index remapping — see Tensor.realize for the correct path. *)
           rebuild (List.hd u.src)
         | Ops.CAST ->
           let new_src = List.map rebuild u.src in
