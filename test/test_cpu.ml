@@ -187,11 +187,26 @@ let test_backward_reductions_cpu () =
   let _, dx_max = List.hd grads_max in
   check_array ~msg:"d/dx max_axis(x,axis=1) unique maxima mask" [| 0.0; 0.0; 1.0; 0.0; 0.0; 1.0 |]
     (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c dx_max);
+  let x_tie = Tinygrad_ml.Tensor.from_array [| 3.0; 7.0; 7.0; 2.0 |] in
+  let y_tie = Tinygrad_ml.Tensor.max_axis ~axes:[ 0 ] x_tie in
+  let grads_tie = Tinygrad_ml.Tensor.backward ~wrt:[ x_tie ] y_tie in
+  let _, dx_tie = List.hd grads_tie in
+  check_array ~msg:"d/dx max_axis tie split" [| 0.0; 0.5; 0.5; 0.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c dx_tie);
   let y_mean = Tinygrad_ml.Tensor.mean_axis ~axes:[ 1 ] x in
   let grads_mean = Tinygrad_ml.Tensor.backward ~wrt:[ x ] y_mean in
   let _, dx_mean = List.hd grads_mean in
   check_array ~msg:"d/dx mean_axis(x,axis=1)" [| 1.0 /. 3.0; 1.0 /. 3.0; 1.0 /. 3.0; 1.0 /. 3.0; 1.0 /. 3.0; 1.0 /. 3.0 |]
-    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c dx_mean)
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c dx_mean);
+  let reduced = Tinygrad_ml.Tensor.sum_axis ~axes:[ 1 ] x in
+  let one = Tinygrad_ml.Tensor.reshape (Tinygrad_ml.Tensor.ones 2) [| 2; 1 |] in
+  let expr = Tinygrad_ml.Tensor.add reduced one in
+  check_array ~msg:"reduce_axis intermediate forward" [| 7.0; 16.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c expr);
+  let grads_expr = Tinygrad_ml.Tensor.backward ~wrt:[ x ] expr in
+  let _, dx_expr = List.hd grads_expr in
+  check_array ~msg:"reduce_axis intermediate backward" [| 1.0; 1.0; 1.0; 1.0; 1.0; 1.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c dx_expr)
 
 let () =
   test_add_mul_cpu ();

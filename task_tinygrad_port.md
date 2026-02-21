@@ -124,3 +124,14 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
   - `d/dx sum_axis(x*x, axis=1) = 2x`
   - `d/dx max_axis(x, axis=1)` mask for unique maxima
   - `d/dx mean_axis(x, axis=1)` equal split factor (`1/axis_size`).
+
+## Codex round 14 decisions
+
+- Fixed `max_axis` backward tie handling in Tensor autograd:
+  - `max_reduce_grad` now counts argmax ties per reduced slice and divides upstream gradient by tie count.
+  - Preserves gradient mass for tied maxima (e.g., `[3,7,7,2]` now gives `[0,0.5,0.5,0]`).
+- Added stronger CPU reduction-autograd tests:
+  - Tie-splitting regression for `max_axis` backward.
+  - Intermediate reduction expression case (`add(sum_axis(x), 1)`) to exercise `Reduce_axis` as a non-root node in forward/backward paths.
+- Kept approach intentionally AST-host-centric:
+  - Reduction backward remains implemented in host OCaml index space for clarity and educational value, instead of compiling extra reduction-gradient kernels.

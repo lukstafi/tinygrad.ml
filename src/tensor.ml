@@ -317,10 +317,21 @@ let max_reduce_grad ~upstream ~src ~reduced ~axes =
   let src_arr = to_array src in
   let red_arr = to_array reduced in
   let up_arr = to_array upstream in
+  if Array.length up_arr <> Array.length red_arr then
+    invalid_arg
+      (Printf.sprintf "max_reduce_grad: upstream length %d does not match reduced length %d"
+         (Array.length up_arr) (Array.length red_arr));
+  let tie_counts = Array.make (Array.length red_arr) 0 in
+  for idx = 0 to Array.length src_arr - 1 do
+    let ridx = reduce_output_index ~src_shape ~reduced_shape ~axes idx in
+    if src_arr.(idx) = red_arr.(ridx) then tie_counts.(ridx) <- tie_counts.(ridx) + 1
+  done;
   let out = Array.make (Array.length src_arr) 0.0 in
   for idx = 0 to Array.length src_arr - 1 do
     let ridx = reduce_output_index ~src_shape ~reduced_shape ~axes idx in
-    if src_arr.(idx) = red_arr.(ridx) then out.(idx) <- up_arr.(ridx)
+    let ties = tie_counts.(ridx) in
+    if src_arr.(idx) = red_arr.(ridx) && ties > 0 then
+      out.(idx) <- up_arr.(ridx) /. float_of_int ties
   done;
   from_flat_array_with_shape src_shape out
 
