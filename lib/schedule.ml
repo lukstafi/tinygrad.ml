@@ -63,14 +63,18 @@ let fresh_kernel_name () =
   incr kernel_counter;
   Printf.sprintf "tk_%d" n
 
-(** Reset all scheduler state. Call between independent test runs
-    to prevent state leakage. *)
+(** Optional hooks called by reset to clear external state tables.
+    Reset clears all scheduler state between independent test runs. *)
+let reset_hooks : (unit -> unit) list ref = ref []
+let register_reset_hook f = reset_hooks := f :: !reset_hooks
+
 let reset () =
   Hashtbl.clear buffer_data;
   Hashtbl.clear buffer_shapes;
   Hashtbl.clear realized_buffers;
   Hashtbl.clear realized_shapes;
-  kernel_counter := 0
+  kernel_counter := 0;
+  List.iter (fun f -> f ()) !reset_hooks
 
 (** Compute a broadcast-aware index UOp for loading from a buffer with
     [buf_shape] when the kernel iterates over [out_shape].
@@ -126,142 +130,127 @@ let broadcast_index ~(buf_shape : int list) ~(out_shape : int list) (flat_idx : 
   done;
   !result
 
-(** Infer the effective broadcast shape for each realized buffer in the graph.
-    Walks the UOp DAG and, for each BUFFER/realized REDUCE_AXIS, tracks the
-    shape transformations (RESHAPE, EXPAND) applied to it. This determines
-    how the buffer maps into the kernel's iteration space.
-    Returns a table mapping buffer UOp IDs to their effective shapes. *)
-let infer_buffer_effective_shapes (root : Uop.t) : (int, int list) Hashtbl.t =
-  let shapes : (int, int list) Hashtbl.t = Hashtbl.create 16 in
-  let cache : (int, int list option) Hashtbl.t = Hashtbl.create 64 in
-  (* Walk the graph top-down: the root's shape is output_shape (from the kernel).
-     For each EXPAND node, the source has the pre-expand shape (with 1s).
-     For each RESHAPE node, the source has the pre-reshape shape.
-     For BUFFER/realized REDUCE_AXIS nodes, record their effective shape. *)
-  let rec walk (u : Uop.t) : int list option =
-    match Hashtbl.find_opt cache u.id with
-    | Some r -> r
-    | None ->
-      let result = match u.op with
-        | Ops.BUFFER ->
-          if get_realized u.id <> None then begin
-            (* This buffer's effective shape is itself (will be overridden by parent) *)
-            Some (match get_realized_shape u.id with Some s -> s | None -> [])
-          end else
-            Some (match get_realized_shape u.id with Some s -> s | None -> [])
-        | Ops.INDEX -> walk (List.hd u.src)
-        | Ops.LOAD -> walk (List.hd u.src)
-        | Ops.RESHAPE ->
-          let _child_shape = walk (List.hd u.src) in
-          (* The RESHAPE changes the logical shape. If the child is a buffer,
-             its effective shape in this context is the reshape's target. *)
-          let target_shape = match u.arg with Uop.Shape s -> s | _ -> [] in
-          if target_shape <> [] then begin
-            (* Propagate the reshape target as the effective shape for any buffer below *)
-            let child = List.hd u.src in
-            let leaf_id = find_leaf_buffer_id child in
-            (match leaf_id with
-             | Some id -> Hashtbl.replace shapes id target_shape
-             | None -> ());
-            Some target_shape
-          end else
-            _child_shape
-        | Ops.EXPAND ->
-          let child_shape = walk (List.hd u.src) in
-          (* The EXPAND's source shape (with 1s for broadcast dims) is the
-             buffer's effective shape in the expanded space. Record it. *)
-          (match child_shape with
-           | Some s ->
-             let child = List.hd u.src in
-             let leaf_id = find_leaf_buffer_id child in
-             (match leaf_id with
-              | Some id -> Hashtbl.replace shapes id s
-              | None -> ())
-           | None -> ());
-          let expand_shape = match u.arg with Uop.Shape s -> s | _ -> [] in
-          Some (if expand_shape <> [] then expand_shape else
-                match child_shape with Some s -> s | None -> [])
-        | Ops.CONTIGUOUS | Ops.PERMUTE | Ops.PAD | Ops.SHRINK | Ops.FLIP ->
-          walk (List.hd u.src)
-        | Ops.REDUCE_AXIS ->
-          if get_realized u.id <> None then begin
-            let s = match get_realized_shape u.id with Some s -> s | None -> [] in
-            Some s
-          end else None
-        | _ when Ops.Group.is_alu u.op ->
-          (* For ALU ops, walk all sources to ensure buffers below are recorded *)
-          List.iter (fun s -> ignore (walk s)) u.src;
-          None
-        | Ops.CAST ->
-          walk (List.hd u.src)
-        | Ops.CONST -> None
-        | _ ->
-          List.iter (fun s -> ignore (walk s)) u.src;
-          None
-      in
-      Hashtbl.replace cache u.id result;
-      result
-  and find_leaf_buffer_id (u : Uop.t) : int option =
-    match u.op with
-    | Ops.BUFFER -> Some u.id
-    | Ops.INDEX | Ops.LOAD | Ops.RESHAPE | Ops.EXPAND
-    | Ops.CONTIGUOUS | Ops.PERMUTE | Ops.PAD | Ops.SHRINK | Ops.FLIP ->
-      find_leaf_buffer_id (List.hd u.src)
-    | Ops.REDUCE_AXIS when get_realized u.id <> None -> Some u.id
-    | _ -> None
-  in
-  ignore (walk root);
-  shapes
 
-(** Recursively rebuild a UOp expression, replacing BUFFER→INDEX→LOAD chains
-    with PARAM-based loads. Movement ops are passed through (identity indexing
-    for elementwise kernels over flat buffers). *)
-let rebuild_expr ~buf_id_to_load (root : Uop.t) : Uop.t =
+(** Rebuild an expression, replacing buffer references with PARAM-based loads.
+    Movement ops are stripped. When the same buffer is accessed through different
+    reshape/expand paths, each path gets its own broadcast index (avoiding the
+    aliasing bug where a single effective shape was stored per buffer ID).
+
+    [buf_id_to_param] maps realized buffer/reduce UOp IDs to (param_uop, dbuf).
+    [loop_idx] is the loop induction variable for indexing.
+    [output_shape] is the kernel's output shape for broadcast computation. *)
+let rebuild_expr ~buf_id_to_param ~loop_idx ~output_shape ~numel (root : Uop.t) : Uop.t =
+  (* Cache keyed by UOp ID — but for BUFFER/realized nodes we DON'T cache,
+     because the same buffer might be reached via different reshape/expand paths
+     that need different broadcast indices. Instead, we cache from the EXPAND
+     or RESHAPE node level (which has unique UOp IDs for each path). *)
   let cache : (int, Uop.t) Hashtbl.t = Hashtbl.create 64 in
-  let rec rebuild (u : Uop.t) : Uop.t =
+
+  (* Generate a load for a realized buffer with the given effective shape context.
+     [effective_shape] comes from the RESHAPE above the buffer (if any). *)
+  let make_load buf_id effective_shape =
+    match Hashtbl.find_opt buf_id_to_param buf_id with
+    | Some (param, dbuf) ->
+      let idx_expr =
+        if dbuf.Device.size < numel && dbuf.Device.size > 0 then
+          let is_valid bs =
+            let bn = List.length bs in
+            let on = List.length output_shape in
+            bn <= on &&
+            let pad = on - bn in
+            let padded = List.init pad (fun _ -> 1) @ bs in
+            List.for_all2 (fun b o -> b = 1 || b = o) padded output_shape
+          in
+          let buf_shape =
+            match effective_shape with
+            | Some s when s <> [] && is_valid s -> Some s
+            | _ ->
+              match get_realized_shape buf_id with
+              | Some s when is_valid s -> Some s
+              | _ -> None
+          in
+          match buf_shape with
+          | Some bs -> broadcast_index ~buf_shape:bs ~out_shape:output_shape loop_idx
+          | None ->
+            if dbuf.Device.size = 1 then Uop.const_int Dtype.int32 0
+            else Uop.idiv loop_idx (Uop.const_int Dtype.int32 (numel / dbuf.Device.size))
+        else loop_idx
+      in
+      Uop.load (Uop.index param idx_expr)
+    | None -> failwith (Printf.sprintf "rebuild_expr: buffer %d not in param map" buf_id)
+  in
+
+  let rec rebuild (u : Uop.t) ~(eff_shape : int list option) : Uop.t =
+    (* For non-buffer nodes, check cache *)
     match Hashtbl.find_opt cache u.id with
-    | Some r -> r
-    | None ->
+    | Some r when (match u.op with
+        | Ops.BUFFER | Ops.REDUCE_AXIS | Ops.INDEX | Ops.LOAD
+        | Ops.RESHAPE | Ops.EXPAND | Ops.CONTIGUOUS
+        | Ops.PERMUTE | Ops.PAD | Ops.SHRINK | Ops.FLIP -> false
+        | _ -> true) -> r
+    | _ ->
       let result = match u.op with
         | Ops.BUFFER ->
-          (match Hashtbl.find_opt buf_id_to_load u.id with
-           | Some load -> load
-           | None -> u)
+          if Hashtbl.mem buf_id_to_param u.id then
+            make_load u.id eff_shape
+          else u
         | Ops.INDEX ->
-          rebuild (List.hd u.src)
+          rebuild (List.hd u.src) ~eff_shape
         | Ops.LOAD ->
-          rebuild (List.hd u.src)
-        | Ops.RESHAPE | Ops.EXPAND | Ops.CONTIGUOUS
-        | Ops.PERMUTE | Ops.PAD | Ops.SHRINK | Ops.FLIP ->
-          (* Movement ops are stripped because the scheduler operates on flat
-             buffers. RESHAPE/EXPAND/CONTIGUOUS are always safe (flat layout
-             unchanged or handled by broadcast_index). PERMUTE/PAD/SHRINK/FLIP
-             are safe when they appear in gradient UOp graphs over
-             already-realized flat buffers (the movement is a no-op on flat
-             data). For general forward computation these would need proper
-             index remapping — see Tensor.realize for the correct path. *)
-          rebuild (List.hd u.src)
+          rebuild (List.hd u.src) ~eff_shape
+        | Ops.RESHAPE ->
+          (* Only set effective shape if not already set by an outer EXPAND.
+             The outermost RESHAPE (closest to EXPAND) determines the broadcast shape. *)
+          let target_shape = match u.arg with Uop.Shape s -> s | _ -> [] in
+          let new_eff = match eff_shape with
+            | Some _ -> eff_shape  (* already set by outer context, don't override *)
+            | None -> if target_shape <> [] then Some target_shape else None
+          in
+          rebuild (List.hd u.src) ~eff_shape:new_eff
+        | Ops.EXPAND ->
+          (* The EXPAND's child shape (with 1s for broadcast dims) determines
+             the buffer's effective shape. Get it from the child RESHAPE if present. *)
+          let child = List.hd u.src in
+          let child_shape = match child.op with
+            | Ops.RESHAPE -> (match child.arg with Uop.Shape s -> Some s | _ -> None)
+            | _ -> None
+          in
+          let new_eff = match child_shape with
+            | Some s -> Some s  (* use the reshape shape before expand *)
+            | None -> eff_shape
+          in
+          rebuild child ~eff_shape:new_eff
+        | Ops.CONTIGUOUS | Ops.PERMUTE | Ops.PAD | Ops.SHRINK | Ops.FLIP ->
+          rebuild (List.hd u.src) ~eff_shape
         | Ops.CAST ->
-          let new_src = List.map rebuild u.src in
+          let new_src = List.map (fun s -> rebuild s ~eff_shape:None) u.src in
           Uop.cast u.dtype (List.hd new_src)
         | _ when Ops.Group.is_alu u.op ->
-          let new_src = List.map rebuild u.src in
+          let new_src = List.map (fun s -> rebuild s ~eff_shape:None) u.src in
           Uop.alu u.op u.dtype new_src
         | Ops.REDUCE_AXIS ->
           (* If this reduction was already realized, treat it as a buffer load *)
           (match get_realized u.id with
            | Some _dbuf ->
-             (match Hashtbl.find_opt buf_id_to_load u.id with
-              | Some load -> load
-              | None -> u)
+             if Hashtbl.mem buf_id_to_param u.id then
+               make_load u.id eff_shape
+             else u
            | None -> u)
         | Ops.CONST -> u
         | _ -> u
       in
-      Hashtbl.replace cache u.id result;
+      (* Cache only nodes that are NOT path-dependent.
+         BUFFER, REDUCE_AXIS: different paths may need different broadcast indices.
+         INDEX, LOAD, RESHAPE, EXPAND: lie on the path between ALU and BUFFER,
+         so they must be traversed per-path to correctly propagate eff_shape. *)
+      (match u.op with
+       | Ops.BUFFER | Ops.REDUCE_AXIS
+       | Ops.INDEX | Ops.LOAD | Ops.RESHAPE | Ops.EXPAND
+       | Ops.CONTIGUOUS | Ops.PERMUTE | Ops.PAD | Ops.SHRINK | Ops.FLIP -> ()
+       | _ -> Hashtbl.replace cache u.id result);
       result
   in
-  rebuild root
+  rebuild root ~eff_shape:None
 
 (** Lower a lazy UOp expression tree into a concrete kernel UOp graph.
     Given a root UOp that represents a lazy computation (ALU ops over
@@ -298,52 +287,16 @@ let lower_to_kernel ~device ~numel ~output_shape ~kname (root : Uop.t) : (Uop.t 
     let loop_bound = Uop.const_int Dtype.int32 numel in
     let i = Uop.range loop_bound [0; 0] in
 
-    (* Infer effective broadcast shapes from the UOp graph.
-       This correctly handles cases like matmul where two same-sized buffers
-       have different broadcast patterns (e.g., a[2,2]→[2,2,1] vs b[2,2]→[1,2,2]). *)
-    let effective_shapes = infer_buffer_effective_shapes root in
-
-    (* Validate that a candidate broadcast shape is compatible with out_shape:
-       ranks must allow right-alignment, and each dim must be 1 or match. *)
-    let is_valid_broadcast buf_shape out_shape =
-      let bn = List.length buf_shape in
-      let on = List.length out_shape in
-      bn <= on &&
-      let pad = on - bn in
-      let padded = List.init pad (fun _ -> 1) @ buf_shape in
-      List.for_all2 (fun b o -> b = 1 || b = o) padded out_shape
-    in
-
-    (* Map realized UOp IDs to their PARAM → INDEX → LOAD chain.
-       For buffers smaller than numel (e.g., reduction results expanded via
-       broadcast), compute a stride-based broadcast index. Prefer the effective
-       shape from the UOp graph (if valid), fall back to realized shape, then heuristics. *)
-    let buf_id_to_load : (int, Uop.t) Hashtbl.t = Hashtbl.create 16 in
+    (* Map realized UOp IDs to their (param, dbuf) pairs.
+       rebuild_expr will compute per-path broadcast indices dynamically. *)
+    let buf_id_to_param : (int, Uop.t * Device.buffer) Hashtbl.t = Hashtbl.create 16 in
     List.iteri (fun idx (buf_id, dbuf) ->
       let param = List.nth input_params idx in
-      let idx_expr =
-        if dbuf.Device.size < numel && dbuf.Device.size > 0 then
-          let buf_shape =
-            match Hashtbl.find_opt effective_shapes buf_id with
-            | Some s when s <> [] && is_valid_broadcast s output_shape -> Some s
-            | _ ->
-              match get_realized_shape buf_id with
-              | Some s when is_valid_broadcast s output_shape -> Some s
-              | _ -> None
-          in
-          match buf_shape with
-          | Some bs ->
-            broadcast_index ~buf_shape:bs ~out_shape:output_shape i
-          | None ->
-            if dbuf.Device.size = 1 then Uop.const_int Dtype.int32 0
-            else Uop.idiv i (Uop.const_int Dtype.int32 (numel / dbuf.Device.size))
-        else i in
-      let indexed = Uop.index param idx_expr in
-      let loaded = Uop.load indexed in
-      Hashtbl.replace buf_id_to_load buf_id loaded
+      Hashtbl.replace buf_id_to_param buf_id (param, dbuf)
     ) input_buffers;
 
-    let result_val = rebuild_expr ~buf_id_to_load root in
+    let result_val = rebuild_expr ~buf_id_to_param ~loop_idx:i
+      ~output_shape ~numel root in
 
     (* Store to output *)
     let out_indexed = Uop.index out_param i in
@@ -397,18 +350,6 @@ let lower_reduce_kernel ~device ~input_numel ~output_numel ~reduce_axes ~input_s
       | _ -> 0.0
     in
 
-    (* Infer effective shapes for reduction source expression *)
-    let effective_shapes = infer_buffer_effective_shapes source_uop in
-
-    let is_valid_broadcast_r buf_shape out_shape =
-      let bn = List.length buf_shape in
-      let on = List.length out_shape in
-      bn <= on &&
-      let pad = on - bn in
-      let padded = List.init pad (fun _ -> 1) @ buf_shape in
-      List.for_all2 (fun b o -> b = 1 || b = o) padded out_shape
-    in
-
     if output_numel = 1 then begin
       (* Full reduction to a single value: init out[0], loop, accumulate *)
       let zero_idx = Uop.const_int Dtype.int32 0 in
@@ -418,32 +359,14 @@ let lower_reduce_kernel ~device ~input_numel ~output_numel ~reduce_axes ~input_s
       let loop_bound = Uop.const_int Dtype.int32 input_numel in
       let i = Uop.range loop_bound [0; 0] in
 
-      let buf_id_to_load : (int, Uop.t) Hashtbl.t = Hashtbl.create 16 in
+      let buf_id_to_param : (int, Uop.t * Device.buffer) Hashtbl.t = Hashtbl.create 16 in
       List.iteri (fun idx (buf_id, dbuf) ->
         let param = List.nth input_params idx in
-        let idx_expr =
-          if dbuf.Device.size < input_numel && dbuf.Device.size > 0 then
-            let buf_shape =
-              match Hashtbl.find_opt effective_shapes buf_id with
-              | Some s when s <> [] && is_valid_broadcast_r s input_shape -> Some s
-              | _ ->
-                match get_realized_shape buf_id with
-                | Some s when is_valid_broadcast_r s input_shape -> Some s
-                | _ -> None
-            in
-            match buf_shape with
-            | Some bs ->
-              broadcast_index ~buf_shape:bs ~out_shape:input_shape i
-            | None ->
-              if dbuf.Device.size = 1 then Uop.const_int Dtype.int32 0
-              else Uop.idiv i (Uop.const_int Dtype.int32 (input_numel / dbuf.Device.size))
-          else i in
-        let indexed = Uop.index param idx_expr in
-        let loaded = Uop.load indexed in
-        Hashtbl.replace buf_id_to_load buf_id loaded
+        Hashtbl.replace buf_id_to_param buf_id (param, dbuf)
       ) input_buffers;
 
-      let input_val = rebuild_expr ~buf_id_to_load source_uop in
+      let input_val = rebuild_expr ~buf_id_to_param ~loop_idx:i
+        ~output_shape:input_shape ~numel:input_numel source_uop in
 
       let loop_out_idx = Uop.index out_param (Uop.sub i i) in
       let cur = Uop.load loop_out_idx in
@@ -581,33 +504,14 @@ let lower_reduce_kernel ~device ~input_numel ~output_numel ~reduce_axes ~input_s
         end
       in
 
-      let buf_id_to_load : (int, Uop.t) Hashtbl.t = Hashtbl.create 16 in
+      let buf_id_to_param : (int, Uop.t * Device.buffer) Hashtbl.t = Hashtbl.create 16 in
       List.iteri (fun idx (buf_id, dbuf) ->
         let param = List.nth input_params idx in
-        let idx_expr =
-          if dbuf.Device.size < input_numel && dbuf.Device.size > 0 then
-            let buf_shape =
-              match Hashtbl.find_opt effective_shapes buf_id with
-              | Some s when s <> [] && is_valid_broadcast_r s input_shape -> Some s
-              | _ ->
-                match get_realized_shape buf_id with
-                | Some s when is_valid_broadcast_r s input_shape -> Some s
-                | _ -> None
-            in
-            match buf_shape with
-            | Some bs ->
-              broadcast_index ~buf_shape:bs ~out_shape:input_shape flat_idx
-            | None ->
-              if dbuf.Device.size = 1 then Uop.const_int Dtype.int32 0
-              else if dbuf.Device.size = output_numel then o
-              else Uop.idiv flat_idx (Uop.const_int Dtype.int32 (input_numel / dbuf.Device.size))
-          else flat_idx in
-        let indexed = Uop.index param idx_expr in
-        let loaded = Uop.load indexed in
-        Hashtbl.replace buf_id_to_load buf_id loaded
+        Hashtbl.replace buf_id_to_param buf_id (param, dbuf)
       ) input_buffers;
 
-      let input_val = rebuild_expr ~buf_id_to_load source_uop in
+      let input_val = rebuild_expr ~buf_id_to_param ~loop_idx:flat_idx
+        ~output_shape:input_shape ~numel:input_numel source_uop in
 
       (* Read current accumulator, apply reduce_op, write back.
          Use (o + (r - r)) so the INDEX depends on the inner loop variable r,

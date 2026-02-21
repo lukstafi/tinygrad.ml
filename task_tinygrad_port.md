@@ -149,3 +149,13 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Matmul contract**: Tightened to require exactly 2-D inputs with clear error messages (addressing codex review feedback about batch support claim).
 - **Same-buffer dual-expand test**: Verifies correct broadcast indexing when two different-shaped buffers go through different reshape+expand paths to the same kernel output shape (addresses codex aliasing concern).
 - Total tests: 96 unit + 271 e2e = 367 all passing.
+
+## Claude round 19 decisions
+
+- **Fixed lazy_uop leakage (codex review feedback)**: All tensor construction ops (`binop`, `unop`, `where_`, `cast`, `reshape`, `expand`, `permute`, `pad`, `shrink`, `flip`, `reduce`, `contiguous`) now explicitly set `lazy_uop = None` to prevent stale computation graphs from leaking through `{ a with ... }` record copies.
+- **Per-path broadcast indexing**: Replaced global `infer_buffer_effective_shapes` (one shape per buffer ID) with per-path effective shape tracking in `rebuild_expr`. When the same buffer is accessed through different RESHAPE→EXPAND paths, each path gets its own broadcast index. EXPAND nodes capture their child RESHAPE's shape; inner RESHAPEs don't override if an outer context has already set the effective shape. This fixes the same-buffer aliasing bug where both paths got identical column-broadcast indexing.
+- **Graph splicing for backward through realized tensors**: Added `lazy_graph_map` that maps realized BUFFER UOp IDs to their original computation graphs. `backward` now splices original computation graphs back into the loss expression, enabling differentiation through chains like: compute → realize → build new expression → backward. Previously, backward after `to_float_list` would fail because the computation graph was replaced by an opaque BUFFER.
+- **Removed dead code**: Deleted `infer_buffer_effective_shapes` function (superseded by per-path tracking).
+- **Reset hooks**: Added `Schedule.register_reset_hook` so `lazy_graph_map` is cleared on `Schedule.reset()`.
+- **New regression tests**: backward-after-realize, same-buffer aliasing (outer sum with forward+backward), realize-reuse-backward.
+- Total tests: 96 unit + 296 e2e = 392 all passing.

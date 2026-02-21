@@ -29,6 +29,12 @@ let fresh_buf_id () =
   incr next_buf_id;
   id
 
+(** Map from realized BUFFER UOp ID → original computation graph UOp.
+    Used by backward to splice computation graphs back in when differentiating
+    through realized tensors. *)
+let lazy_graph_map : (int, Uop.t) Hashtbl.t = Hashtbl.create 64
+let () = Schedule.register_reset_hook (fun () -> Hashtbl.clear lazy_graph_map)
+
 (** Create a tensor from a pre-built UOp *)
 let of_uop ?(device="CPU") ?(requires_grad=false) shape dtype uop =
   { uop; lazy_uop = None; shape; dtype; device; requires_grad }
@@ -76,12 +82,12 @@ let binop op (a : t) (b : t) =
     | _ -> a.dtype
   in
   let uop = Uop.alu op a.dtype [a.uop; b.uop] in
-  { a with uop; dtype = result_dtype }
+  { a with uop; dtype = result_dtype; lazy_uop = None }
 
 (** Elementwise unary operations *)
 let unop op (a : t) =
   let uop = Uop.alu op a.dtype [a.uop] in
-  { a with uop }
+  { a with uop; lazy_uop = None }
 
 let add a b = binop Ops.ADD a b
 let sub a b = binop Ops.SUB a b
@@ -104,7 +110,7 @@ let eq a b = binop Ops.CMPEQ a b
 let where_ cond t f =
   assert (cond.shape = t.shape && t.shape = f.shape);
   let uop = Uop.where_ cond.uop t.uop f.uop in
-  { t with uop }
+  { t with uop; lazy_uop = None }
 
 (** Scalar constant broadcast to tensor shape *)
 let const_like (t : t) (v : float) =
@@ -113,42 +119,42 @@ let const_like (t : t) (v : float) =
 (** Cast to a new dtype *)
 let cast dtype (t : t) =
   let uop = Uop.cast dtype t.uop in
-  { t with uop; dtype }
+  { t with uop; dtype; lazy_uop = None }
 
 (** Movement operations *)
 let reshape (t : t) new_shape =
   assert (Helpers.prod t.shape = Helpers.prod new_shape);
   let uop = Uop.reshape t.uop new_shape in
-  { t with uop; shape = new_shape }
+  { t with uop; shape = new_shape; lazy_uop = None }
 
 let expand (t : t) new_shape =
   (* each dim must be 1 or match *)
   assert (List.length t.shape = List.length new_shape);
   List.iter2 (fun s n -> assert (s = 1 || s = n)) t.shape new_shape;
   let uop = Uop.expand t.uop new_shape in
-  { t with uop; shape = new_shape }
+  { t with uop; shape = new_shape; lazy_uop = None }
 
 let permute (t : t) axes =
   assert (List.length axes = List.length t.shape);
   let new_shape = List.map (List.nth t.shape) axes in
   let uop = Uop.permute t.uop axes in
-  { t with uop; shape = new_shape }
+  { t with uop; shape = new_shape; lazy_uop = None }
 
 let pad (t : t) padding =
   assert (List.length padding = List.length t.shape);
   let new_shape = List.map2 (fun s (b, a) -> s + b + a) t.shape padding in
   let uop = Uop.pad t.uop padding in
-  { t with uop; shape = new_shape }
+  { t with uop; shape = new_shape; lazy_uop = None }
 
 let shrink (t : t) bounds =
   assert (List.length bounds = List.length t.shape);
   let new_shape = List.map (fun (lo, hi) -> hi - lo) bounds in
   let uop = Uop.shrink t.uop bounds in
-  { t with uop; shape = new_shape }
+  { t with uop; shape = new_shape; lazy_uop = None }
 
 let flip (t : t) axes =
   let uop = Uop.flip t.uop axes in
-  { t with uop }
+  { t with uop; lazy_uop = None }
 
 (** Reduction operations *)
 let reduce op (t : t) axes =
@@ -156,7 +162,7 @@ let reduce op (t : t) axes =
     if List.mem i axes then 1 else s
   ) t.shape in
   let uop = Uop.reduce_axis ~src_shape:t.shape t.uop op axes in
-  { t with uop; shape = new_shape }
+  { t with uop; shape = new_shape; lazy_uop = None }
 
 let sum ?(axes=[]) (t : t) =
   let axes = if axes = [] then List.init (List.length t.shape) Fun.id else axes in
@@ -210,7 +216,7 @@ let relu (t : t) =
 (** Contiguous *)
 let contiguous (t : t) =
   let uop = Uop.contiguous t.uop in
-  { t with uop }
+  { t with uop; lazy_uop = None }
 
 (** Realize: trigger computation.
     This is where lazy evaluation ends and actual work begins.
@@ -233,6 +239,7 @@ let realize (t : t) =
      Schedule.store_realized ~shape:t.shape buf_uop.id _buf;
      (* Preserve the computation graph for backward before replacing with BUFFER *)
      if t.lazy_uop = None then t.lazy_uop <- Some t.uop;
+     Hashtbl.replace lazy_graph_map buf_uop.id t.uop;
      t.uop <- buf_uop
    | None -> ());
   t
@@ -292,16 +299,42 @@ let backward (loss : t) (targets : t list) : (t * t) list =
     failwith (Printf.sprintf
       "Tensor.backward: loss must be scalar (numel=1), got shape=[%s] (numel=%d)"
       (String.concat "," (List.map string_of_int loss.shape)) (Helpers.prod loss.shape));
-  (* Use lazy_uop (preserved computation graph) if available, since realize
-     replaces uop with a BUFFER that has no computation graph to differentiate. *)
-  let loss_uop = match loss.lazy_uop with Some u -> u | None -> loss.uop in
+  (* Substitute realized BUFFER nodes with their original computation graphs.
+     This allows backward to differentiate through tensors that have been realized
+     (e.g., via to_float_list) and then reused in new expressions. *)
+  let tensor_uop (t : t) : Uop.t =
+    match t.lazy_uop with Some lu -> lu | None ->
+    match Hashtbl.find_opt lazy_graph_map t.uop.id with Some lu -> lu | None -> t.uop
+  in
+  let loss_uop = tensor_uop loss in
   let root_grad = Uop.const loss.dtype 1.0 in
-  let target_uops = List.map (fun (t : t) ->
-    match t.lazy_uop with Some u -> u | None -> t.uop) targets in
-  let grad_pairs = Gradient.compute_gradient loss_uop root_grad target_uops in
+  let target_uops = List.map (fun (t : t) -> tensor_uop t) targets in
+  (* Walk the loss graph and splice in lazy computation graphs for any BUFFER
+     nodes that were produced by realize. This rebuilds the differentiable graph. *)
+  let splice_cache : (int, Uop.t) Hashtbl.t = Hashtbl.create 64 in
+  let rec splice (u : Uop.t) : Uop.t =
+    match Hashtbl.find_opt splice_cache u.id with
+    | Some r -> r
+    | None ->
+      let result =
+        if u.op = Ops.BUFFER then
+          match Hashtbl.find_opt lazy_graph_map u.id with
+          | Some orig -> splice orig  (* recurse into the original graph *)
+          | None -> u
+        else
+          let new_src = List.map splice u.src in
+          if List.for_all2 (fun a b -> a == b) u.src new_src then u
+          else Uop.create ~arg:u.arg u.op u.dtype new_src
+      in
+      Hashtbl.replace splice_cache u.id result;
+      result
+  in
+  let spliced_loss = splice loss_uop in
+  let spliced_targets = List.map splice target_uops in
+  let grad_pairs = Gradient.compute_gradient spliced_loss root_grad spliced_targets in
   List.map (fun ((target_uop : Uop.t), grad_uop) ->
     let target = List.find (fun (tgt : t) ->
-      let tgt_uop = match tgt.lazy_uop with Some u -> u | None -> tgt.uop in
+      let tgt_uop = splice (tensor_uop tgt) in
       tgt_uop.Uop.id = target_uop.Uop.id) targets in
     let grad_tensor = of_uop ~device:target.device target.shape target.dtype grad_uop in
     (target, grad_tensor)
