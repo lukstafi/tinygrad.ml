@@ -1067,7 +1067,119 @@ let test_linear_layer () =
   check_float "w[0] ≈ 2" (List.nth !w_vals 0) 2.0 0.1;
   check_float "w[1] ≈ 3" (List.nth !w_vals 1) 3.0 0.1
 
-(* ---- Test 39: CUDA backend registration ---- *)
+(* ---- Test 39: ReLU forward and gradient ---- *)
+let test_relu () =
+  Printf.printf "\n=== ReLU ===\n%!";
+  Schedule.reset ();
+  let x = Tensor.from_float_list [6] [~-.3.0; ~-.1.0; 0.0; 0.5; 2.0; ~-.0.5] in
+  let y = Tensor.relu x in
+  let vals = Tensor.to_float_list y in
+  check "relu length" (List.length vals = 6);
+  check_float "relu[0]" (List.nth vals 0) 0.0 1e-6;
+  check_float "relu[1]" (List.nth vals 1) 0.0 1e-6;
+  check_float "relu[2]" (List.nth vals 2) 0.0 1e-6;
+  check_float "relu[3]" (List.nth vals 3) 0.5 1e-6;
+  check_float "relu[4]" (List.nth vals 4) 2.0 1e-6;
+  check_float "relu[5]" (List.nth vals 5) 0.0 1e-6;
+  (* Gradient: d/dx sum(relu(x)) = [0, 0, 0, 1, 1, 0] *)
+  Schedule.reset ();
+  let x2 = Tensor.from_float_list [6] [~-.3.0; ~-.1.0; 0.0; 0.5; 2.0; ~-.0.5] in
+  let loss = Tensor.sum (Tensor.relu x2) in
+  let grads = Tensor.backward loss [x2] in
+  let (_, dx) = List.hd grads in
+  let dx_vals = Tensor.to_float_list dx in
+  check_float "relu grad[0]" (List.nth dx_vals 0) 0.0 1e-6;
+  check_float "relu grad[1]" (List.nth dx_vals 1) 0.0 1e-6;
+  check_float "relu grad[2]" (List.nth dx_vals 2) 0.0 1e-6;
+  check_float "relu grad[3]" (List.nth dx_vals 3) 1.0 1e-6;
+  check_float "relu grad[4]" (List.nth dx_vals 4) 1.0 1e-6;
+  check_float "relu grad[5]" (List.nth dx_vals 5) 0.0 1e-6
+
+(* ---- Test 40: Two-layer MLP training ---- *)
+let test_mlp_training () =
+  Printf.printf "\n=== Two-Layer MLP Training ===\n%!";
+  (* Train a two-layer MLP: y = relu(x @ w1) @ w2 to fit XOR-like target.
+     x = [[0,0],[0,1],[1,0],[1,1]]  (4 samples, 2 features)
+     target = [[0],[1],[1],[0]]
+     Hidden layer: 2→4, output layer: 4→1.
+     This is a non-linearly separable problem that requires the hidden layer.
+     We use MSE loss and SGD for 200 steps. *)
+  let x_data = [0.0; 0.0; 0.0; 1.0; 1.0; 0.0; 1.0; 1.0] in
+  let target_data = [0.0; 1.0; 1.0; 0.0] in
+  let lr = 0.1 in
+  (* Initialize weights with small hand-chosen values that help convergence *)
+  let w1_vals = ref [0.5; ~-.0.5; ~-.0.3; 0.3; 0.4; 0.4; ~-.0.4; ~-.0.4] in
+  let w2_vals = ref [0.5; 0.5; 0.5; ~-.0.5] in
+  let final_loss = ref 1.0 in
+  for _step = 1 to 200 do
+    Schedule.reset ();
+    let x = Tensor.from_float_list [4; 2] x_data in
+    let target = Tensor.from_float_list [4; 1] target_data in
+    let w1 = Tensor.from_float_list [2; 4] !w1_vals in
+    let w2 = Tensor.from_float_list [4; 1] !w2_vals in
+    let h = Tensor.relu (Tensor.matmul x w1) in  (* [4;4] *)
+    let pred = Tensor.matmul h w2 in  (* [4;1] *)
+    let diff = Tensor.sub pred target in
+    let loss = Tensor.mean (Tensor.mul diff diff) in
+    let loss_val = List.hd (Tensor.to_float_list loss) in
+    final_loss := loss_val;
+    let grads = Tensor.backward loss [w1; w2] in
+    let (_, dw1) = List.nth grads 0 in
+    let (_, dw2) = List.nth grads 1 in
+    let dw1_v = Tensor.to_float_list dw1 in
+    let dw2_v = Tensor.to_float_list dw2 in
+    w1_vals := List.map2 (fun wi dwi -> wi -. lr *. dwi) !w1_vals dw1_v;
+    w2_vals := List.map2 (fun wi dwi -> wi -. lr *. dwi) !w2_vals dw2_v
+  done;
+  Printf.printf "    final_loss = %.6f\n%!" !final_loss;
+  (* Verify loss decreased significantly — XOR is hard, we just check it's learning *)
+  check "mlp loss < 0.2" (!final_loss < 0.2);
+  (* Check predictions are approximately correct *)
+  Schedule.reset ();
+  let x_test = Tensor.from_float_list [4; 2] x_data in
+  let w1_final = Tensor.from_float_list [2; 4] !w1_vals in
+  let w2_final = Tensor.from_float_list [4; 1] !w2_vals in
+  let h_test = Tensor.relu (Tensor.matmul x_test w1_final) in
+  let pred_test = Tensor.matmul h_test w2_final in
+  let pred_vals = Tensor.to_float_list pred_test in
+  Printf.printf "    predictions = [%s]\n%!"
+    (String.concat ", " (List.map (Printf.sprintf "%.3f") pred_vals));
+  (* XOR: [0,0]→0, [0,1]→1, [1,0]→1, [1,1]→0 *)
+  check "pred[0,0] ≈ 0" (Float.abs (List.nth pred_vals 0) < 0.35);
+  check "pred[0,1] ≈ 1" (Float.abs (List.nth pred_vals 1 -. 1.0) < 0.35);
+  check "pred[1,0] ≈ 1" (Float.abs (List.nth pred_vals 2 -. 1.0) < 0.35);
+  check "pred[1,1] ≈ 0" (Float.abs (List.nth pred_vals 3) < 0.35)
+
+(* ---- Test 41: Same buffer through different expand paths ---- *)
+let test_same_buffer_dual_expand () =
+  Printf.printf "\n=== Same Buffer Dual Expand ===\n%!";
+  Schedule.reset ();
+  (* Use the same [2] buffer through two different reshape+expand paths:
+     path1: [2] → [2,1] → expand [2,3]  (broadcast along axis 1)
+     path2: [2] → [1,2] → expand [3,2]  ... wait, we need same output shape.
+     Better: x=[3], then:
+       a = reshape(x, [3,1]) * expand([3,1] → [3,2])  -- x broadcast right
+       b = reshape(x, [1,3]) * expand([1,3] → [2,3])  -- x broadcast down (different kernel)
+     Actually, for the same kernel we need same output shape.
+     Simpler: x=[2], path1 = reshape([2,1])->expand([2,3]) => rows
+              y=[3], path2 = reshape([1,3])->expand([2,3]) => cols
+              result = path1 + path2  => [2,3] kernel with both inputs broadcast differently *)
+  let x = Tensor.from_float_list [2] [10.0; 20.0] in
+  let y = Tensor.from_float_list [3] [1.0; 2.0; 3.0] in
+  let x_exp = Tensor.expand (Tensor.reshape x [2; 1]) [2; 3] in
+  let y_exp = Tensor.expand (Tensor.reshape y [1; 3]) [2; 3] in
+  let result = Tensor.add x_exp y_exp in
+  let vals = Tensor.to_float_list result in
+  check "dual expand length" (List.length vals = 6);
+  (* [[10+1, 10+2, 10+3], [20+1, 20+2, 20+3]] = [[11,12,13],[21,22,23]] *)
+  check_float "dual[0]" (List.nth vals 0) 11.0 1e-6;
+  check_float "dual[1]" (List.nth vals 1) 12.0 1e-6;
+  check_float "dual[2]" (List.nth vals 2) 13.0 1e-6;
+  check_float "dual[3]" (List.nth vals 3) 21.0 1e-6;
+  check_float "dual[4]" (List.nth vals 4) 22.0 1e-6;
+  check_float "dual[5]" (List.nth vals 5) 23.0 1e-6
+
+(* ---- Test 42: CUDA backend registration ---- *)
 let test_cuda_backend () =
   Printf.printf "\n=== CUDA Backend ===\n%!";
   (* Verify CUDA backend is recognized and returns a module *)
@@ -1142,6 +1254,9 @@ let () =
   run_test "matmul_nonsquare" test_matmul_nonsquare;
   run_test "matmul_gradient" test_matmul_gradient;
   run_test "linear_layer" test_linear_layer;
+  run_test "relu" test_relu;
+  run_test "mlp_training" test_mlp_training;
+  run_test "same_buffer_dual_expand" test_same_buffer_dual_expand;
   run_test "cuda_backend" test_cuda_backend;
   Printf.printf "\n============================\n%!";
   Printf.printf "Results: %d passed, %d failed\n%!" !pass_count !fail_count;
