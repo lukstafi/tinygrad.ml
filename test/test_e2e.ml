@@ -1560,6 +1560,94 @@ let test_permute_shrink () =
     check_float (Printf.sprintf "perm_shrink[%d]" i) vv (List.nth expected i) 1e-6
   ) v
 
+(* ---- Test 50: FLIP forward execution ---- *)
+let test_flip_forward () =
+  Printf.printf "\n=== FLIP (forward) ===\n%!";
+  Schedule.reset ();
+  (* 1D: [1,2,3] flip [0] → [3,2,1] *)
+  let x = Tensor.from_float_list [3] [1.;2.;3.] in
+  let xf = Tensor.flip x [0] in
+  let zeros3 = Tensor.from_float_list [3] [0.;0.;0.] in
+  let r1 = Tensor.add xf zeros3 in
+  let v1 = Tensor.to_float_list r1 in
+  check "flip 1d len" (List.length v1 = 3);
+  let exp1 = [3.;2.;1.] in
+  List.iteri (fun i v ->
+    check_float (Printf.sprintf "flip1d[%d]" i) v (List.nth exp1 i) 1e-6
+  ) v1;
+  (* 2D: [[1,2,3],[4,5,6]] flip axis=1 → [[3,2,1],[6,5,4]] *)
+  Schedule.reset ();
+  let y = Tensor.from_float_list [2; 3] [1.;2.;3.;4.;5.;6.] in
+  let yf = Tensor.flip y [1] in
+  let zeros6 = Tensor.from_float_list [2; 3] [0.;0.;0.;0.;0.;0.] in
+  let r2 = Tensor.add yf zeros6 in
+  let v2 = Tensor.to_float_list r2 in
+  check "flip 2d len" (List.length v2 = 6);
+  let exp2 = [3.;2.;1.;6.;5.;4.] in
+  List.iteri (fun i v ->
+    check_float (Printf.sprintf "flip2d[%d]" i) v (List.nth exp2 i) 1e-6
+  ) v2;
+  (* 2D: flip both axes → [[6,5,4],[3,2,1]] *)
+  Schedule.reset ();
+  let y2 = Tensor.from_float_list [2; 3] [1.;2.;3.;4.;5.;6.] in
+  let yf2 = Tensor.flip y2 [0; 1] in
+  let zeros6b = Tensor.from_float_list [2; 3] [0.;0.;0.;0.;0.;0.] in
+  let r3 = Tensor.add yf2 zeros6b in
+  let v3 = Tensor.to_float_list r3 in
+  check "flip both len" (List.length v3 = 6);
+  let exp3 = [6.;5.;4.;3.;2.;1.] in
+  List.iteri (fun i v ->
+    check_float (Printf.sprintf "flipboth[%d]" i) v (List.nth exp3 i) 1e-6
+  ) v3;
+  (* Involution: flip(flip(x)) = x *)
+  Schedule.reset ();
+  let y3 = Tensor.from_float_list [2; 3] [1.;2.;3.;4.;5.;6.] in
+  let yf3 = Tensor.flip y3 [1] in
+  let yf_inv = Tensor.flip yf3 [1] in
+  let zeros6c = Tensor.from_float_list [2; 3] [0.;0.;0.;0.;0.;0.] in
+  let r4 = Tensor.add yf_inv zeros6c in
+  let v4 = Tensor.to_float_list r4 in
+  check "flip involution len" (List.length v4 = 6);
+  let exp4 = [1.;2.;3.;4.;5.;6.] in
+  List.iteri (fun i v ->
+    check_float (Printf.sprintf "flip_inv[%d]" i) v (List.nth exp4 i) 1e-6
+  ) v4
+
+(* ---- Test 51: FLIP(PERMUTE(x)) and PERMUTE(FLIP(x)) composed ---- *)
+let test_flip_permute () =
+  Printf.printf "\n=== FLIP+PERMUTE composed ===\n%!";
+  Schedule.reset ();
+  (* x = [[1,2,3],[4,5,6]] shape [2;3]
+     permute [1;0] → [[1,4],[2,5],[3,6]] shape [3;2]
+     flip [0] → [[3,6],[2,5],[1,4]] shape [3;2] *)
+  let x = Tensor.from_float_list [2; 3] [1.;2.;3.;4.;5.;6.] in
+  let xp = Tensor.permute x [1; 0] in
+  let xpf = Tensor.flip xp [0] in
+  let zeros = Tensor.from_float_list [3; 2] [0.;0.;0.;0.;0.;0.] in
+  let r1 = Tensor.add xpf zeros in
+  let v1 = Tensor.to_float_list r1 in
+  check "flip_perm len" (List.length v1 = 6);
+  let exp1 = [3.;6.;2.;5.;1.;4.] in
+  List.iteri (fun i v ->
+    check_float (Printf.sprintf "flip_perm[%d]" i) v (List.nth exp1 i) 1e-6
+  ) v1;
+  (* Reverse: flip [1] then permute [1;0]
+     x = [[1,2,3],[4,5,6]]
+     flip [1] → [[3,2,1],[6,5,4]]
+     permute [1;0] → [[3,6],[2,5],[1,4]] shape [3;2] — same result *)
+  Schedule.reset ();
+  let x2 = Tensor.from_float_list [2; 3] [1.;2.;3.;4.;5.;6.] in
+  let xf = Tensor.flip x2 [1] in
+  let xfp = Tensor.permute xf [1; 0] in
+  let zeros2 = Tensor.from_float_list [3; 2] [0.;0.;0.;0.;0.;0.] in
+  let r2 = Tensor.add xfp zeros2 in
+  let v2 = Tensor.to_float_list r2 in
+  check "perm_flip len" (List.length v2 = 6);
+  let exp2 = [3.;6.;2.;5.;1.;4.] in
+  List.iteri (fun i v ->
+    check_float (Printf.sprintf "perm_flip[%d]" i) v (List.nth exp2 i) 1e-6
+  ) v2
+
 let run_test name f =
   try f () with e ->
     incr fail_count;
@@ -1632,6 +1720,8 @@ let () =
   run_test "shrink_permute" test_shrink_permute;
   run_test "permute_pad" test_permute_pad;
   run_test "permute_shrink" test_permute_shrink;
+  run_test "flip_forward" test_flip_forward;
+  run_test "flip_permute" test_flip_permute;
   run_test "cuda_backend" test_cuda_backend;
   Printf.printf "\n============================\n%!";
   Printf.printf "Results: %d passed, %d failed\n%!" !pass_count !fail_count;

@@ -219,3 +219,12 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
   - `permute(pad(x))` — round 25
   - `permute(shrink(x))` — round 25
 - Total tests: 96 unit + 390 e2e = 486 all passing.
+
+## Claude round 26 decisions
+
+- **FLIP forward execution (codex review inspiration)**: Implemented `flip_index` helper that reverses selected axes via `dim-1-coord` transformation. The FLIP handler in `rebuild` now transforms the index instead of passing through. This matches the pattern used for PERMUTE, PAD, and SHRINK — all movement ops now do in-kernel index transformation rather than requiring host realization.
+- **Extended `infer_shape` for BUFFER and REDUCE_AXIS (codex review feedback)**: `infer_shape` now resolves BUFFER shapes from `realized_shapes` and REDUCE_AXIS shapes from the `Axis_arg` metadata. This prevents the fail-loudly `failwith` from triggering on valid graphs like `permute(reduce_axis(...))` or `pad(buffer)`.
+- **New tests**: `test_flip_forward` (1D, 2D single-axis, 2D both-axes, involution) and `test_flip_permute` (flip(permute(x)) and permute(flip(x)) — both composition directions).
+- **Stale tensor fix**: Tests that reuse tensors across `Schedule.reset()` boundaries were fixed to create fresh tensors after each reset. `Schedule.reset()` clears all buffer state, so pre-reset tensors become dangling references.
+- All movement ops now have in-kernel index transformation: PERMUTE, PAD, SHRINK, FLIP. The complete movement op set is implemented.
+- Total tests: 96 unit + 429 e2e = 525 all passing.
