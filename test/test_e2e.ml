@@ -1648,6 +1648,74 @@ let test_flip_permute () =
     check_float (Printf.sprintf "perm_flip[%d]" i) v (List.nth exp2 i) 1e-6
   ) v2
 
+(* ---- Test 52: Weighted FLIP backward (non-uniform gradient routing) ---- *)
+let test_flip_backward_weighted () =
+  Printf.printf "\n=== FLIP backward (weighted) ===\n%!";
+  Schedule.reset ();
+  (* x = [[1,2,3],[4,5,6]] shape [2;3]
+     flip [1] → [[3,2,1],[6,5,4]]
+     w = [[10,20,30],[40,50,60]]
+     loss = sum(flip(x,[1]) * w) = 3*10+2*20+1*30+6*40+5*50+4*60 = 30+40+30+240+250+240 = 830
+     d/dx_ij loss = w[i, 2-j]   (flip reverses columns)
+     dx = [[30,20,10],[60,50,40]] *)
+  let x = Tensor.from_float_list [2; 3] [1.;2.;3.;4.;5.;6.] in
+  let w = Tensor.from_float_list [2; 3] [10.;20.;30.;40.;50.;60.] in
+  let xf = Tensor.flip x [1] in
+  let prod = Tensor.mul xf w in
+  let loss = Tensor.sum prod in
+  let grads = Tensor.backward loss [x] in
+  let (_, dx) = List.hd grads in
+  let dx_vals = Tensor.to_float_list dx in
+  check "flip grad len" (List.length dx_vals = 6);
+  let expected = [30.;20.;10.;60.;50.;40.] in
+  List.iteri (fun i v ->
+    check_float (Printf.sprintf "flip_grad[%d]" i) v (List.nth expected i) 1e-4
+  ) dx_vals
+
+(* ---- Test 53: Full movement chain (reshape → expand → permute → pad → shrink → flip) ---- *)
+let test_movement_chain () =
+  Printf.printf "\n=== Movement Chain ===\n%!";
+  Schedule.reset ();
+  (* x = [1,2,3,4] reshape to [1;2;2]
+     expand [2;2;2] → [[[1,2],[3,4]], [[1,2],[3,4]]]
+     permute [1;0;2] → [[[1,2],[1,2]], [[3,4],[3,4]]]
+     pad [(0,0);(0,0);(1,0)] → [[[0,1,2],[0,1,2]], [[0,3,4],[0,3,4]]]
+     shrink [(0,2);(0,2);(0,2)] → [[[0,1],[0,1]], [[0,3],[0,3]]]
+     flip [0;2] → [[[3,0],[3,0]], [[1,0],[1,0]]] *)
+  let x = Tensor.from_float_list [1; 2; 2] [1.;2.;3.;4.] in
+  let xe = Tensor.expand x [2; 2; 2] in
+  let xp = Tensor.permute xe [1; 0; 2] in
+  let xpad = Tensor.pad xp [(0,0); (0,0); (1,0)] in
+  let xs = Tensor.shrink xpad [(0,2); (0,2); (0,2)] in
+  let xf = Tensor.flip xs [0; 2] in
+  let zeros = Tensor.from_float_list [2; 2; 2] [0.;0.;0.;0.;0.;0.;0.;0.] in
+  let r = Tensor.add xf zeros in
+  let v = Tensor.to_float_list r in
+  check "chain len" (List.length v = 8);
+  let expected = [3.;0.;3.;0.;1.;0.;1.;0.] in
+  List.iteri (fun i vv ->
+    check_float (Printf.sprintf "chain[%d]" i) vv (List.nth expected i) 1e-6
+  ) v
+
+(* ---- Test 54: Movement ops over reduction ---- *)
+let test_movement_over_reduce () =
+  Printf.printf "\n=== Movement over Reduce ===\n%!";
+  Schedule.reset ();
+  (* x = [[1,2,3],[4,5,6]] shape [2;3]
+     sum_axis [1] → [[6],[15]] shape [2;1]
+     permute [1;0] → [[6,15]] shape [1;2]
+     flip [1] → [[15,6]] shape [1;2] *)
+  let x = Tensor.from_float_list [2; 3] [1.;2.;3.;4.;5.;6.] in
+  let xs = Tensor.sum ~axes:[1] x in
+  let xsp = Tensor.permute xs [1; 0] in
+  let xspf = Tensor.flip xsp [1] in
+  let zeros = Tensor.from_float_list [1; 2] [0.;0.] in
+  let r = Tensor.add xspf zeros in
+  let v = Tensor.to_float_list r in
+  check "move_reduce len" (List.length v = 2);
+  check_float "move_reduce[0]" (List.nth v 0) 15.0 1e-4;
+  check_float "move_reduce[1]" (List.nth v 1) 6.0 1e-4
+
 let run_test name f =
   try f () with e ->
     incr fail_count;
@@ -1722,6 +1790,9 @@ let () =
   run_test "permute_shrink" test_permute_shrink;
   run_test "flip_forward" test_flip_forward;
   run_test "flip_permute" test_flip_permute;
+  run_test "flip_backward_weighted" test_flip_backward_weighted;
+  run_test "movement_chain" test_movement_chain;
+  run_test "movement_over_reduce" test_movement_over_reduce;
   run_test "cuda_backend" test_cuda_backend;
   Printf.printf "\n============================\n%!";
   Printf.printf "Results: %d passed, %d failed\n%!" !pass_count !fail_count;

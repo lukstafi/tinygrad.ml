@@ -387,7 +387,10 @@ let rebuild_expr ~buf_id_to_param ~loop_idx ~output_shape (root : Uop.t) : Uop.t
      - PERMUTE: permute the child shape according to axes
      - PAD: add (before + after) to each dim of child shape
      - SHRINK: compute (hi - lo) for each dim from bounds
-     - CONTIGUOUS/CAST/FLIP: pass through to child *)
+     - CONTIGUOUS/CAST/FLIP: pass through to child
+     - BUFFER: resolved from realized_shapes (populated during copyin/reduction
+       scheduling in create_schedule, before kernel lowering calls rebuild_expr)
+     - REDUCE_AXIS: output shape inferred from Axis_arg metadata *)
   let rec infer_shape (n : Uop.t) : int list option = match n.op with
     | Ops.RESHAPE -> (match n.arg with Uop.Shape s -> Some s | _ -> None)
     | Ops.EXPAND -> (match n.arg with Uop.Shape s -> Some s | _ -> None)

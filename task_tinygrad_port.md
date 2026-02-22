@@ -228,3 +228,11 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Stale tensor fix**: Tests that reuse tensors across `Schedule.reset()` boundaries were fixed to create fresh tensors after each reset. `Schedule.reset()` clears all buffer state, so pre-reset tensors become dangling references.
 - All movement ops now have in-kernel index transformation: PERMUTE, PAD, SHRINK, FLIP. The complete movement op set is implemented.
 - Total tests: 96 unit + 429 e2e = 525 all passing.
+
+## Claude round 27 decisions
+
+- **Weighted FLIP backward test (codex review feedback)**: Added `test_flip_backward_weighted` using `sum(flip(x,[1]) * w)` with non-uniform weights. Expected gradient `[30,20,10,60,50,40]` uniquely identifies correct index routing through the flip. This catches element-ordering bugs that uniform-gradient tests miss.
+- **Full movement chain test**: Added `test_movement_chain` exercising all 6 movement ops in sequence: `reshape → expand → permute → pad → shrink → flip` on a [1;2;2] tensor, verified against explicit expected output `[3,0,3,0,1,0,1,0]`. This validates that all in-kernel index transformations compose correctly.
+- **Movement-over-reduction test**: Added `test_movement_over_reduce` for `sum_axis([1]) → permute([1;0]) → flip([1])`, verifying that `infer_shape`'s BUFFER and REDUCE_AXIS extensions correctly support movement ops applied to realized reduction outputs. Expected: `[15, 6]` (reversed row sums).
+- **Documentation (codex review feedback)**: Documented in `infer_shape` comment that BUFFER resolution depends on `realized_shapes` being populated during copyin/reduction scheduling before kernel lowering.
+- Total tests: 96 unit + 452 e2e = 548 all passing.
