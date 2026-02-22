@@ -273,3 +273,9 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Non-default axis CE test**: Added `test_cross_entropy_axis0` — verifies CE with `axis=0` (classes along first dim) produces the same loss and gradient zero-sum properties as default axis.
 - **Reshape(reduce) backward regression test**: Added `test_reshape_reduce_backward` — directly tests gradient through `reshape(sum(x, axis=1), [N])` chain, pinning the round 29 RESHAPE gradient fix.
 - **Matmul-based CE classification**: Extended `test_classification_matmul` to 50 steps for reliable convergence, verifying both classes reach > 0.9 confidence.
+
+## Claude round 33 decisions
+
+- **ALU cache path-dependence fix**: Per codex round 31 review, ALU nodes are now bypassed from cache when `eff_shape` is set, preventing incorrect reuse of cached ALU results from different EXPAND→RESHAPE paths. Added `test_shared_alu_dual_path` — shared `a*b` accessed through two different reshape→expand chains ([2,1]→[2,2] vs [1,2]→[2,2]) with verified forward and backward correctness.
+- **Tensor utilities**: Added `Tensor.item` (scalar extraction), `Tensor.arange` (0..n-1), `Tensor.contiguous`, and `Tensor.one_hot` (indices→one-hot encoding via comparison+cast). All tested in `test_tensor_utilities`.
+- **Test count**: 557 passing tests.
