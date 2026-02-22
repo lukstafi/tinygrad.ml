@@ -80,24 +80,31 @@ module CPU : Backend = struct
 
   let compile_counter = ref 0
 
+  (* Cache compiled .so paths by source code hash to avoid recompiling identical kernels *)
+  let compile_cache : (string, string) Hashtbl.t = Hashtbl.create 32
+
   let compile name src =
-    let tmpdir = Filename.get_temp_dir_name () in
-    let uid = !compile_counter in
-    incr compile_counter;
-    let src_file = Filename.concat tmpdir (Printf.sprintf "%s_%d.c" name uid) in
-    let so_file = Filename.concat tmpdir (Printf.sprintf "%s_%d.so" name uid) in
-    let oc = open_out src_file in
-    output_string oc src;
-    close_out oc;
-    let cmd = Printf.sprintf "cc -shared -O2 -fPIC -o %s %s -lm 2>&1" so_file src_file in
-    let ic = Unix.open_process_in cmd in
-    let output = Buffer.create 256 in
-    (try while true do Buffer.add_char output (input_char ic) done with End_of_file -> ());
-    let status = Unix.close_process_in ic in
-    (match status with
-     | Unix.WEXITED 0 -> ()
-     | _ -> failwith (Printf.sprintf "Compilation failed: %s\n%s" cmd (Buffer.contents output)));
-    so_file
+    match Hashtbl.find_opt compile_cache src with
+    | Some so_file -> so_file
+    | None ->
+      let tmpdir = Filename.get_temp_dir_name () in
+      let uid = !compile_counter in
+      incr compile_counter;
+      let src_file = Filename.concat tmpdir (Printf.sprintf "%s_%d.c" name uid) in
+      let so_file = Filename.concat tmpdir (Printf.sprintf "%s_%d.so" name uid) in
+      let oc = open_out src_file in
+      output_string oc src;
+      close_out oc;
+      let cmd = Printf.sprintf "cc -shared -O2 -fPIC -o %s %s -lm 2>&1" so_file src_file in
+      let ic = Unix.open_process_in cmd in
+      let output = Buffer.create 256 in
+      (try while true do Buffer.add_char output (input_char ic) done with End_of_file -> ());
+      let status = Unix.close_process_in ic in
+      (match status with
+       | Unix.WEXITED 0 -> ()
+       | _ -> failwith (Printf.sprintf "Compilation failed: %s\n%s" cmd (Buffer.contents output)));
+      Hashtbl.replace compile_cache src so_file;
+      so_file
 
   (* Cache for loaded libraries *)
   let lib_cache : (string, Dl.library) Hashtbl.t = Hashtbl.create 16

@@ -221,6 +221,10 @@ let log_softmax ?(axis= -1) (t : t) =
     logits: [batch; classes], targets: [batch; classes] (one-hot or soft labels).
     Returns a scalar loss. Matches tinygrad's cross_entropy with one-hot targets. *)
 let cross_entropy ?(axis= -1) (logits : t) (targets : t) =
+  if logits.shape <> targets.shape then
+    invalid_arg (Printf.sprintf "cross_entropy: logits shape [%s] != targets shape [%s]"
+      (String.concat ";" (List.map string_of_int logits.shape))
+      (String.concat ";" (List.map string_of_int targets.shape)));
   let ls = log_softmax ~axis logits in
   let per_sample = neg_ (sum ~axes:[if axis < 0 then List.length logits.shape + axis else axis]
                            (mul ls targets)) in
