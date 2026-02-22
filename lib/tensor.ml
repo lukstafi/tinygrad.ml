@@ -79,6 +79,36 @@ let from_float_list ?(device="CPU") ?(dtype=Dtype.float32) shape (data : float l
   let reshaped = if List.length shape > 0 then Uop.reshape loaded shape else loaded in
   of_uop ~device shape dtype reshaped
 
+(** Uniform random tensor in [0, 1) *)
+let rand ?(device="CPU") ?(dtype=Dtype.float32) shape =
+  let n = Helpers.prod shape in
+  let data = List.init n (fun _ -> Random.float 1.0) in
+  from_float_list ~device ~dtype shape data
+
+(** Normal random tensor (mean=0, std=1) via Box-Muller transform *)
+let randn ?(device="CPU") ?(dtype=Dtype.float32) shape =
+  let n = Helpers.prod shape in
+  let data = List.init n (fun _ ->
+    (* Box-Muller: generate normal from two uniforms *)
+    let u1 = Random.float 1.0 in
+    let u2 = Random.float 1.0 in
+    let u1 = if u1 < 1e-10 then 1e-10 else u1 in  (* avoid log(0) *)
+    Stdlib.sqrt (-2.0 *. Stdlib.log u1) *. Stdlib.cos (2.0 *. Float.pi *. u2)
+  ) in
+  from_float_list ~device ~dtype shape data
+
+(** Like-variants using source tensor's shape/dtype/device *)
+let rand_like (t : t) = rand ~device:t.device ~dtype:t.dtype t.shape
+let randn_like (t : t) = randn ~device:t.device ~dtype:t.dtype t.shape
+
+(** Kaiming uniform initialization: U(-bound, bound) where bound = sqrt(6/fan_in).
+    Common for weight initialization in neural networks. *)
+let kaiming_uniform ?(device="CPU") ?(dtype=Dtype.float32) ~fan_in shape =
+  let bound = Stdlib.sqrt (6.0 /. Float.of_int fan_in) in
+  let n = Helpers.prod shape in
+  let data = List.init n (fun _ -> Random.float (2.0 *. bound) -. bound) in
+  from_float_list ~device ~dtype shape data
+
 (** Elementwise binary operations *)
 let binop op (a : t) (b : t) =
   assert (a.shape = b.shape);
@@ -252,11 +282,13 @@ let mean ?(axes=[]) (t : t) =
     [correction] defaults to 1 (Bessel's correction for unbiased estimate). *)
 let var ?(axes=[]) ?(correction=1) (t : t) =
   let axes = if axes = [] then List.init (List.length t.shape) Fun.id else axes in
+  let n = List.fold_left (fun acc i -> acc * List.nth t.shape i) 1 axes in
+  if n - correction <= 0 then
+    invalid_arg (Printf.sprintf "Tensor.var: correction=%d >= sample_count=%d" correction n);
   let m = expand (mean ~axes t) t.shape in
   let diff = sub t m in
   let sq = mul diff diff in
   let s = sum ~axes sq in
-  let n = List.fold_left (fun acc i -> acc * List.nth t.shape i) 1 axes in
   let denom = const_like s (1.0 /. Float.of_int (n - correction)) in
   mul s denom
 
@@ -272,10 +304,16 @@ let cat ?(axis=0) (tensors : t list) =
   | first :: _ ->
     let ndim = List.length first.shape in
     let axis = if axis < 0 then ndim + axis else axis in
-    (* Validate: all tensors same shape except along cat axis *)
+    if axis < 0 || axis >= ndim then
+      invalid_arg (Printf.sprintf "Tensor.cat: axis %d out of range for %d-D tensors" axis ndim);
+    (* Validate: all tensors same shape except along cat axis, same device/dtype *)
     List.iter (fun (t : t) ->
       if List.length t.shape <> ndim then
         failwith "Tensor.cat: all tensors must have same number of dimensions";
+      if t.device <> first.device then
+        invalid_arg (Printf.sprintf "Tensor.cat: device mismatch (%s vs %s)" first.device t.device);
+      if t.dtype <> first.dtype then
+        invalid_arg "Tensor.cat: dtype mismatch";
       List.iteri (fun i s ->
         if i <> axis && s <> List.nth first.shape i then
           failwith (Printf.sprintf "Tensor.cat: shape mismatch at dim %d" i)
@@ -435,6 +473,19 @@ let clamp ?(min_val= Float.neg_infinity) ?(max_val= Float.infinity) (t : t) =
     let cond = lt result mn in  (* x < min *)
     where_ cond mn result
   else result
+
+(** Dropout: randomly zero elements with probability [p] during training.
+    Scales remaining values by 1/(1-p) to preserve expected value. *)
+let dropout ?(p=0.5) (t : t) =
+  if p <= 0.0 then t
+  else if p >= 1.0 then zeros_like t
+  else
+    let mask = rand ~device:t.device ~dtype:t.dtype t.shape in
+    let threshold = const_like t p in
+    let keep = lt threshold mask in  (* p < mask, i.e. mask > p → keep *)
+    let keep_f = cast t.dtype keep in
+    let scale = const_like t (1.0 /. (1.0 -. p)) in
+    mul (mul t keep_f) scale
 
 (** Realize: trigger computation.
     This is where lazy evaluation ends and actual work begins.
