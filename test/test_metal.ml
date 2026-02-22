@@ -143,6 +143,32 @@ let test_where_cast_metal_vs_cpu () =
   check_array ~msg:"metal cast bool matches cpu" cpu_bool metal_bool;
   check_array ~msg:"metal cast f32 matches cpu" cpu_f32 metal_f32
 
+let test_where_backward_metal () =
+  let cond = Tinygrad_ml.Tensor.from_array [| 1.0; 0.0; 1.0; 0.0 |] in
+  let t = Tinygrad_ml.Tensor.from_array [| 10.0; 20.0; 30.0; 40.0 |] in
+  let f = Tinygrad_ml.Tensor.from_array [| 1.0; 2.0; 3.0; 4.0 |] in
+  let upstream = Tinygrad_ml.Tensor.from_array [| 2.0; 3.0; 5.0; 7.0 |] in
+  let y = Tinygrad_ml.Tensor.where_ cond t f in
+  let grads = Tinygrad_ml.Tensor.backward ~grad:upstream ~wrt:[ cond; t; f ] y in
+  let _, dcond = List.nth grads 0 in
+  let _, dt = List.nth grads 1 in
+  let _, df = List.nth grads 2 in
+  let expected_dcond = [| 0.0; 0.0; 0.0; 0.0 |] in
+  let expected_dt = [| 2.0; 0.0; 5.0; 0.0 |] in
+  let expected_df = [| 0.0; 3.0; 0.0; 7.0 |] in
+  let cpu_dcond = Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c dcond in
+  let cpu_dt = Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c dt in
+  let cpu_df = Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c df in
+  check_array ~msg:"cpu d/dcond where(cond,t,f)" expected_dcond cpu_dcond;
+  check_array ~msg:"cpu d/dt where(cond,t,f)" expected_dt cpu_dt;
+  check_array ~msg:"cpu d/df where(cond,t,f)" expected_df cpu_df;
+  let metal_dcond = Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Metal dcond in
+  let metal_dt = Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Metal dt in
+  let metal_df = Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Metal df in
+  check_array ~msg:"metal d/dcond where(cond,t,f)" expected_dcond metal_dcond;
+  check_array ~msg:"metal d/dt where(cond,t,f)" expected_dt metal_dt;
+  check_array ~msg:"metal d/df where(cond,t,f)" expected_df metal_df
+
 let run_or_skip () =
   match Tinygrad_ml.Metal_backend.available () with
   | Error msg ->
@@ -157,6 +183,7 @@ let run_or_skip () =
       test_fused_reductions_metal_vs_cpu ();
       test_axis_reductions_metal_vs_cpu ();
       test_where_cast_metal_vs_cpu ();
+      test_where_backward_metal ();
       Printf.printf "test_metal: ok\n%!"
 
 let () = run_or_skip ()

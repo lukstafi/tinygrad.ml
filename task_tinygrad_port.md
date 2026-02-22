@@ -250,3 +250,15 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - Added Metal-vs-CPU parity coverage for new ops:
   - `where` with `NaN` in non-selected branches (ensures ternary select semantics),
   - `cast` parity for `I32`, `Bool`, and `F32`.
+
+## Codex round 23 decisions
+
+- Added direct Metal coverage for `where` backward routing:
+  - New `test_where_backward_metal` checks gradients for `where(cond, t, f)` with custom upstream `[2,3,5,7]`.
+  - Verifies expected masks:
+    - `d/dcond = [0,0,0,0]`,
+    - `d/dt = [2,0,5,0]`,
+    - `d/df = [0,3,0,7]`.
+- Test validates both devices in one place:
+  - Asserts CPU gradient arrays first (sanity),
+  - then asserts Metal gradient arrays against the same expected values.
