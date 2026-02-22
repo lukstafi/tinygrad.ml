@@ -134,6 +134,37 @@ let test_permute_cpu () =
     [| 1.0; 4.0; 2.0; 5.0; 3.0; 6.0 |]
     (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c ap)
 
+let test_pad_shrink_cpu () =
+  let x =
+    Tinygrad_ml.Tensor.reshape
+      (Tinygrad_ml.Tensor.from_array [| 1.0; 2.0; 3.0; 4.0; 5.0; 6.0 |])
+      [| 2; 3 |]
+  in
+  let padded = Tinygrad_ml.Tensor.pad x [| (1, 0); (0, 2) |] in
+  check_array ~msg:"pad forward"
+    [| 0.0; 0.0; 0.0; 0.0; 0.0; 1.0; 2.0; 3.0; 0.0; 0.0; 4.0; 5.0; 6.0; 0.0; 0.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c padded);
+  let shrunk = Tinygrad_ml.Tensor.shrink padded [| (1, 3); (1, 4) |] in
+  check_array ~msg:"shrink forward"
+    [| 2.0; 3.0; 0.0; 5.0; 6.0; 0.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c shrunk)
+
+let test_pad_shrink_composed_cpu () =
+  let x =
+    Tinygrad_ml.Tensor.reshape
+      (Tinygrad_ml.Tensor.from_array [| 1.0; 2.0; 3.0; 4.0; 5.0; 6.0 |])
+      [| 2; 3 |]
+  in
+  let xp = Tinygrad_ml.Tensor.permute x [| 1; 0 |] in
+  let padded = Tinygrad_ml.Tensor.pad xp [| (1, 0); (1, 0) |] in
+  check_array ~msg:"pad after permute"
+    [| 0.0; 0.0; 0.0; 0.0; 1.0; 4.0; 0.0; 2.0; 5.0; 0.0; 3.0; 6.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c padded);
+  let shrunk = Tinygrad_ml.Tensor.shrink padded [| (1, 4); (0, 2) |] in
+  check_array ~msg:"shrink after pad+permute"
+    [| 0.0; 1.0; 0.0; 2.0; 0.0; 3.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c shrunk)
+
 let test_matmul_cpu () =
   let a =
     Tinygrad_ml.Tensor.reshape
@@ -465,6 +496,28 @@ let test_backward_permute_weighted_cpu () =
     [| 10.0; 30.0; 50.0; 20.0; 40.0; 60.0 |]
     (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c dx)
 
+let test_backward_pad_shrink_cpu () =
+  let x =
+    Tinygrad_ml.Tensor.reshape
+      (Tinygrad_ml.Tensor.from_array [| 1.0; 2.0; 3.0; 4.0 |])
+      [| 2; 2 |]
+  in
+  let padded = Tinygrad_ml.Tensor.pad x [| (1, 1); (0, 2) |] in
+  let _, dx_pad = List.hd (Tinygrad_ml.Tensor.backward ~wrt:[ x ] padded) in
+  check_array ~msg:"d/dx sum(pad(x))"
+    [| 1.0; 1.0; 1.0; 1.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c dx_pad);
+  let y =
+    Tinygrad_ml.Tensor.reshape
+      (Tinygrad_ml.Tensor.from_array [| 1.0; 2.0; 3.0; 4.0; 5.0; 6.0 |])
+      [| 2; 3 |]
+  in
+  let shrunk = Tinygrad_ml.Tensor.shrink y [| (0, 2); (1, 3) |] in
+  let _, dy_shrink = List.hd (Tinygrad_ml.Tensor.backward ~wrt:[ y ] shrunk) in
+  check_array ~msg:"d/dx sum(shrink(x))"
+    [| 0.0; 1.0; 1.0; 0.0; 1.0; 1.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c dy_shrink)
+
 let test_backward_matmul_cpu () =
   let a =
     Tinygrad_ml.Tensor.reshape
@@ -521,6 +574,8 @@ let () =
   test_reshape_and_axis_reductions_cpu ();
   test_expand_cpu ();
   test_permute_cpu ();
+  test_pad_shrink_cpu ();
+  test_pad_shrink_composed_cpu ();
   test_matmul_cpu ();
   test_where_cmp_relu_cpu ();
   test_where_branch_selection_cpu ();
@@ -536,6 +591,7 @@ let () =
   test_backward_expand_cpu ();
   test_backward_permute_cpu ();
   test_backward_permute_weighted_cpu ();
+  test_backward_pad_shrink_cpu ();
   test_backward_matmul_cpu ();
   test_backward_unary_extra_cpu ();
   Printf.printf "test_cpu: ok\n"

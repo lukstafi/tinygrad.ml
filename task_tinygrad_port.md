@@ -274,3 +274,22 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
   - `test/test_metal.ml`,
   and replaced it with `open Test_helpers`.
 - This addresses cross-file maintenance risk for future assertion behavior changes by moving to a single source of truth.
+
+## Codex round 25 decisions
+
+- Added lazy movement ops `Pad` and `Shrink` to the Tensor AST in `src/tensor.ml`:
+  - New APIs: `Tensor.pad : t -> (int * int) array -> t` and `Tensor.shrink : t -> (int * int) array -> t`.
+  - Added rank/bounds validation with explicit error messages.
+- Implemented host realization for both ops:
+  - `pad_host_data`: maps padded output coordinates back into source and writes zeros in out-of-bounds regions.
+  - `shrink_host_data`: slices source coordinates using `(lo, hi)` bounds.
+  - `lower_to_expr_with_shape` treats `Pad`/`Shrink` like other movement ops (`Expand`/`Permute`): realize first, then feed as kernel inputs.
+- Added autograd rules:
+  - `d/dx sum(pad(x)) = shrink(upstream, bounds derived from padding)`.
+  - `d/dx sum(shrink(x)) = pad(upstream, padding derived from source shape and bounds)`.
+- Added CPU regressions in `test/test_cpu.ml`:
+  - Forward coverage for `pad`, `shrink`, and composed `permute -> pad -> shrink`.
+  - Backward coverage for both `pad` and `shrink`.
+- Validation:
+  - `dune exec test/test_cpu.exe` passes.
+  - `dune test` passes (`test_cpu: ok`, `test_metal: ok`, CUDA skipped due unavailable backend).

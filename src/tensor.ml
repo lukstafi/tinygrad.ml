@@ -8,6 +8,8 @@ type node =
   | Reshape of t
   | Expand of t
   | Permute of int array * t
+  | Pad of (int * int) array * t
+  | Shrink of (int * int) array * t
   | Reduce_axis of {
       op : Uop.reduce_op;
       axes : int list;
@@ -127,6 +129,42 @@ let permute t axes =
   let out_shape = Array.init ndim (fun i -> t.shape.(axes.(i))) in
   { shape = out_shape; node = Permute (Array.copy axes, t); cache = [] }
 
+let pad t padding =
+  let ndim = Array.length t.shape in
+  if Array.length padding <> ndim then
+    invalid_arg
+      (Printf.sprintf "pad: rank mismatch tensor=%s padding_rank=%d"
+         (Buffer.pp_shape t.shape) (Array.length padding));
+  let out_shape =
+    Array.mapi
+      (fun i dim ->
+        let before, after = padding.(i) in
+        if before < 0 || after < 0 then
+          invalid_arg
+            (Printf.sprintf "pad: dim %d has negative padding (%d,%d)" i before after);
+        dim + before + after)
+      t.shape
+  in
+  { shape = out_shape; node = Pad (Array.copy padding, t); cache = [] }
+
+let shrink t bounds =
+  let ndim = Array.length t.shape in
+  if Array.length bounds <> ndim then
+    invalid_arg
+      (Printf.sprintf "shrink: rank mismatch tensor=%s bounds_rank=%d"
+         (Buffer.pp_shape t.shape) (Array.length bounds));
+  let out_shape =
+    Array.mapi
+      (fun i dim ->
+        let lo, hi = bounds.(i) in
+        if lo < 0 || hi < lo || hi > dim then
+          invalid_arg
+            (Printf.sprintf "shrink: dim %d invalid bounds (%d,%d) for size %d" i lo hi dim);
+        hi - lo)
+      t.shape
+  in
+  { shape = out_shape; node = Shrink (Array.copy bounds, t); cache = [] }
+
 let pad_prefix_to_rank (prefix : int array) (rank : int) =
   let plen = Array.length prefix in
   if plen > rank then
@@ -245,6 +283,75 @@ let permute_host_data ~(src_arr : float array) ~(src_shape : int array) ~(axes :
   done;
   out
 
+let pad_host_data ~(src_arr : float array) ~(src_shape : int array) ~(padding : (int * int) array) =
+  let ndim = Array.length src_shape in
+  if Array.length padding <> ndim then
+    invalid_arg
+      (Printf.sprintf "pad_host_data: rank mismatch shape=%s padding_rank=%d"
+         (Buffer.pp_shape src_shape) (Array.length padding));
+  let out_shape =
+    Array.mapi
+      (fun i dim ->
+        let before, after = padding.(i) in
+        if before < 0 || after < 0 then
+          invalid_arg
+            (Printf.sprintf "pad_host_data: dim %d has negative padding (%d,%d)" i before after);
+        dim + before + after)
+      src_shape
+  in
+  let src_strides = compute_strides src_shape in
+  let out_strides = compute_strides out_shape in
+  let out = Array.make (Buffer.numel out_shape) 0.0 in
+  for out_idx = 0 to Array.length out - 1 do
+    let rem = ref out_idx in
+    let src_idx = ref 0 in
+    let in_bounds = ref true in
+    for d = 0 to ndim - 1 do
+      let coord = !rem / out_strides.(d) in
+      rem := !rem mod out_strides.(d);
+      let before, _after = padding.(d) in
+      let src_coord = coord - before in
+      if src_coord < 0 || src_coord >= src_shape.(d) then in_bounds := false
+      else src_idx := !src_idx + (src_coord * src_strides.(d))
+    done;
+    if !in_bounds then out.(out_idx) <- src_arr.(!src_idx)
+  done;
+  (out_shape, out)
+
+let shrink_host_data ~(src_arr : float array) ~(src_shape : int array) ~(bounds : (int * int) array) =
+  let ndim = Array.length src_shape in
+  if Array.length bounds <> ndim then
+    invalid_arg
+      (Printf.sprintf "shrink_host_data: rank mismatch shape=%s bounds_rank=%d"
+         (Buffer.pp_shape src_shape) (Array.length bounds));
+  let out_shape =
+    Array.mapi
+      (fun i dim ->
+        let lo, hi = bounds.(i) in
+        if lo < 0 || hi < lo || hi > dim then
+          invalid_arg
+            (Printf.sprintf "shrink_host_data: dim %d invalid bounds (%d,%d) for size %d"
+               i lo hi dim);
+        hi - lo)
+      src_shape
+  in
+  let src_strides = compute_strides src_shape in
+  let out_strides = compute_strides out_shape in
+  let out = Array.make (Buffer.numel out_shape) 0.0 in
+  for out_idx = 0 to Array.length out - 1 do
+    let rem = ref out_idx in
+    let src_idx = ref 0 in
+    for d = 0 to ndim - 1 do
+      let coord = !rem / out_strides.(d) in
+      rem := !rem mod out_strides.(d);
+      let lo, _hi = bounds.(d) in
+      let src_coord = coord + lo in
+      src_idx := !src_idx + (src_coord * src_strides.(d))
+    done;
+    out.(out_idx) <- src_arr.(!src_idx)
+  done;
+  (out_shape, out)
+
 let rec lower_to_expr_with_shape ~device t current_shape inputs =
   match t.node with
   | Data b ->
@@ -274,7 +381,7 @@ let rec lower_to_expr_with_shape ~device t current_shape inputs =
       (Uop.Where (c_expr, t_expr, f_expr), inputs)
   | Reshape inner ->
       lower_to_expr_with_shape ~device inner current_shape inputs
-  | Expand _ | Permute _ | Reduce_axis _ ->
+  | Expand _ | Permute _ | Pad _ | Shrink _ | Reduce_axis _ ->
       let b : Buffer.t = realize ~device t in
       let b_view =
         if Array.length b.shape = Array.length current_shape
@@ -306,6 +413,22 @@ and realize_result ?device t =
             let src_arr = to_array ~device:dev src in
             let out = permute_host_data ~src_arr ~src_shape:src.shape ~axes in
             let b = Buffer.create t.shape in
+            Array.iteri (fun i v -> b.data.{i} <- v) out;
+            Ok b
+        | Pad (padding, src) ->
+            let src_arr = to_array ~device:dev src in
+            let out_shape, out = pad_host_data ~src_arr ~src_shape:src.shape ~padding in
+            if not (same_shape_arrays out_shape t.shape) then
+              failwith "pad_host_data produced shape mismatch";
+            let b = Buffer.create out_shape in
+            Array.iteri (fun i v -> b.data.{i} <- v) out;
+            Ok b
+        | Shrink (bounds, src) ->
+            let src_arr = to_array ~device:dev src in
+            let out_shape, out = shrink_host_data ~src_arr ~src_shape:src.shape ~bounds in
+            if not (same_shape_arrays out_shape t.shape) then
+              failwith "shrink_host_data produced shape mismatch";
+            let b = Buffer.create out_shape in
             Array.iteri (fun i v -> b.data.{i} <- v) out;
             Ok b
         | Reduce_axis { op; axes; src; device_hint } ->
@@ -444,6 +567,8 @@ let children t =
   | Reshape x -> [ x ]
   | Expand x -> [ x ]
   | Permute (_, x) -> [ x ]
+  | Pad (_, x) -> [ x ]
+  | Shrink (_, x) -> [ x ]
   | Reduce_axis { src; _ } -> [ src ]
 
 let rec contains_phys x = function
@@ -539,6 +664,12 @@ let local_grads t upstream =
   | Data _ | Const _ -> []
   | Reshape x -> [ (x, reshape upstream x.shape) ]
   | Permute (axes, x) -> [ (x, permute upstream (invert_permutation axes)) ]
+  | Pad (padding, x) ->
+      let bounds = Array.mapi (fun i (before, _after) -> (before, before + x.shape.(i))) padding in
+      [ (x, shrink upstream bounds) ]
+  | Shrink (bounds, x) ->
+      let padding = Array.mapi (fun i (lo, hi) -> (lo, x.shape.(i) - hi)) bounds in
+      [ (x, pad upstream padding) ]
   | Expand x ->
       let expanded_axes = ref [] in
       for i = 0 to Array.length x.shape - 1 do
