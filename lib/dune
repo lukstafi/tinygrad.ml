@@ -1,4 +1,26 @@
 (library
+ (name tinygrad_ml_metal)
+ (wrapped false)
+ (optional)
+ (modules metal_backend)
+ (libraries ctypes ctypes-foreign metal))
+
+(library
+ (name tinygrad_ml_cuda)
+ (wrapped false)
+ (optional)
+ (modules cuda_backend)
+ (libraries ctypes ctypes-foreign cudajit.cuda cudajit.nvrtc))
+
+(library
  (name tinygrad_ml)
  (wrapped false)
- (libraries unix str ctypes ctypes-foreign metal))
+ (modules :standard \ metal_backend cuda_backend)
+ (libraries
+  unix str ctypes ctypes-foreign
+  (select metal_device.ml from
+   (tinygrad_ml_metal -> metal_device.metal.ml)
+   (-> metal_device.missing.ml))
+  (select cuda_device.ml from
+   (tinygrad_ml_cuda -> cuda_device.cudajit.ml)
+   (-> cuda_device.missing.ml))))

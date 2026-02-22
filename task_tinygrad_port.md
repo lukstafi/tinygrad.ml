@@ -362,3 +362,13 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Multi-step training loop**: 20-step SGD training of linear model `y = 2*x + 1`. The pattern: extract float values → `Schedule.reset()` → re-create tensors → forward/backward → extract gradients. Successfully learns w≈2, b≈1. This validates the full training pipeline end-to-end.
 - **Loss shape validation test**: Verifies `mse_loss`, `binary_cross_entropy`, and `broadcast_shape` all raise `Invalid_argument` on incompatible shapes.
 - **Test count**: 787 passing tests.
+
+## Claude round 42 decisions
+
+- **Optional backend builds**: Followed OCANNL pattern (`~/ocannl/arrayjit/lib/dune`) for optional package-dependent backends.
+  - Metal backend (`tinygrad_ml_metal`): separate `(optional)` library depending on `metal`. Uses dune `(select ...)` to pick `metal_device.metal.ml` (real) vs `metal_device.missing.ml` (stub).
+  - CUDA backend (`tinygrad_ml_cuda`): separate `(optional)` library depending on `cudajit.cuda cudajit.nvrtc`. Uses dune `(select ...)` to pick `cuda_device.cudajit.ml` (real) vs `cuda_device.missing.ml` (stub).
+  - Main library (`tinygrad_ml`) no longer directly depends on `metal` or `cudajit`. Builds on any system with just `unix str ctypes ctypes-foreign`.
+  - `Device.is_available` function checks at runtime whether a backend package was installed.
+  - `device.ml` delegates to `Metal_device`/`Cuda_device` modules (selected by dune) instead of directly calling backend modules.
+- **Test count**: 787 passing tests (unchanged).

@@ -206,32 +206,32 @@ module CPU : Backend = struct
   let synchronize () = ()
 end
 
-(** Metal backend — compiles MSL to Metal library, executes via Metal compute pipeline *)
+(** Metal backend — compiles MSL to Metal library, executes via Metal compute pipeline.
+    Available only when the [metal] opam package is installed; otherwise stubs that
+    raise at runtime are selected by dune. *)
 module Metal : Backend = struct
-  let device_name = "METAL"
-  let alloc = Metal_backend.alloc
-  let free = Metal_backend.free
-  let copyin = Metal_backend.copyin
-  let copyout = Metal_backend.copyout
-  let compile = Metal_backend.compile
-  let exec = Metal_backend.exec
-  let synchronize = Metal_backend.synchronize
+  let device_name = Metal_device.device_name
+  let alloc = Metal_device.alloc
+  let free = Metal_device.free
+  let copyin = Metal_device.copyin
+  let copyout = Metal_device.copyout
+  let compile = Metal_device.compile
+  let exec = Metal_device.exec
+  let synchronize = Metal_device.synchronize
 end
 
-(** CUDA backend stub — renders valid CUDA code but cannot execute without cudajit.
-    The renderer (Cstyle.cuda_config) generates correct CUDA kernels.
-    To enable execution, install cudajit and implement alloc/copyin/copyout/exec
-    using Cuda/Nvrtc bindings. *)
+(** CUDA backend — compiles CUDA/PTX kernels via nvrtc, executes on GPU.
+    Available only when the [cudajit] opam package is installed; otherwise stubs
+    that raise at runtime are selected by dune. *)
 module CUDA : Backend = struct
-  let device_name = "CUDA"
-  let _unavail () = failwith "CUDA backend: cudajit not installed (install cudajit opam package for GPU execution)"
-  let alloc _nbytes = _unavail ()
-  let free _ptr = _unavail ()
-  let copyin _dst _src = _unavail ()
-  let copyout _dst _src = _unavail ()
-  let compile _name _src = _unavail ()
-  let exec _name _bin _ptrs _vals = _unavail ()
-  let synchronize () = ()
+  let device_name = Cuda_device.device_name
+  let alloc = Cuda_device.alloc
+  let free = Cuda_device.free
+  let copyin = Cuda_device.copyin
+  let copyout = Cuda_device.copyout
+  let compile = Cuda_device.compile
+  let exec = Cuda_device.exec
+  let synchronize = Cuda_device.synchronize
 end
 
 (** Get a backend module by device name *)
@@ -289,3 +289,11 @@ let copyout_floats (buf : buffer) : float array =
 let synchronize device =
   let module B = (val get_backend device : Backend) in
   B.synchronize ()
+
+(** Check if a backend is available (package installed) *)
+let is_available device =
+  match String.uppercase_ascii device with
+  | "CPU" -> true
+  | "METAL" -> Metal_device.is_available
+  | "CUDA" -> Cuda_device.is_available
+  | _ -> false
