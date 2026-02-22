@@ -331,3 +331,14 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
   - `Nn.sequential_forward`, `Nn.sequential_params` — compose layers into models.
   - `Nn.sgd_step` — simple SGD optimizer that returns (old_param, new_param) pairs.
 - **Test count**: 731 passing tests.
+
+## Claude round 39 decisions
+
+- **Codex review fixes (round 37)**:
+  - `kaiming_uniform` validates `fan_in > 0`.
+  - `dropout` validates `0 <= p <= 1`.
+  - Added `randn_like` test coverage.
+- **Automatic broadcasting**: Binary ops (`add`, `sub`, `mul`, `div`, `lt`, `eq`, etc.) and `where_` now auto-broadcast operands using NumPy-style rules (pad with 1s on left, expand mismatched dims). No more need to manually `expand` before element-wise ops.
+- **MSE loss**: `mse_loss` = mean((pred-target)^2), with verified backward gradients.
+- **Binary cross-entropy loss**: `binary_cross_entropy` with eps-clamped predictions for numerical stability.
+- **Test count**: 756 passing tests.

@@ -2487,7 +2487,105 @@ let test_nn_sgd () =
   check_float "sgd[1]" (List.nth nv 1) 3.2 1e-4;
   check_float "sgd[2]" (List.nth nv 2) 4.0 1e-4
 
-(* ---- Test 68: CUDA backend registration ---- *)
+(* ---- Test 68: Automatic broadcasting ---- *)
+let test_broadcast () =
+  Schedule.reset ();
+  Printf.printf "\n=== Automatic Broadcasting ===\n%!";
+  let open Tensor in
+  (* scalar + vector: [1] + [3] → [3] *)
+  let a = from_float_list [1] [10.0] in
+  let b = from_float_list [3] [1.0; 2.0; 3.0] in
+  let c = add a b in
+  check "bcast scalar+vec shape" (c.shape = [3]);
+  let cv = to_float_list c in
+  check_float "bcast[0]" (List.nth cv 0) 11.0 1e-6;
+  check_float "bcast[1]" (List.nth cv 1) 12.0 1e-6;
+  check_float "bcast[2]" (List.nth cv 2) 13.0 1e-6;
+  (* row + col: [1,3] + [2,1] → [2,3] *)
+  Schedule.reset ();
+  let row = from_float_list [1; 3] [1.0; 2.0; 3.0] in
+  let col = from_float_list [2; 1] [10.0; 20.0] in
+  let rc = add row col in
+  check "bcast row+col shape" (rc.shape = [2; 3]);
+  let rcv = to_float_list rc in
+  let expected = [11.0; 12.0; 13.0; 21.0; 22.0; 23.0] in
+  List.iteri (fun i v ->
+    check_float (Printf.sprintf "bcast_rc[%d]" i) v (List.nth expected i) 1e-6
+  ) rcv;
+  (* broadcast comparison: [3] < [1] → [3] *)
+  Schedule.reset ();
+  let x = from_float_list [3] [1.0; 5.0; 3.0] in
+  let thresh = from_float_list [1] [3.0] in
+  let mask = cast Dtype.float32 (lt x thresh) in
+  let mv = to_float_list mask in
+  check_float "bcast_lt[0]" (List.nth mv 0) 1.0 1e-6;
+  check_float "bcast_lt[1]" (List.nth mv 1) 0.0 1e-6;
+  check_float "bcast_lt[2]" (List.nth mv 2) 0.0 1e-6
+
+(* ---- Test 69: MSE loss ---- *)
+let test_mse_loss () =
+  Schedule.reset ();
+  Printf.printf "\n=== MSE Loss ===\n%!";
+  let open Tensor in
+  (* mse([1,2,3], [1,2,3]) = 0 *)
+  let pred = from_float_list [3] [1.0; 2.0; 3.0] in
+  let tgt = from_float_list [3] [1.0; 2.0; 3.0] in
+  let loss = mse_loss pred tgt in
+  let lv = to_float_list loss in
+  check_float "mse_zero" (List.hd lv) 0.0 1e-6;
+  (* mse([0,0,0], [1,2,3]) = (1+4+9)/3 = 14/3 ≈ 4.6667 *)
+  Schedule.reset ();
+  let pred2 = from_float_list [3] [0.0; 0.0; 0.0] in
+  let tgt2 = from_float_list [3] [1.0; 2.0; 3.0] in
+  let loss2 = mse_loss pred2 tgt2 in
+  let lv2 = to_float_list loss2 in
+  check_float "mse_value" (List.hd lv2) (14.0 /. 3.0) 1e-4;
+  (* MSE backward *)
+  Schedule.reset ();
+  let pred3 = from_float_list [3] [1.0; 3.0; 5.0] in
+  let tgt3 = from_float_list [3] [2.0; 3.0; 4.0] in
+  let loss3 = mse_loss pred3 tgt3 in
+  let grads = backward loss3 [pred3] in
+  let (_, grad) = List.hd grads in
+  let gv = to_float_list grad in
+  (* d/dpred mse = 2*(pred-tgt)/n = 2*[-1,0,1]/3 = [-0.667, 0, 0.667] *)
+  check_float "mse_grad[0]" (List.nth gv 0) (-2.0 /. 3.0) 1e-3;
+  check_float "mse_grad[1]" (List.nth gv 1) 0.0 1e-3;
+  check_float "mse_grad[2]" (List.nth gv 2) (2.0 /. 3.0) 1e-3
+
+(* ---- Test 70: BCE loss ---- *)
+let test_bce_loss () =
+  Schedule.reset ();
+  Printf.printf "\n=== BCE Loss ===\n%!";
+  let open Tensor in
+  (* BCE with perfect predictions: pred=[1,0], target=[1,0] → loss ≈ 0 *)
+  let pred = from_float_list [2] [0.999; 0.001] in
+  let tgt = from_float_list [2] [1.0; 0.0] in
+  let loss = binary_cross_entropy pred tgt in
+  let lv = to_float_list loss in
+  check "bce_near_zero" (List.hd lv < 0.01);
+  (* BCE with 50/50 prediction: pred=[0.5,0.5], target=[1,0] → loss = -ln(0.5) ≈ 0.693 *)
+  Schedule.reset ();
+  let pred2 = from_float_list [2] [0.5; 0.5] in
+  let tgt2 = from_float_list [2] [1.0; 0.0] in
+  let loss2 = binary_cross_entropy pred2 tgt2 in
+  let lv2 = to_float_list loss2 in
+  check_float "bce_0.5" (List.hd lv2) (Stdlib.log 2.0) 1e-3
+
+(* ---- Test 71: randn_like coverage ---- *)
+let test_randn_like () =
+  Schedule.reset ();
+  Printf.printf "\n=== randn_like ===\n%!";
+  let open Tensor in
+  let t = from_float_list [2; 3] [1.0; 2.0; 3.0; 4.0; 5.0; 6.0] in
+  let rn = randn_like t in
+  check "randn_like shape" (rn.shape = t.shape);
+  check "randn_like device" (rn.device = t.device);
+  check "randn_like dtype" (rn.dtype = t.dtype);
+  let rnv = to_float_list rn in
+  check "randn_like finite" (List.for_all Float.is_finite rnv)
+
+(* ---- Test 72: CUDA backend registration ---- *)
 let test_cuda_backend () =
   Printf.printf "\n=== CUDA Backend ===\n%!";
   (* Verify CUDA backend is recognized and returns a module *)
@@ -2852,6 +2950,10 @@ let () =
   run_test "nn_linear" test_nn_linear;
   run_test "nn_sequential" test_nn_sequential;
   run_test "nn_sgd" test_nn_sgd;
+  run_test "broadcast" test_broadcast;
+  run_test "mse_loss" test_mse_loss;
+  run_test "bce_loss" test_bce_loss;
+  run_test "randn_like" test_randn_like;
   run_test "cuda_backend" test_cuda_backend;
   Printf.printf "\n============================\n%!";
   Printf.printf "Results: %d passed, %d failed\n%!" !pass_count !fail_count;
