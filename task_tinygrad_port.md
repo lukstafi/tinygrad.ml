@@ -317,3 +317,17 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Random tensor creation**: Added `rand` (uniform [0,1)), `randn` (normal via Box-Muller), `kaiming_uniform` (weight initialization with fan_in scaling), `rand_like`, `randn_like`.
 - **Dropout**: Added `dropout` with configurable probability and 1/(1-p) scaling. Edge cases: p=0 identity, p=1 all-zeros.
 - **Test count**: 710 passing tests.
+
+## Claude round 38 decisions
+
+- **Codex review fixes (round 36)**:
+  - `layer_norm` now validates `normalized_shape` values match trailing input dimensions.
+  - `unsqueeze` validates axis bounds (raises `Invalid_argument` for out-of-range).
+  - `flatten` validates start_dim/end_dim bounds.
+- **Nn module**: Created `lib/nn.ml` with neural network building blocks:
+  - `Nn.linear` — fully-connected layer with Kaiming-uniform weight init and optional bias.
+  - `Nn.linear_forward` — x @ W + b with automatic bias broadcast.
+  - `Nn.of_linear`, `Nn.activation` — wrap layers into uniform `layer` type.
+  - `Nn.sequential_forward`, `Nn.sequential_params` — compose layers into models.
+  - `Nn.sgd_step` — simple SGD optimizer that returns (old_param, new_param) pairs.
+- **Test count**: 731 passing tests.

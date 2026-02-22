@@ -236,8 +236,10 @@ let squeeze ?(axes=[]) (t : t) =
 
 (** Unsqueeze: insert a dimension of size 1 at the given axis *)
 let unsqueeze (t : t) axis =
-  let axis = if axis < 0 then List.length t.shape + 1 + axis else axis in
   let n = List.length t.shape in
+  let axis = if axis < 0 then n + 1 + axis else axis in
+  if axis < 0 || axis > n then
+    invalid_arg (Printf.sprintf "Tensor.unsqueeze: axis %d out of range for %d-D tensor" axis n);
   let new_shape = List.init (n + 1) (fun i ->
     if i < axis then List.nth t.shape i
     else if i = axis then 1
@@ -248,7 +250,11 @@ let unsqueeze (t : t) axis =
 (** Flatten: collapse dimensions from start_dim to end_dim into one *)
 let flatten ?(start_dim=0) ?(end_dim= -1) (t : t) =
   let n = List.length t.shape in
+  let start_dim = if start_dim < 0 then n + start_dim else start_dim in
   let end_dim = if end_dim < 0 then n + end_dim else end_dim in
+  if start_dim < 0 || start_dim >= n || end_dim < 0 || end_dim >= n || start_dim > end_dim then
+    invalid_arg (Printf.sprintf "Tensor.flatten: invalid dims start=%d end=%d for %d-D tensor"
+      start_dim end_dim n);
   let before = List.filteri (fun i _ -> i < start_dim) t.shape in
   let middle = List.filteri (fun i _ -> i >= start_dim && i <= end_dim) t.shape in
   let after = List.filteri (fun i _ -> i > end_dim) t.shape in
@@ -382,6 +388,14 @@ let cross_entropy ?(axis= -1) (logits : t) (targets : t) =
 let layer_norm ?(eps=1e-5) ?weight ?bias (t : t) ~normalized_shape =
   let ndim = List.length t.shape in
   let n_norm = List.length normalized_shape in
+  if n_norm > ndim then
+    invalid_arg (Printf.sprintf "Tensor.layer_norm: normalized_shape has %d dims but tensor has %d" n_norm ndim);
+  (* Validate normalized_shape matches trailing dims *)
+  let trailing = List.filteri (fun i _ -> i >= ndim - n_norm) t.shape in
+  if trailing <> normalized_shape then
+    invalid_arg (Printf.sprintf "Tensor.layer_norm: normalized_shape [%s] doesn't match trailing dims [%s]"
+      (String.concat ";" (List.map string_of_int normalized_shape))
+      (String.concat ";" (List.map string_of_int trailing)));
   let axes = List.init n_norm (fun i -> ndim - n_norm + i) in
   let m = expand (mean ~axes t) t.shape in
   let diff = sub t m in

@@ -2398,7 +2398,96 @@ let test_kaiming_forward () =
   let rlv = to_float_list rl in
   check "rand_like in [0,1)" (List.for_all (fun v -> v >= 0.0 && v < 1.0) rlv)
 
-(* ---- Test 64: CUDA backend registration ---- *)
+(* ---- Test 64: Validation edge cases ---- *)
+let test_validation () =
+  Schedule.reset ();
+  Printf.printf "\n=== Validation Edge Cases ===\n%!";
+  let open Tensor in
+  (* layer_norm with wrong normalized_shape *)
+  let x = from_float_list [2; 3] [1.0; 2.0; 3.0; 4.0; 5.0; 6.0] in
+  let caught_ln = try ignore (layer_norm x ~normalized_shape:[4]); false
+    with Invalid_argument _ -> true in
+  check "layer_norm shape mismatch" caught_ln;
+  (* unsqueeze out of range *)
+  let v = from_float_list [3] [1.0; 2.0; 3.0] in
+  let caught_uq = try ignore (unsqueeze v 5); false
+    with Invalid_argument _ -> true in
+  check "unsqueeze out of range" caught_uq;
+  (* flatten out of range *)
+  let f = from_float_list [2; 3] [1.0; 2.0; 3.0; 4.0; 5.0; 6.0] in
+  let caught_fl = try ignore (flatten ~start_dim:3 f); false
+    with Invalid_argument _ -> true in
+  check "flatten out of range" caught_fl
+
+(* ---- Test 65: Nn.linear forward ---- *)
+let test_nn_linear () =
+  Schedule.reset ();
+  Printf.printf "\n=== Nn.Linear ===\n%!";
+  Random.init 42;
+  let open Tensor in
+  (* Create a linear layer and verify forward pass *)
+  let layer = Nn.linear ~in_features:3 ~out_features:2 () in
+  check "linear weight shape" (layer.weight.shape = [3; 2]);
+  check "linear has bias" (layer.bias <> None);
+  let x = from_float_list [2; 3] [1.0; 0.0; 0.0; 0.0; 1.0; 0.0] in
+  let out = Nn.linear_forward layer x in
+  check "linear out shape" (out.shape = [2; 2]);
+  let ov = to_float_list out in
+  (* Output should be finite *)
+  List.iteri (fun i v ->
+    check (Printf.sprintf "linear_out[%d] finite" i) (Float.is_finite v)
+  ) ov;
+  (* No-bias linear *)
+  Schedule.reset ();
+  let layer_nb = Nn.linear ~bias:false ~in_features:3 ~out_features:2 () in
+  check "linear_nb no bias" (layer_nb.bias = None);
+  let params = Nn.linear_params layer_nb in
+  check "linear_nb 1 param" (List.length params = 1)
+
+(* ---- Test 66: Nn.sequential ---- *)
+let test_nn_sequential () =
+  Schedule.reset ();
+  Printf.printf "\n=== Nn.Sequential ===\n%!";
+  Random.init 42;
+  let open Tensor in
+  (* Build a small MLP: Linear(3,4) → ReLU → Linear(4,2) *)
+  let l1 = Nn.linear ~in_features:3 ~out_features:4 () in
+  let l2 = Nn.linear ~in_features:4 ~out_features:2 () in
+  let model = [
+    Nn.of_linear "fc1" l1;
+    Nn.activation "relu" relu;
+    Nn.of_linear "fc2" l2;
+  ] in
+  let x = from_float_list [2; 3] [1.0; 2.0; 3.0; 4.0; 5.0; 6.0] in
+  let out = Nn.sequential_forward model x in
+  check "seq out shape" (out.shape = [2; 2]);
+  let ov = to_float_list out in
+  List.iteri (fun i v ->
+    check (Printf.sprintf "seq_out[%d] finite" i) (Float.is_finite v)
+  ) ov;
+  (* Collect params *)
+  let all_params = Nn.sequential_params model in
+  (* l1: weight + bias, l2: weight + bias = 4 params *)
+  check "seq 4 params" (List.length all_params = 4)
+
+(* ---- Test 67: Nn.sgd_step ---- *)
+let test_nn_sgd () =
+  Schedule.reset ();
+  Printf.printf "\n=== Nn.SGD ===\n%!";
+  let open Tensor in
+  (* Simple gradient descent: minimize sum(x^2) *)
+  let x = from_float_list [3] [3.0; 4.0; 5.0] in
+  let loss = sum (mul x x) in
+  let grads = backward loss [x] in
+  let updates = Nn.sgd_step ~lr:0.1 grads in
+  let (_, new_x) = List.hd updates in
+  let nv = to_float_list new_x in
+  (* x_new = x - lr * 2x = [3-0.6, 4-0.8, 5-1.0] = [2.4, 3.2, 4.0] *)
+  check_float "sgd[0]" (List.nth nv 0) 2.4 1e-4;
+  check_float "sgd[1]" (List.nth nv 1) 3.2 1e-4;
+  check_float "sgd[2]" (List.nth nv 2) 4.0 1e-4
+
+(* ---- Test 68: CUDA backend registration ---- *)
 let test_cuda_backend () =
   Printf.printf "\n=== CUDA Backend ===\n%!";
   (* Verify CUDA backend is recognized and returns a module *)
@@ -2759,6 +2848,10 @@ let () =
   run_test "dropout" test_dropout;
   run_test "cat_validation" test_cat_validation;
   run_test "kaiming_forward" test_kaiming_forward;
+  run_test "validation" test_validation;
+  run_test "nn_linear" test_nn_linear;
+  run_test "nn_sequential" test_nn_sequential;
+  run_test "nn_sgd" test_nn_sgd;
   run_test "cuda_backend" test_cuda_backend;
   Printf.printf "\n============================\n%!";
   Printf.printf "Results: %d passed, %d failed\n%!" !pass_count !fail_count;
