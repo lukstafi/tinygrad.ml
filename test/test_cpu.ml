@@ -134,6 +134,25 @@ let test_permute_cpu () =
     [| 1.0; 4.0; 2.0; 5.0; 3.0; 6.0 |]
     (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c ap)
 
+let test_flip_cpu () =
+  let x =
+    Tinygrad_ml.Tensor.reshape
+      (Tinygrad_ml.Tensor.from_array [| 1.0; 2.0; 3.0; 4.0; 5.0; 6.0 |])
+      [| 2; 3 |]
+  in
+  let fx = Tinygrad_ml.Tensor.flip x [| 1 |] in
+  check_array ~msg:"flip axis=1 forward"
+    [| 3.0; 2.0; 1.0; 6.0; 5.0; 4.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c fx);
+  let fxy = Tinygrad_ml.Tensor.flip x [| 0; 1 |] in
+  check_array ~msg:"flip axes=0,1 forward"
+    [| 6.0; 5.0; 4.0; 3.0; 2.0; 1.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c fxy);
+  let unflipped = Tinygrad_ml.Tensor.flip fx [| 1 |] in
+  check_array ~msg:"flip involution"
+    [| 1.0; 2.0; 3.0; 4.0; 5.0; 6.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c unflipped)
+
 let test_pad_shrink_cpu () =
   let x =
     Tinygrad_ml.Tensor.reshape
@@ -496,6 +515,24 @@ let test_backward_permute_weighted_cpu () =
     [| 10.0; 30.0; 50.0; 20.0; 40.0; 60.0 |]
     (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c dx)
 
+let test_backward_flip_weighted_cpu () =
+  let x =
+    Tinygrad_ml.Tensor.reshape
+      (Tinygrad_ml.Tensor.from_array [| 1.0; 2.0; 3.0; 4.0; 5.0; 6.0 |])
+      [| 2; 3 |]
+  in
+  let w =
+    Tinygrad_ml.Tensor.reshape
+      (Tinygrad_ml.Tensor.from_array [| 10.0; 20.0; 30.0; 40.0; 50.0; 60.0 |])
+      [| 2; 3 |]
+  in
+  let y = Tinygrad_ml.Tensor.mul (Tinygrad_ml.Tensor.flip x [| 1 |]) w in
+  let grads = Tinygrad_ml.Tensor.backward ~wrt:[ x ] y in
+  let _, dx = List.hd grads in
+  check_array ~msg:"d/dx sum(flip(x,axis=1) * w)"
+    [| 30.0; 20.0; 10.0; 60.0; 50.0; 40.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c dx)
+
 let test_backward_pad_shrink_cpu () =
   let x =
     Tinygrad_ml.Tensor.reshape
@@ -574,6 +611,7 @@ let () =
   test_reshape_and_axis_reductions_cpu ();
   test_expand_cpu ();
   test_permute_cpu ();
+  test_flip_cpu ();
   test_pad_shrink_cpu ();
   test_pad_shrink_composed_cpu ();
   test_matmul_cpu ();
@@ -591,6 +629,7 @@ let () =
   test_backward_expand_cpu ();
   test_backward_permute_cpu ();
   test_backward_permute_weighted_cpu ();
+  test_backward_flip_weighted_cpu ();
   test_backward_pad_shrink_cpu ();
   test_backward_matmul_cpu ();
   test_backward_unary_extra_cpu ();

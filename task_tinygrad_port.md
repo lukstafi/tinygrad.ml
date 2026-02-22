@@ -293,3 +293,25 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - Validation:
   - `dune exec test/test_cpu.exe` passes.
   - `dune test` passes (`test_cpu: ok`, `test_metal: ok`, CUDA skipped due unavailable backend).
+
+## Codex round 26 decisions
+
+- Added lazy `Flip` movement op to the Tensor AST in `src/tensor.ml`:
+  - New node: `Flip of int array * t`.
+  - New API: `Tensor.flip : t -> int array -> t` with axis validation (in-range, no duplicates).
+  - Shape is preserved by definition (`flip` is a view-like reorder along selected axes).
+- Implemented host realization for `Flip`:
+  - Added `flip_host_data` using stride-based coordinate remapping where selected axes use `src_dim - 1 - coord`.
+  - Lowering treats `Flip` like other movement ops (`Expand`/`Permute`/`Pad`/`Shrink`): realize first, then pass as an opaque input buffer to fused kernels.
+- Added `Flip` autograd rule:
+  - `d/dx flip(x, axes) = flip(upstream, axes)` (self-inverse).
+- Added CPU regressions:
+  - Forward `flip` on one axis and two axes.
+  - Involution check (`flip(flip(x, axes), axes) == x`).
+  - Weighted backward mapping check for `sum(flip(x, axis=1) * w)` to verify index routing (not just all-ones gradients).
+- Added cross-device movement-op parity coverage:
+  - `test/test_metal.ml`: CPU-vs-Metal parity checks for `flip`, `pad`, and `shrink`.
+  - `test/test_cuda.ml`: CPU-vs-CUDA parity checks for `flip`, `pad`, and `shrink` (auto-skips when CUDA backend is unavailable).
+- Validation:
+  - `dune exec test/test_cpu.exe` passes.
+  - `dune test` passes (`test_cpu: ok`, `test_metal: ok`, CUDA skipped when unavailable).

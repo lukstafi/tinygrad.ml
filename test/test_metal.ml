@@ -99,6 +99,25 @@ let test_axis_reductions_metal_vs_cpu () =
   in
   check_array ~msg:"metal noncontig sum_axis matches cpu" cpu_noncontig metal_noncontig
 
+let test_movement_ops_metal_vs_cpu () =
+  let x =
+    Tinygrad_ml.Tensor.reshape
+      (Tinygrad_ml.Tensor.from_array [| 1.0; 2.0; 3.0; 4.0; 5.0; 6.0 |])
+      [| 2; 3 |]
+  in
+  let flip_expr = Tinygrad_ml.Tensor.flip x [| 1 |] in
+  let cpu_flip = Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c flip_expr in
+  let metal_flip = Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Metal flip_expr in
+  check_array ~msg:"metal flip matches cpu" cpu_flip metal_flip;
+  let pad_expr = Tinygrad_ml.Tensor.pad x [| (1, 0); (0, 1) |] in
+  let cpu_pad = Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c pad_expr in
+  let metal_pad = Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Metal pad_expr in
+  check_array ~msg:"metal pad matches cpu" cpu_pad metal_pad;
+  let shrink_expr = Tinygrad_ml.Tensor.shrink x [| (0, 2); (1, 3) |] in
+  let cpu_shrink = Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c shrink_expr in
+  let metal_shrink = Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Metal shrink_expr in
+  check_array ~msg:"metal shrink matches cpu" cpu_shrink metal_shrink
+
 let test_where_cast_metal_vs_cpu () =
   let cond = Tinygrad_ml.Tensor.from_array [| 1.0; 0.0; 1.0; 0.0 |] in
   let t = Tinygrad_ml.Tensor.from_array [| 2.0; Float.nan; 4.0; Float.nan |] in
@@ -163,6 +182,7 @@ let run_or_skip () =
       test_reductions_metal ();
       test_fused_reductions_metal_vs_cpu ();
       test_axis_reductions_metal_vs_cpu ();
+      test_movement_ops_metal_vs_cpu ();
       test_where_cast_metal_vs_cpu ();
       test_where_backward_metal ();
       Printf.printf "test_metal: ok\n%!"

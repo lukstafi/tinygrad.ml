@@ -10,6 +10,7 @@ type node =
   | Permute of int array * t
   | Pad of (int * int) array * t
   | Shrink of (int * int) array * t
+  | Flip of int array * t
   | Reduce_axis of {
       op : Uop.reduce_op;
       axes : int list;
@@ -164,6 +165,19 @@ let shrink t bounds =
       t.shape
   in
   { shape = out_shape; node = Shrink (Array.copy bounds, t); cache = [] }
+
+let flip t axes =
+  let ndim = Array.length t.shape in
+  let seen = Array.make ndim false in
+  Array.iter
+    (fun a ->
+      if a < 0 || a >= ndim then
+        invalid_arg (Printf.sprintf "flip: axis %d out of range [0,%d)" a ndim);
+      if seen.(a) then
+        invalid_arg (Printf.sprintf "flip: duplicate axis %d" a);
+      seen.(a) <- true)
+    axes;
+  { shape = Array.copy t.shape; node = Flip (Array.copy axes, t); cache = [] }
 
 let pad_prefix_to_rank (prefix : int array) (rank : int) =
   let plen = Array.length prefix in
@@ -352,6 +366,34 @@ let shrink_host_data ~(src_arr : float array) ~(src_shape : int array) ~(bounds 
   done;
   (out_shape, out)
 
+let flip_host_data ~(src_arr : float array) ~(src_shape : int array) ~(axes : int array) =
+  let ndim = Array.length src_shape in
+  let seen = Array.make ndim false in
+  Array.iter
+    (fun a ->
+      if a < 0 || a >= ndim then
+        invalid_arg (Printf.sprintf "flip_host_data: axis %d out of range [0,%d)" a ndim);
+      if seen.(a) then
+        invalid_arg (Printf.sprintf "flip_host_data: duplicate axis %d" a);
+      seen.(a) <- true)
+    axes;
+  let out_shape = Array.copy src_shape in
+  let src_strides = compute_strides src_shape in
+  let out_strides = compute_strides out_shape in
+  let out = Array.make (Buffer.numel out_shape) 0.0 in
+  for out_idx = 0 to Array.length out - 1 do
+    let rem = ref out_idx in
+    let src_idx = ref 0 in
+    for d = 0 to ndim - 1 do
+      let coord = !rem / out_strides.(d) in
+      rem := !rem mod out_strides.(d);
+      let src_coord = if seen.(d) then (src_shape.(d) - 1 - coord) else coord in
+      src_idx := !src_idx + (src_coord * src_strides.(d))
+    done;
+    out.(out_idx) <- src_arr.(!src_idx)
+  done;
+  out
+
 let rec lower_to_expr_with_shape ~device t current_shape inputs =
   match t.node with
   | Data b ->
@@ -381,7 +423,7 @@ let rec lower_to_expr_with_shape ~device t current_shape inputs =
       (Uop.Where (c_expr, t_expr, f_expr), inputs)
   | Reshape inner ->
       lower_to_expr_with_shape ~device inner current_shape inputs
-  | Expand _ | Permute _ | Pad _ | Shrink _ | Reduce_axis _ ->
+  | Expand _ | Permute _ | Pad _ | Shrink _ | Flip _ | Reduce_axis _ ->
       let b : Buffer.t = realize ~device t in
       let b_view =
         if Array.length b.shape = Array.length current_shape
@@ -429,6 +471,12 @@ and realize_result ?device t =
             if not (same_shape_arrays out_shape t.shape) then
               failwith "shrink_host_data produced shape mismatch";
             let b = Buffer.create out_shape in
+            Array.iteri (fun i v -> b.data.{i} <- v) out;
+            Ok b
+        | Flip (axes, src) ->
+            let src_arr = to_array ~device:dev src in
+            let out = flip_host_data ~src_arr ~src_shape:src.shape ~axes in
+            let b = Buffer.create t.shape in
             Array.iteri (fun i v -> b.data.{i} <- v) out;
             Ok b
         | Reduce_axis { op; axes; src; device_hint } ->
@@ -569,6 +617,7 @@ let children t =
   | Permute (_, x) -> [ x ]
   | Pad (_, x) -> [ x ]
   | Shrink (_, x) -> [ x ]
+  | Flip (_, x) -> [ x ]
   | Reduce_axis { src; _ } -> [ src ]
 
 let rec contains_phys x = function
@@ -670,6 +719,7 @@ let local_grads t upstream =
   | Shrink (bounds, x) ->
       let padding = Array.mapi (fun i (lo, hi) -> (lo, x.shape.(i) - hi)) bounds in
       [ (x, pad upstream padding) ]
+  | Flip (axes, x) -> [ (x, flip upstream axes) ]
   | Expand x ->
       let expanded_axes = ref [] in
       for i = 0 to Array.length x.shape - 1 do
