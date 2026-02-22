@@ -217,6 +217,15 @@ let log_softmax ?(axis= -1) (t : t) =
   let s = expand (sum ~axes:[axis] e) t.shape in
   sub shifted (log s)
 
+(** Cross-entropy loss: -mean(sum(log_softmax(logits) * targets, axis=classes_dim)).
+    logits: [batch; classes], targets: [batch; classes] (one-hot or soft labels).
+    Returns a scalar loss. Matches tinygrad's cross_entropy with one-hot targets. *)
+let cross_entropy ?(axis= -1) (logits : t) (targets : t) =
+  let ls = log_softmax ~axis logits in
+  let per_sample = neg_ (sum ~axes:[if axis < 0 then List.length logits.shape + axis else axis]
+                           (mul ls targets)) in
+  mean per_sample
+
 (** Matrix multiply: a[N, K] @ b[K, M] = c[N, M].
     Both inputs must be exactly 2-D.
     Implemented via reshape + expand + elementwise mul + sum reduction,

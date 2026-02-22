@@ -68,15 +68,15 @@ let grad_for_op (ctx : Uop.t) (ret : Uop.t) : Uop.t option list =
     [None]
   | Ops.RESHAPE ->
     (* gradient of reshape is reshape back to source shape *)
+    let src = List.hd ret.src in
     let src_shape = match ret.arg with
       | Uop.Shape _ ->
-        (* ret.arg has the output shape; we need the source shape.
-           The source UOp carries its own shape in its arg if it's a RESHAPE,
-           or we infer from EXPAND/original. For the general case, look at
-           the source node's shape arg. *)
-        (match (List.hd ret.src).arg with
+        (match src.arg with
          | Uop.Shape s -> s
-         | _ -> [])  (* fallback: src has no shape info *)
+         | Uop.Axis_arg (axes, _, src_of_reduce) when src_of_reduce <> [] ->
+           (* REDUCE_AXIS: output shape is src_shape with reduced axes set to 1 *)
+           List.mapi (fun i d -> if List.mem i axes then 1 else d) src_of_reduce
+         | _ -> [])
       | _ -> []
     in
     if src_shape <> [] then
