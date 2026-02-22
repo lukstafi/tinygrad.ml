@@ -492,6 +492,13 @@ let matmul (a : t) (b : t) =
   let summed = sum ~axes:[1] prod in  (* [N, 1, M] *)
   reshape summed [n; m]  (* [N, M] *)
 
+(** 2D convolution — forward reference filled in after to_float_list is defined.
+    Input [C_in, H, W] * weight [C_out, C_in, KH, KW] → [C_out, OH, OW]. *)
+let conv2d_ref : (?stride:int -> ?padding:int -> t -> t -> t) ref =
+  ref (fun ?stride:_ ?padding:_ _ _ -> failwith "conv2d not yet initialized")
+let conv2d ?(stride=1) ?(padding=0) (input : t) (weight : t) : t =
+  !conv2d_ref ~stride ~padding input weight
+
 (** ReLU activation: max(0, x).
     Implemented as where(x > 0, x, 0) using comparison + ternary select. *)
 let relu (t : t) =
@@ -939,3 +946,78 @@ let backward (loss : t) (targets : t list) : (t * t) list =
     let grad_tensor = of_uop ~device:target.device target.shape target.dtype grad_uop in
     (target, grad_tensor)
   ) grad_pairs
+
+(** conv2d implementation — placed after to_float_list so we can extract weights. *)
+let _conv2d_impl ?(stride=1) ?(padding=0) (input : t) (weight : t) : t =
+  let ( + ) = Stdlib.( + ) and ( - ) = Stdlib.( - )
+  and ( * ) = Stdlib.( * ) and ( / ) = Stdlib.( / ) in
+  if List.length input.shape <> 3 then
+    invalid_arg (Printf.sprintf "conv2d: input must be 3-D [C,H,W], got [%s]"
+      (String.concat "," (List.map string_of_int input.shape)));
+  if List.length weight.shape <> 4 then
+    invalid_arg (Printf.sprintf "conv2d: weight must be 4-D [Cout,Cin,KH,KW], got [%s]"
+      (String.concat "," (List.map string_of_int weight.shape)));
+  let c_in = List.nth input.shape 0 in
+  let ih = List.nth input.shape 1 in
+  let iw = List.nth input.shape 2 in
+  let c_out = List.nth weight.shape 0 in
+  let c_in_w = List.nth weight.shape 1 in
+  let kh = List.nth weight.shape 2 in
+  let kw = List.nth weight.shape 3 in
+  if c_in <> c_in_w then
+    invalid_arg (Printf.sprintf "conv2d: input channels %d != weight channels %d" c_in c_in_w);
+  let oh = (ih + 2 * padding - kh) / stride + 1 in
+  let ow = (iw + 2 * padding - kw) / stride + 1 in
+  if oh <= 0 || ow <= 0 then
+    invalid_arg "conv2d: output dimensions <= 0, check stride/padding/kernel";
+  let input_r = !realize_ref input in
+  let inp = if padding > 0 then
+    pad input_r [(0, 0); (padding, padding); (padding, padding)]
+  else input_r in
+  let weight_vals = to_float_list (!realize_ref weight) in
+  let get_weight oc ic ki kj =
+    let idx = ((oc * c_in + ic) * kh + ki) * kw + kj in
+    List.nth weight_vals idx
+  in
+  let out_channels = List.init c_out (fun oc ->
+    let contributions = ref [] in
+    for ic = 0 to c_in - 1 do
+      for ki = 0 to kh - 1 do
+        for kj = 0 to kw - 1 do
+          let wval = get_weight oc ic ki kj in
+          if Float.abs wval > 1e-30 then begin
+            let ic_slice = shrink inp [(ic, ic + 1); (ki, ki + (oh - 1) * stride + 1); (kj, kj + (ow - 1) * stride + 1)] in
+            let patch = if stride = 1 then
+              reshape ic_slice [oh; ow]
+            else begin
+              let h_padded = (oh - 1) * stride + 1 in
+              let w_padded = (ow - 1) * stride + 1 in
+              let slice_2d = reshape ic_slice [h_padded; w_padded] in
+              let h_ceil = oh * stride in
+              let w_ceil = ow * stride in
+              let padded = if h_ceil <> h_padded || w_ceil <> w_padded then
+                pad slice_2d [(0, h_ceil - h_padded); (0, w_ceil - w_padded)]
+              else slice_2d in
+              let r4 = reshape padded [oh; stride; ow; stride] in
+              let s4 = shrink r4 [(0, oh); (0, 1); (0, ow); (0, 1)] in
+              reshape s4 [oh; ow]
+            end in
+            let w_const = full ~device:input.device ~dtype:input.dtype [oh; ow] wval in
+            let contribution = mul patch w_const in
+            contributions := !realize_ref contribution :: !contributions
+          end
+        done
+      done
+    done;
+    let contribs = List.rev !contributions in
+    if contribs = [] then
+      zeros ~device:input.device ~dtype:input.dtype [1; oh; ow]
+    else
+      let result = List.fold_left (fun acc c ->
+        !realize_ref (add acc c)
+      ) (List.hd contribs) (List.tl contribs) in
+      reshape result [1; oh; ow]
+  ) in
+  cat ~axis:0 out_channels
+
+let () = conv2d_ref := _conv2d_impl
