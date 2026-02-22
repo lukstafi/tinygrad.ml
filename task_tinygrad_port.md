@@ -183,3 +183,11 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
   This enables correct element reordering for transpose and general permutations. Added `permute_index` helper function and threaded `cur_idx` through all `rebuild` recursive calls.
 - **New test**: `test_permute_forward` verifies that [2,3] transposed to [3,2] produces correct element order [1,4,2,5,3,6].
 - Total tests: 96 unit + 318 e2e = 414 all passing.
+
+## Claude round 22 decisions
+
+- **CAST caching fix (codex review feedback)**: CAST now treated as path-dependent in `is_path_dependent`. Previously CAST was cached, but since it passes `cur_idx` to children, caching a CAST reached via different index paths (e.g., one through PERMUTE, one not) would bind the wrong index expression. Correctness over performance.
+- **PERMUTE shape inference fix (codex review feedback)**: `find_child_shape` in the PERMUTE handler now stops at EXPAND nodes instead of walking through them. EXPAND changes the logical shape (adding dimensions), so the pre-EXPAND RESHAPE shape is wrong for computing the permutation mapping. EXPAND's own shape arg is used instead.
+- **Broadcast indexing coordinate frame fix (codex review feedback)**: Threaded `idx_shape` alongside `cur_idx` through `rebuild`. After a PERMUTE transforms the index, `idx_shape` is updated to the unpermuted (child) shape so that `make_load → broadcast_index` decomposes the index in the correct coordinate frame. Previously, `output_shape` (the kernel's final shape) was always used, which would be wrong after a PERMUTE. Removed `numel` parameter from `rebuild_expr` since it's now computed dynamically from `idx_shape`.
+- **New test**: `test_permute_broadcast` — permute([2,3]→[3,2]) + broadcast([1,2]→[3,2]) verifies correct composition of index transformation and broadcast indexing.
+- Total tests: 96 unit + 325 e2e = 421 all passing.

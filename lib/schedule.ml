@@ -194,7 +194,7 @@ let permute_index ~(perm_shape : int list) ~(axes : int list) (flat_idx : Uop.t)
     [buf_id_to_param] maps realized buffer/reduce UOp IDs to (param_uop, dbuf).
     [loop_idx] is the loop induction variable for indexing.
     [output_shape] is the kernel's output shape for broadcast computation. *)
-let rebuild_expr ~buf_id_to_param ~loop_idx ~output_shape ~numel (root : Uop.t) : Uop.t =
+let rebuild_expr ~buf_id_to_param ~loop_idx ~output_shape (root : Uop.t) : Uop.t =
   (* Cache keyed by UOp ID — but for BUFFER/realized nodes we DON'T cache,
      because the same buffer might be reached via different reshape/expand paths
      that need different broadcast indices. Instead, we cache from the EXPAND
@@ -204,19 +204,23 @@ let rebuild_expr ~buf_id_to_param ~loop_idx ~output_shape ~numel (root : Uop.t) 
   (* Generate a load for a realized buffer with the given effective shape context.
      [effective_shape] comes from the RESHAPE above the buffer (if any).
      [cur_idx] is the current flat index (may differ from loop_idx if a PERMUTE
-     has been applied upstream). *)
-  let make_load buf_id effective_shape cur_idx =
+     has been applied upstream).
+     [idx_shape] is the coordinate frame matching cur_idx — used for broadcast_index
+     decomposition instead of output_shape when they differ (e.g., after PERMUTE). *)
+  let make_load buf_id effective_shape cur_idx idx_shape =
+    let out_sh = idx_shape in
+    let idx_numel = List.fold_left ( * ) 1 out_sh in
     match Hashtbl.find_opt buf_id_to_param buf_id with
     | Some (param, dbuf) ->
       let idx_expr =
-        if dbuf.Device.size < numel && dbuf.Device.size > 0 then
+        if dbuf.Device.size < idx_numel && dbuf.Device.size > 0 then
           let is_valid bs =
             let bn = List.length bs in
-            let on = List.length output_shape in
+            let on = List.length out_sh in
             bn <= on &&
             let pad = on - bn in
             let padded = List.init pad (fun _ -> 1) @ bs in
-            List.for_all2 (fun b o -> b = 1 || b = o) padded output_shape
+            List.for_all2 (fun b o -> b = 1 || b = o) padded out_sh
           in
           let buf_shape =
             match effective_shape with
@@ -227,29 +231,30 @@ let rebuild_expr ~buf_id_to_param ~loop_idx ~output_shape ~numel (root : Uop.t) 
               | _ -> None
           in
           match buf_shape with
-          | Some bs -> broadcast_index ~buf_shape:bs ~out_shape:output_shape cur_idx
+          | Some bs -> broadcast_index ~buf_shape:bs ~out_shape:out_sh cur_idx
           | None ->
             if dbuf.Device.size = 1 then Uop.const_int Dtype.int32 0
-            else Uop.idiv cur_idx (Uop.const_int Dtype.int32 (numel / dbuf.Device.size))
+            else Uop.idiv cur_idx (Uop.const_int Dtype.int32 (idx_numel / dbuf.Device.size))
         else cur_idx
       in
       Uop.load (Uop.index param idx_expr)
     | None -> failwith (Printf.sprintf "rebuild_expr: buffer %d not in param map" buf_id)
   in
 
-  (* Path-dependent ops: the result depends on eff_shape flowing down from the
-     root, so the same node may need different lowerings on different paths.
-     These must bypass the per-node result cache.
-     Note: CAST is a view_wrapper but resets eff_shape, so it's NOT path-dependent. *)
+  (* Path-dependent ops: the result depends on eff_shape or cur_idx flowing
+     down from the root, so the same node may need different lowerings on
+     different paths. These must bypass the per-node result cache.
+     CAST passes cur_idx to children, so it IS path-dependent when cur_idx
+     varies (e.g., after a PERMUTE transform). *)
   let is_path_dependent (op : Ops.t) = match op with
     | Ops.BUFFER | Ops.REDUCE_AXIS | Ops.INDEX | Ops.LOAD
-    | Ops.RESHAPE | Ops.EXPAND -> true
-    | Ops.CAST -> false
+    | Ops.RESHAPE | Ops.EXPAND | Ops.CAST -> true
     | _ when Ops.Group.is_view_wrapper op -> true  (* CONTIGUOUS, PERMUTE, PAD, etc. *)
     | _ -> false
   in
 
-  let rec rebuild (u : Uop.t) ~(eff_shape : int list option) ~(cur_idx : Uop.t) : Uop.t =
+  let rec rebuild (u : Uop.t) ~(eff_shape : int list option) ~(cur_idx : Uop.t)
+      ~(idx_shape : int list) : Uop.t =
     (* For non-buffer nodes, check cache *)
     match Hashtbl.find_opt cache u.id with
     | Some r when not (is_path_dependent u.op) -> r
@@ -257,12 +262,12 @@ let rebuild_expr ~buf_id_to_param ~loop_idx ~output_shape ~numel (root : Uop.t) 
       let result = match u.op with
         | Ops.BUFFER ->
           if Hashtbl.mem buf_id_to_param u.id then
-            make_load u.id eff_shape cur_idx
+            make_load u.id eff_shape cur_idx idx_shape
           else u
         | Ops.INDEX ->
-          rebuild (List.hd u.src) ~eff_shape ~cur_idx
+          rebuild (List.hd u.src) ~eff_shape ~cur_idx ~idx_shape
         | Ops.LOAD ->
-          rebuild (List.hd u.src) ~eff_shape ~cur_idx
+          rebuild (List.hd u.src) ~eff_shape ~cur_idx ~idx_shape
         | Ops.RESHAPE ->
           (* Only set effective shape if not already set by an outer EXPAND.
              The outermost RESHAPE (closest to EXPAND) determines the broadcast shape. *)
@@ -271,7 +276,7 @@ let rebuild_expr ~buf_id_to_param ~loop_idx ~output_shape ~numel (root : Uop.t) 
             | Some _ -> eff_shape  (* already set by outer context, don't override *)
             | None -> if target_shape <> [] then Some target_shape else None
           in
-          rebuild (List.hd u.src) ~eff_shape:new_eff ~cur_idx
+          rebuild (List.hd u.src) ~eff_shape:new_eff ~cur_idx ~idx_shape
         | Ops.EXPAND ->
           (* The EXPAND's child shape (with 1s for broadcast dims) determines
              the buffer's effective shape. Walk through simple wrappers
@@ -289,20 +294,23 @@ let rebuild_expr ~buf_id_to_param ~loop_idx ~output_shape ~numel (root : Uop.t) 
             | Some s -> Some s  (* use the reshape shape before expand *)
             | None -> eff_shape
           in
-          rebuild child ~eff_shape:new_eff ~cur_idx
+          rebuild child ~eff_shape:new_eff ~cur_idx ~idx_shape
         | Ops.PERMUTE ->
           (* Apply index permutation: decompose flat index using the permuted
              (output) shape, inverse-permute coordinates, recompose using
              the original (child) shape.
-             The child's shape comes from the nearest RESHAPE below PERMUTE.
-             perm_shape[i] = child_shape[axes[i]]. *)
+             Find the PERMUTE's input shape from the child graph:
+             - RESHAPE provides its shape directly from arg
+             - EXPAND provides its (expanded) shape from arg
+             - Other view wrappers (CONTIGUOUS, CAST, PAD, etc.) are walked through
+             Note: we must NOT walk through EXPAND since it changes logical shape. *)
           let axes = match u.arg with Uop.Int_list a -> a | _ -> [] in
           let child = List.hd u.src in
-          (* Find child shape from nearest RESHAPE *)
           let rec find_child_shape (n : Uop.t) = match n.op with
             | Ops.RESHAPE -> (match n.arg with Uop.Shape s -> Some s | _ -> None)
-            | _ when Ops.Group.is_view_wrapper n.op && n.src <> [] ->
-              find_child_shape (List.hd n.src)
+            | Ops.EXPAND -> (match n.arg with Uop.Shape s -> Some s | _ -> None)
+            | Ops.CONTIGUOUS | Ops.CAST | Ops.PAD | Ops.SHRINK | Ops.FLIP
+              when n.src <> [] -> find_child_shape (List.hd n.src)
             | _ -> None
           in
           let child_shape_opt = find_child_shape child in
@@ -311,25 +319,26 @@ let rebuild_expr ~buf_id_to_param ~loop_idx ~output_shape ~numel (root : Uop.t) 
             (* perm_shape[i] = child_shape[axes[i]] *)
             let perm_shape = List.map (List.nth child_shape) axes in
             let new_idx = permute_index ~perm_shape ~axes cur_idx in
-            rebuild child ~eff_shape ~cur_idx:new_idx
+            (* After permute, the index is now in the child's (unpermuted) coordinate frame *)
+            rebuild child ~eff_shape ~cur_idx:new_idx ~idx_shape:child_shape
           | _ ->
             (* No shape info available — pass through (identity permute or 1-D) *)
-            rebuild child ~eff_shape ~cur_idx
+            rebuild child ~eff_shape ~cur_idx ~idx_shape
           end
         | Ops.CONTIGUOUS | Ops.PAD | Ops.SHRINK | Ops.FLIP ->
-          rebuild (List.hd u.src) ~eff_shape ~cur_idx
+          rebuild (List.hd u.src) ~eff_shape ~cur_idx ~idx_shape
         | Ops.CAST ->
-          let new_src = List.map (fun s -> rebuild s ~eff_shape:None ~cur_idx) u.src in
+          let new_src = List.map (fun s -> rebuild s ~eff_shape:None ~cur_idx ~idx_shape) u.src in
           Uop.cast u.dtype (List.hd new_src)
         | _ when Ops.Group.is_alu u.op ->
-          let new_src = List.map (fun s -> rebuild s ~eff_shape:None ~cur_idx) u.src in
+          let new_src = List.map (fun s -> rebuild s ~eff_shape:None ~cur_idx ~idx_shape) u.src in
           Uop.alu u.op u.dtype new_src
         | Ops.REDUCE_AXIS ->
           (* If this reduction was already realized, treat it as a buffer load *)
           (match get_realized u.id with
            | Some _dbuf ->
              if Hashtbl.mem buf_id_to_param u.id then
-               make_load u.id eff_shape cur_idx
+               make_load u.id eff_shape cur_idx idx_shape
              else u
            | None -> u)
         | Ops.CONST -> u
@@ -340,7 +349,7 @@ let rebuild_expr ~buf_id_to_param ~loop_idx ~output_shape ~numel (root : Uop.t) 
         Hashtbl.replace cache u.id result;
       result
   in
-  rebuild root ~eff_shape:None ~cur_idx:loop_idx
+  rebuild root ~eff_shape:None ~cur_idx:loop_idx ~idx_shape:output_shape
 
 (** Lower a lazy UOp expression tree into a concrete kernel UOp graph.
     Given a root UOp that represents a lazy computation (ALU ops over
@@ -386,7 +395,7 @@ let lower_to_kernel ~device ~numel ~output_shape ~kname (root : Uop.t) : (Uop.t 
     ) input_buffers;
 
     let result_val = rebuild_expr ~buf_id_to_param ~loop_idx:i
-      ~output_shape ~numel root in
+      ~output_shape root in
 
     (* Store to output *)
     let out_indexed = Uop.index out_param i in
@@ -456,7 +465,7 @@ let lower_reduce_kernel ~device ~input_numel ~output_numel ~reduce_axes ~input_s
       ) input_buffers;
 
       let input_val = rebuild_expr ~buf_id_to_param ~loop_idx:i
-        ~output_shape:input_shape ~numel:input_numel source_uop in
+        ~output_shape:input_shape source_uop in
 
       let loop_out_idx = Uop.index out_param (Uop.sub i i) in
       let cur = Uop.load loop_out_idx in
@@ -601,7 +610,7 @@ let lower_reduce_kernel ~device ~input_numel ~output_numel ~reduce_axes ~input_s
       ) input_buffers;
 
       let input_val = rebuild_expr ~buf_id_to_param ~loop_idx:flat_idx
-        ~output_shape:input_shape ~numel:input_numel source_uop in
+        ~output_shape:input_shape source_uop in
 
       (* Read current accumulator, apply reduce_op, write back.
          Use (o + (r - r)) so the INDEX depends on the inner loop variable r,
