@@ -261,6 +261,94 @@ let of_self_attention ?mask name (attn : self_attention) : layer =
     forward = self_attention_forward ?mask attn;
     params = (fun () -> self_attention_params attn) }
 
+(** Flatten layer wrapper — reshapes to [batch; -1] or to flat vector.
+    start_dim: first dimension to flatten (default 1, preserving batch dim).
+    For 1D input (no batch), start_dim=0 will flatten everything. *)
+let flatten_layer ?(start_dim=1) name : layer =
+  { name;
+    forward = (fun (x : Tensor.t) ->
+      let shape = x.shape in
+      let ndim = List.length shape in
+      let sd = if start_dim < 0 then ndim + start_dim else start_dim in
+      let prefix = List.filteri (fun i _ -> i < sd) shape in
+      let suffix = List.filteri (fun i _ -> i >= sd) shape in
+      let flat_dim = List.fold_left ( * ) 1 suffix in
+      Tensor.reshape x (prefix @ [flat_dim])
+    );
+    params = (fun () -> []) }
+
+(** Dropout layer wrapper — applies dropout during training.
+    p: dropout probability (default 0.5).
+    training: if false, acts as identity (default true). *)
+let dropout_layer ?(p=0.5) ?(training=true) name : layer =
+  { name;
+    forward = (fun (x : Tensor.t) ->
+      if training then Tensor.dropout ~p x else x
+    );
+    params = (fun () -> []) }
+
+(** Multi-head attention layer.
+    Splits d_model into n_heads, applies attention per head, concatenates.
+    x: [seq; d_model], returns: [seq; d_model]. *)
+type multi_head_attention = {
+  mha_wq: linear;
+  mha_wk: linear;
+  mha_wv: linear;
+  mha_wo: linear;
+  mha_d_model: int;
+  mha_n_heads: int;
+  mha_head_dim: int;
+}
+
+let multi_head_attention ?(device="CPU") ?(dtype=Dtype.float32) ~d_model ~n_heads () =
+  if d_model mod n_heads <> 0 then
+    invalid_arg (Printf.sprintf "multi_head_attention: d_model=%d not divisible by n_heads=%d" d_model n_heads);
+  let head_dim = d_model / n_heads in
+  { mha_wq = linear ~device ~dtype ~bias:false ~in_features:d_model ~out_features:d_model ();
+    mha_wk = linear ~device ~dtype ~bias:false ~in_features:d_model ~out_features:d_model ();
+    mha_wv = linear ~device ~dtype ~bias:false ~in_features:d_model ~out_features:d_model ();
+    mha_wo = linear ~device ~dtype ~bias:false ~in_features:d_model ~out_features:d_model ();
+    mha_d_model = d_model;
+    mha_n_heads = n_heads;
+    mha_head_dim = head_dim }
+
+(** Multi-head attention forward pass.
+    Processes each head separately (seq-only, no batch dim for now).
+    x: [seq; d_model], optional mask: [seq; seq]. Returns: [seq; d_model]. *)
+let multi_head_attention_forward ?mask (mha : multi_head_attention) (x : Tensor.t) : Tensor.t =
+  let seq_len = List.hd x.shape in
+  let q_full = linear_forward mha.mha_wq x in
+  let k_full = linear_forward mha.mha_wk x in
+  let v_full = linear_forward mha.mha_wv x in
+  (* Process each head via slicing: head i uses dims [i*head_dim .. (i+1)*head_dim) *)
+  let head_outputs = List.init mha.mha_n_heads (fun h ->
+    let start = h * mha.mha_head_dim in
+    let stop = start + mha.mha_head_dim in
+    (* Slice: shrink along last dimension *)
+    let q_h = Tensor.shrink q_full [(0, seq_len); (start, stop)] in
+    let k_h = Tensor.shrink k_full [(0, seq_len); (start, stop)] in
+    let v_h = Tensor.shrink v_full [(0, seq_len); (start, stop)] in
+    (* Realize intermediates to keep graph manageable *)
+    let q_h = !(Tensor.realize_ref) q_h in
+    let k_h = !(Tensor.realize_ref) k_h in
+    let v_h = !(Tensor.realize_ref) v_h in
+    (* Apply scaled dot-product attention for this head *)
+    Tensor.scaled_dot_product_attention ?mask q_h k_h v_h
+  ) in
+  (* Concatenate heads along last dimension *)
+  let concat = Tensor.cat ~axis:1 head_outputs in
+  let concat = !(Tensor.realize_ref) concat in
+  linear_forward mha.mha_wo concat
+
+let multi_head_attention_params (mha : multi_head_attention) : Tensor.t list =
+  linear_params mha.mha_wq @ linear_params mha.mha_wk @
+  linear_params mha.mha_wv @ linear_params mha.mha_wo
+
+let of_multi_head_attention ?mask name (mha : multi_head_attention) : layer =
+  { name;
+    forward = multi_head_attention_forward ?mask mha;
+    params = (fun () -> multi_head_attention_params mha) }
+
 (** Adam optimizer state *)
 type adam_state = {
   m: float array;   (** First moment estimate *)
@@ -352,6 +440,7 @@ let lr_scheduler_init (base_lr : float) : lr_scheduler =
 (** Step decay: multiply LR by gamma every step_size steps.
     lr = base_lr * gamma^(step_count / step_size) *)
 let lr_step_decay ~step_size ~gamma (sched : lr_scheduler) : lr_scheduler =
+  if step_size <= 0 then invalid_arg "lr_step_decay: step_size must be > 0";
   let step = sched.step_count + 1 in
   let lr = sched.base_lr *. (gamma ** Float.of_int (step / step_size)) in
   { base_lr = sched.base_lr; current_lr = lr; step_count = step }
@@ -366,6 +455,7 @@ let lr_exponential_decay ~gamma (sched : lr_scheduler) : lr_scheduler =
 (** Cosine annealing: lr oscillates between base_lr and eta_min over T_max steps.
     lr = eta_min + 0.5 * (base_lr - eta_min) * (1 + cos(pi * step / T_max)) *)
 let lr_cosine_annealing ~t_max ?(eta_min=0.0) (sched : lr_scheduler) : lr_scheduler =
+  if t_max <= 0 then invalid_arg "lr_cosine_annealing: t_max must be > 0";
   let step = sched.step_count + 1 in
   let progress = Float.of_int step /. Float.of_int t_max in
   let lr = eta_min +. 0.5 *. (sched.base_lr -. eta_min) *.
@@ -396,7 +486,8 @@ let load_params ?(device="CPU") ?(dtype=Dtype.float32) (filename : string)
     let line = input_line ic in
     match String.split_on_char '|' line with
     | [name; shape_str; val_str] ->
-      let shape = List.map int_of_string (String.split_on_char ',' shape_str) in
+      let shape = if shape_str = "" then []
+        else List.map int_of_string (String.split_on_char ',' shape_str) in
       let values = List.filter_map (fun s ->
         if s = "" then None else Some (float_of_string s)
       ) (String.split_on_char ' ' val_str) in
