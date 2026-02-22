@@ -1482,6 +1482,46 @@ let test_cuda_backend () =
     && (try ignore (Str.search_forward (Str.regexp_string "__global__") pspec.src 0); true with Not_found -> false));
   check "cuda src has extern C" (try ignore (Str.search_forward (Str.regexp_string {|extern "C"|}) pspec.src 0); true with Not_found -> false)
 
+(* ---- Test 46: PAD(PERMUTE(x)) composed movement ops ---- *)
+let test_pad_permute () =
+  Printf.printf "\n=== PAD(PERMUTE) ===\n%!";
+  Schedule.reset ();
+  (* x = [[1,2,3],[4,5,6]] shape [2;3]
+     permute([1;0]) → [[1,4],[2,5],[3,6]] shape [3;2]
+     pad [(0,1);(1,0)] → shape [4;3]:
+       [[0,1,4],[0,2,5],[0,3,6],[0,0,0]] *)
+  let x = Tensor.from_float_list [2; 3] [1.;2.;3.;4.;5.;6.] in
+  let xp = Tensor.permute x [1; 0] in
+  let xpp = Tensor.pad xp [(0, 1); (1, 0)] in
+  (* Force computation via add with zeros *)
+  let zeros = Tensor.from_float_list [4; 3] (List.init 12 (fun _ -> 0.0)) in
+  let r = Tensor.add xpp zeros in
+  let v = Tensor.to_float_list r in
+  check "pad_permute len" (List.length v = 12);
+  let expected = [0.;1.;4.; 0.;2.;5.; 0.;3.;6.; 0.;0.;0.] in
+  List.iteri (fun i vv ->
+    check_float (Printf.sprintf "pad_perm[%d]" i) vv (List.nth expected i) 1e-6
+  ) v
+
+(* ---- Test 47: SHRINK(PERMUTE(x)) composed movement ops ---- *)
+let test_shrink_permute () =
+  Printf.printf "\n=== SHRINK(PERMUTE) ===\n%!";
+  Schedule.reset ();
+  (* x = [[1,2,3],[4,5,6]] shape [2;3]
+     permute([1;0]) → [[1,4],[2,5],[3,6]] shape [3;2]
+     shrink [(1,3);(0,2)] → [[2,5],[3,6]] shape [2;2] *)
+  let x = Tensor.from_float_list [2; 3] [1.;2.;3.;4.;5.;6.] in
+  let xp = Tensor.permute x [1; 0] in
+  let xs = Tensor.shrink xp [(1, 3); (0, 2)] in
+  let zeros = Tensor.from_float_list [2; 2] [0.;0.;0.;0.] in
+  let r = Tensor.add xs zeros in
+  let v = Tensor.to_float_list r in
+  check "shrink_permute len" (List.length v = 4);
+  let expected = [2.;5.;3.;6.] in
+  List.iteri (fun i vv ->
+    check_float (Printf.sprintf "shrink_perm[%d]" i) vv (List.nth expected i) 1e-6
+  ) v
+
 let run_test name f =
   try f () with e ->
     incr fail_count;
@@ -1550,6 +1590,8 @@ let () =
   run_test "metal_matmul" test_metal_matmul;
   run_test "metal_backward" test_metal_backward;
   run_test "metal_training" test_metal_training;
+  run_test "pad_permute" test_pad_permute;
+  run_test "shrink_permute" test_shrink_permute;
   run_test "cuda_backend" test_cuda_backend;
   Printf.printf "\n============================\n%!";
   Printf.printf "Results: %d passed, %d failed\n%!" !pass_count !fail_count;

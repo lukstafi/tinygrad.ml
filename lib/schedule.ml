@@ -349,6 +349,36 @@ let rebuild_expr ~buf_id_to_param ~loop_idx ~output_shape (root : Uop.t) : Uop.t
     | None -> failwith (Printf.sprintf "rebuild_expr: buffer %d not in param map" buf_id)
   in
 
+  (* Walk a UOp graph to infer the node's logical shape.
+     Handles all shape-providing and shape-changing wrappers:
+     - RESHAPE/EXPAND: read shape directly from arg
+     - PERMUTE: permute the child shape according to axes
+     - PAD: add (before + after) to each dim of child shape
+     - SHRINK: compute (hi - lo) for each dim from bounds
+     - CONTIGUOUS/CAST/FLIP: pass through to child *)
+  let rec infer_shape (n : Uop.t) : int list option = match n.op with
+    | Ops.RESHAPE -> (match n.arg with Uop.Shape s -> Some s | _ -> None)
+    | Ops.EXPAND -> (match n.arg with Uop.Shape s -> Some s | _ -> None)
+    | Ops.PERMUTE when n.src <> [] ->
+      let axes = match n.arg with Uop.Int_list a -> a | _ -> [] in
+      (match infer_shape (List.hd n.src) with
+       | Some child_shape when List.length axes = List.length child_shape ->
+         Some (List.map (List.nth child_shape) axes)
+       | _ -> None)
+    | Ops.PAD when n.src <> [] ->
+      (match infer_shape (List.hd n.src), n.arg with
+       | Some inner, Uop.Pad_arg padding when List.length inner = List.length padding ->
+         Some (List.map2 (fun d (b, a) -> d + b + a) inner padding)
+       | _ -> None)
+    | Ops.SHRINK when n.src <> [] ->
+      (match n.arg with
+       | Uop.Pad_arg bounds -> Some (List.map (fun (lo, hi) -> hi - lo) bounds)
+       | _ -> None)
+    | Ops.CONTIGUOUS | Ops.CAST | Ops.FLIP when n.src <> [] ->
+      infer_shape (List.hd n.src)
+    | _ -> None
+  in
+
   (* Path-dependent ops: the result depends on eff_shape or cur_idx flowing
      down from the root, so the same node may need different lowerings on
      different paths. These must bypass the per-node result cache.
@@ -414,26 +444,7 @@ let rebuild_expr ~buf_id_to_param ~loop_idx ~output_shape (root : Uop.t) : Uop.t
              Note: we must NOT walk through EXPAND since it changes logical shape. *)
           let axes = match u.arg with Uop.Int_list a -> a | _ -> [] in
           let child = List.hd u.src in
-          let rec find_child_shape (n : Uop.t) = match n.op with
-            | Ops.RESHAPE -> (match n.arg with Uop.Shape s -> Some s | _ -> None)
-            | Ops.EXPAND -> (match n.arg with Uop.Shape s -> Some s | _ -> None)
-            | Ops.PAD when n.src <> [] ->
-              (* PAD changes shape: output[i] = input[i] + before_i + after_i *)
-              (match find_child_shape (List.hd n.src), n.arg with
-               | Some inner, Uop.Pad_arg padding ->
-                 Some (List.map2 (fun d (b, a) -> d + b + a) inner padding)
-               | _ -> None)
-            | Ops.SHRINK when n.src <> [] ->
-              (* SHRINK changes shape: output[i] = hi_i - lo_i *)
-              (match n.arg with
-               | Uop.Pad_arg bounds ->
-                 Some (List.map (fun (lo, hi) -> hi - lo) bounds)
-               | _ -> None)
-            | Ops.CONTIGUOUS | Ops.CAST | Ops.FLIP
-              when n.src <> [] -> find_child_shape (List.hd n.src)
-            | _ -> None
-          in
-          let child_shape_opt = find_child_shape child in
+          let child_shape_opt = infer_shape child in
           begin match axes, child_shape_opt with
           | _ :: _, Some child_shape when List.length axes = List.length child_shape ->
             (* perm_shape[i] = child_shape[axes[i]] *)
@@ -451,15 +462,7 @@ let rebuild_expr ~buf_id_to_param ~loop_idx ~output_shape (root : Uop.t) : Uop.t
           let child = List.hd u.src in
           if bounds <> [] then begin
             let shrunk_shape = List.map (fun (lo, hi) -> hi - lo) bounds in
-            (* Find the child (original, pre-shrink) shape *)
-            let rec find_shape (n : Uop.t) = match n.op with
-              | Ops.RESHAPE -> (match n.arg with Uop.Shape s -> Some s | _ -> None)
-              | Ops.EXPAND -> (match n.arg with Uop.Shape s -> Some s | _ -> None)
-              | Ops.CONTIGUOUS | Ops.CAST | Ops.FLIP
-                when n.src <> [] -> find_shape (List.hd n.src)
-              | _ -> None
-            in
-            match find_shape child with
+            match infer_shape child with
             | Some orig_shape when List.length orig_shape = List.length bounds ->
               let new_idx = shrink_index ~shrunk_shape ~bounds ~orig_shape cur_idx in
               rebuild child ~eff_shape ~cur_idx:new_idx ~idx_shape:orig_shape
@@ -472,20 +475,7 @@ let rebuild_expr ~buf_id_to_param ~loop_idx ~output_shape (root : Uop.t) : Uop.t
           let padding = match u.arg with Uop.Pad_arg p -> p | _ -> [] in
           let child = List.hd u.src in
           if padding <> [] then begin
-            let inner_shape = match u.arg with
-              | Uop.Pad_arg _ ->
-                (* Inner shape = padded_shape[i] - before_i - after_i for each dim.
-                   But we need the actual inner shape. Find it from the child. *)
-                let rec find_shape (n : Uop.t) = match n.op with
-                  | Ops.RESHAPE -> (match n.arg with Uop.Shape s -> Some s | _ -> None)
-                  | Ops.EXPAND -> (match n.arg with Uop.Shape s -> Some s | _ -> None)
-                  | Ops.CONTIGUOUS | Ops.CAST | Ops.FLIP
-                    when n.src <> [] -> find_shape (List.hd n.src)
-                  | _ -> None
-                in
-                find_shape child
-              | _ -> None
-            in
+            let inner_shape = infer_shape child in
             let padded_shape = idx_shape in  (* current idx_shape IS the padded shape *)
             match inner_shape with
             | Some inner when List.length inner = List.length padding ->
