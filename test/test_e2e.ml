@@ -2585,7 +2585,61 @@ let test_randn_like () =
   let rnv = to_float_list rn in
   check "randn_like finite" (List.for_all Float.is_finite rnv)
 
-(* ---- Test 72: CUDA backend registration ---- *)
+(* ---- Test 72: Adam optimizer ---- *)
+let test_adam () =
+  Schedule.reset ();
+  Printf.printf "\n=== Adam Optimizer ===\n%!";
+  let open Tensor in
+  (* Single Adam step: verify moment updates and parameter change *)
+  let x = from_float_list [3] [3.0; 4.0; 5.0] in
+  let loss = sum (mul x x) in
+  let grads = backward loss [x] in
+  let (_, grad) = List.hd grads in
+  let state0 = Nn.adam_init 3 in
+  let (new_x, state1) = Nn.adam_step x grad state0 in
+  let nv = to_float_list new_x in
+  (* After 1 Adam step, params should decrease (grad = 2x, all positive) *)
+  check "adam moved x[0]" (List.nth nv 0 < 3.0);
+  check "adam moved x[1]" (List.nth nv 1 < 4.0);
+  check "adam moved x[2]" (List.nth nv 2 < 5.0);
+  check "adam_step=1" (state1.t_step = 1);
+  (* Verify moment state is populated *)
+  check "adam m[0]>0" (state1.m.(0) > 0.0);
+  check "adam v[0]>0" (state1.v.(0) > 0.0)
+
+(* ---- Test 73: Nn sequential forward+backward ---- *)
+let test_nn_backward () =
+  Schedule.reset ();
+  Printf.printf "\n=== Nn Sequential Backward ===\n%!";
+  let open Tensor in
+  Random.init 77;
+  (* Build a small MLP and verify gradients flow through *)
+  let l1 = Nn.linear ~in_features:2 ~out_features:4 () in
+  let l2 = Nn.linear ~in_features:4 ~out_features:1 () in
+  let model = [
+    Nn.of_linear "fc1" l1;
+    Nn.activation "relu" relu;
+    Nn.of_linear "fc2" l2;
+  ] in
+  let x = from_float_list [2; 2] [1.0; 0.0; 0.0; 1.0] in
+  let pred = Nn.sequential_forward model x in
+  let loss = sum pred in
+  let all_params = Nn.sequential_params model in
+  let grads = backward loss all_params in
+  (* All gradients should be finite and at least some non-zero *)
+  List.iteri (fun i (_, grad) ->
+    let gv = to_float_list grad in
+    List.iteri (fun j g ->
+      check (Printf.sprintf "nn_grad[%d][%d] finite" i j) (Float.is_finite g)
+    ) gv
+  ) grads;
+  let has_nonzero = List.exists (fun (_, grad) ->
+    let gv = to_float_list grad in
+    List.exists (fun g -> Float.abs g > 1e-8) gv
+  ) grads in
+  check "nn_grads has nonzero" has_nonzero
+
+(* ---- Test 74: CUDA backend registration ---- *)
 let test_cuda_backend () =
   Printf.printf "\n=== CUDA Backend ===\n%!";
   (* Verify CUDA backend is recognized and returns a module *)
@@ -2954,6 +3008,8 @@ let () =
   run_test "mse_loss" test_mse_loss;
   run_test "bce_loss" test_bce_loss;
   run_test "randn_like" test_randn_like;
+  run_test "adam" test_adam;
+  run_test "nn_backward" test_nn_backward;
   run_test "cuda_backend" test_cuda_backend;
   Printf.printf "\n============================\n%!";
   Printf.printf "Results: %d passed, %d failed\n%!" !pass_count !fail_count;

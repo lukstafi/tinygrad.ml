@@ -2,7 +2,7 @@
     Provides Linear, BatchNorm-style layers, and SGD optimizer as
     composable modules over Tensor. *)
 
-(** A linear (fully-connected) layer: y = x @ W^T + b *)
+(** A linear (fully-connected) layer: y = x @ W + b, where W is [in_features; out_features] *)
 type linear = {
   weight: Tensor.t;
   bias: Tensor.t option;
@@ -18,12 +18,12 @@ let linear ?(device="CPU") ?(dtype=Dtype.float32) ?(bias=true) ~in_features ~out
   else None in
   { weight = w; bias = b; in_features; out_features }
 
-(** Forward pass through a linear layer: x @ W + b *)
+(** Forward pass through a linear layer: x @ W + b.
+    Bias is auto-broadcast from [1; out_features] to [batch; out_features]. *)
 let linear_forward (layer : linear) (x : Tensor.t) : Tensor.t =
-  let batch = List.hd x.shape in
   let out = Tensor.matmul x layer.weight in
   match layer.bias with
-  | Some b -> Tensor.add out (Tensor.expand b [batch; layer.out_features])
+  | Some b -> Tensor.add out b  (* auto-broadcast handles [1;out] + [batch;out] *)
   | None -> out
 
 (** Get all trainable parameters from a linear layer *)
@@ -70,3 +70,40 @@ let sgd_step ~lr (grads : (Tensor.t * Tensor.t) list) : (Tensor.t * Tensor.t) li
     let new_t = Tensor.from_float_list ~device:param.device ~dtype:param.dtype param.shape new_data in
     (param, new_t)
   ) grads
+
+(** Adam optimizer state *)
+type adam_state = {
+  m: float array;   (** First moment estimate *)
+  v: float array;   (** Second moment estimate *)
+  t_step: int;      (** Timestep *)
+}
+
+(** Create initial Adam state for a parameter *)
+let adam_init (n : int) : adam_state =
+  { m = Array.make n 0.0; v = Array.make n 0.0; t_step = 0 }
+
+(** Adam optimizer step for one parameter.
+    Returns (new_param_tensor, updated_state). *)
+let adam_step ?(lr=0.001) ?(beta1=0.9) ?(beta2=0.999) ?(eps=1e-8)
+    (param : Tensor.t) (grad : Tensor.t) (state : adam_state) : Tensor.t * adam_state =
+  let pv = Array.of_list (Tensor.to_float_list param) in
+  let gv = Array.of_list (Tensor.to_float_list grad) in
+  let n = Array.length pv in
+  let t = state.t_step + 1 in
+  let m = Array.copy state.m in
+  let v = Array.copy state.v in
+  for i = 0 to n - 1 do
+    m.(i) <- beta1 *. m.(i) +. (1.0 -. beta1) *. gv.(i);
+    v.(i) <- beta2 *. v.(i) +. (1.0 -. beta2) *. gv.(i) *. gv.(i);
+  done;
+  (* Bias-corrected estimates *)
+  let bc1 = 1.0 -. (beta1 ** Float.of_int t) in
+  let bc2 = 1.0 -. (beta2 ** Float.of_int t) in
+  let new_pv = Array.init n (fun i ->
+    let m_hat = m.(i) /. bc1 in
+    let v_hat = v.(i) /. bc2 in
+    pv.(i) -. lr *. m_hat /. (Stdlib.sqrt v_hat +. eps)
+  ) in
+  let new_t = Tensor.from_float_list ~device:param.device ~dtype:param.dtype param.shape
+    (Array.to_list new_pv) in
+  (new_t, { m; v; t_step = t })
