@@ -262,3 +262,15 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - Test validates both devices in one place:
   - Asserts CPU gradient arrays first (sanity),
   - then asserts Metal gradient arrays against the same expected values.
+
+## Codex round 24 decisions
+
+- Extracted shared numeric test assertions into `test/test_helpers.ml`:
+  - `check_close` with non-finite-aware behavior (`NaN`/`inf` mismatch fails),
+  - `check_array` for elementwise array checks.
+- Removed duplicated assertion code from:
+  - `test/test_cpu.ml`,
+  - `test/test_cuda.ml`,
+  - `test/test_metal.ml`,
+  and replaced it with `open Test_helpers`.
+- This addresses cross-file maintenance risk for future assertion behavior changes by moving to a single source of truth.
