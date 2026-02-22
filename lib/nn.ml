@@ -240,3 +240,119 @@ let adam_step ?(lr=0.001) ?(beta1=0.9) ?(beta2=0.999) ?(eps=1e-8)
   let new_t = Tensor.from_float_list ~device:param.device ~dtype:param.dtype param.shape
     (Array.to_list new_pv) in
   (new_t, { m; v; t_step = t })
+
+(* ---- Gradient Clipping ---- *)
+
+(** Clip gradient values element-wise to [-clip_value, clip_value].
+    Returns a new gradient tensor list with clipped values. *)
+let clip_grad_value ~clip_value (grads : (Tensor.t * Tensor.t) list)
+    : (Tensor.t * Tensor.t) list =
+  List.map (fun (param, (grad : Tensor.t)) ->
+    let gv = Tensor.to_float_list grad in
+    let clipped = List.map (fun g ->
+      Float.max (-.clip_value) (Float.min clip_value g)
+    ) gv in
+    let new_g = Tensor.from_float_list ~device:grad.device ~dtype:grad.dtype
+      grad.shape clipped in
+    (param, new_g)
+  ) grads
+
+(** Clip gradients by global L2 norm.
+    If total_norm > max_norm, scale all gradients by max_norm / total_norm.
+    Returns (clipped_grads, total_norm). *)
+let clip_grad_norm ~max_norm (grads : (Tensor.t * Tensor.t) list)
+    : (Tensor.t * Tensor.t) list * float =
+  let total_sq = List.fold_left (fun acc (_, grad) ->
+    let gv = Tensor.to_float_list grad in
+    List.fold_left (fun a g -> a +. g *. g) acc gv
+  ) 0.0 grads in
+  let total_norm = Stdlib.sqrt total_sq in
+  if total_norm <= max_norm then (grads, total_norm)
+  else
+    let scale = max_norm /. total_norm in
+    let clipped = List.map (fun (param, (grad : Tensor.t)) ->
+      let gv = Tensor.to_float_list grad in
+      let scaled = List.map (fun g -> g *. scale) gv in
+      let new_g = Tensor.from_float_list ~device:grad.device ~dtype:grad.dtype
+        grad.shape scaled in
+      (param, new_g)
+    ) grads in
+    (clipped, total_norm)
+
+(* ---- Learning Rate Schedulers ---- *)
+
+(** Learning rate scheduler state *)
+type lr_scheduler = {
+  base_lr: float;
+  current_lr: float;
+  step_count: int;
+}
+
+(** Create a new LR scheduler with the given base learning rate *)
+let lr_scheduler_init (base_lr : float) : lr_scheduler =
+  { base_lr; current_lr = base_lr; step_count = 0 }
+
+(** Step decay: multiply LR by gamma every step_size steps.
+    lr = base_lr * gamma^(step_count / step_size) *)
+let lr_step_decay ~step_size ~gamma (sched : lr_scheduler) : lr_scheduler =
+  let step = sched.step_count + 1 in
+  let lr = sched.base_lr *. (gamma ** Float.of_int (step / step_size)) in
+  { base_lr = sched.base_lr; current_lr = lr; step_count = step }
+
+(** Exponential decay: multiply LR by gamma each step.
+    lr = base_lr * gamma^step_count *)
+let lr_exponential_decay ~gamma (sched : lr_scheduler) : lr_scheduler =
+  let step = sched.step_count + 1 in
+  let lr = sched.base_lr *. (gamma ** Float.of_int step) in
+  { base_lr = sched.base_lr; current_lr = lr; step_count = step }
+
+(** Cosine annealing: lr oscillates between base_lr and eta_min over T_max steps.
+    lr = eta_min + 0.5 * (base_lr - eta_min) * (1 + cos(pi * step / T_max)) *)
+let lr_cosine_annealing ~t_max ?(eta_min=0.0) (sched : lr_scheduler) : lr_scheduler =
+  let step = sched.step_count + 1 in
+  let progress = Float.of_int step /. Float.of_int t_max in
+  let lr = eta_min +. 0.5 *. (sched.base_lr -. eta_min) *.
+    (1.0 +. Stdlib.cos (Float.pi *. progress)) in
+  { base_lr = sched.base_lr; current_lr = lr; step_count = step }
+
+(* ---- Model Save/Load ---- *)
+
+(** Save model parameters to a file.
+    Format: one line per parameter with "name shape data..." *)
+let save_params (filename : string) (params : (string * Tensor.t) list) : unit =
+  let oc = open_out filename in
+  List.iter (fun (name, (tensor : Tensor.t)) ->
+    let shape_str = String.concat "," (List.map string_of_int tensor.shape) in
+    let values = Tensor.to_float_list tensor in
+    let val_str = String.concat " " (List.map (Printf.sprintf "%.17g") values) in
+    Printf.fprintf oc "%s|%s|%s\n" name shape_str val_str
+  ) params;
+  close_out oc
+
+(** Load model parameters from a file.
+    Returns a list of (name, float_array, shape) for the caller to apply. *)
+let load_params ?(device="CPU") ?(dtype=Dtype.float32) (filename : string)
+    : (string * Tensor.t) list =
+  let ic = open_in filename in
+  let params = ref [] in
+  (try while true do
+    let line = input_line ic in
+    match String.split_on_char '|' line with
+    | [name; shape_str; val_str] ->
+      let shape = List.map int_of_string (String.split_on_char ',' shape_str) in
+      let values = List.filter_map (fun s ->
+        if s = "" then None else Some (float_of_string s)
+      ) (String.split_on_char ' ' val_str) in
+      let tensor = Tensor.from_float_list ~device ~dtype shape values in
+      params := (name, tensor) :: !params
+    | _ -> ()
+  done with End_of_file -> ());
+  close_in ic;
+  List.rev !params
+
+(** Save sequential model parameters with layer names *)
+let save_sequential (filename : string) (layers : layer list) : unit =
+  let params = List.concat_map (fun l ->
+    List.mapi (fun i t -> (Printf.sprintf "%s.%d" l.name i, t)) (l.params ())
+  ) layers in
+  save_params filename params

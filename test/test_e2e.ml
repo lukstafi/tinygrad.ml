@@ -2775,7 +2775,7 @@ let test_element_ops () =
   let exp3 = from_float_list [2] [3.0; 2.0] in
   let npv = to_float_list (pow_ neg_base exp3) in
   check "pow (-2)^3≈-8" (Float.abs (List.nth npv 0 -. (-8.0)) < 0.1);
-  check "pow (-3)^2≈-9" (Float.abs (List.nth npv 1 -. (-9.0)) < 0.1);
+  check "pow (-3)^2≈9" (Float.abs (List.nth npv 1 -. 9.0) < 0.1);
   (* chunk validation: n<=0 should raise *)
   (try ignore (chunk (from_float_list [4] [1.;2.;3.;4.]) 0);
        check "chunk n=0 raises" false
@@ -3051,6 +3051,96 @@ let test_embedding_validation () =
     ignore (Nn.embedding_forward emb3 neg_idx); false
   with Invalid_argument _ -> true in
   check "emb_neg caught" caught_neg
+
+(* ---- Test 89: Gradient clipping ---- *)
+let test_grad_clipping () =
+  Printf.printf "\n=== Gradient Clipping ===\n%!";
+  let open Tensor in
+  (* clip_grad_value: clip to [-8, 8] *)
+  Schedule.reset ();
+  let p1a = from_float_list [3] [1.0; 2.0; 3.0] in
+  let g1a = from_float_list [3] [10.0; -20.0; 5.0] in
+  let p2a = from_float_list [2] [1.0; 1.0] in
+  let g2a = from_float_list [2] [3.0; -4.0] in
+  let clipped_v = Nn.clip_grad_value ~clip_value:8.0 [(p1a, g1a); (p2a, g2a)] in
+  let (_, cg1) = List.hd clipped_v in
+  let cv1 = to_float_list cg1 in
+  check "clip_val[0]=8" (Float.abs (List.nth cv1 0 -. 8.0) < 1e-6);
+  check "clip_val[1]=-8" (Float.abs (List.nth cv1 1 -. (-8.0)) < 1e-6);
+  check "clip_val[2]=5" (Float.abs (List.nth cv1 2 -. 5.0) < 1e-6);
+  (* clip_grad_norm: total norm = sqrt(10^2+20^2+5^2+3^2+4^2) = sqrt(550) ≈ 23.45 *)
+  Schedule.reset ();
+  let p1b = from_float_list [3] [1.0; 2.0; 3.0] in
+  let g1b = from_float_list [3] [10.0; -20.0; 5.0] in
+  let p2b = from_float_list [2] [1.0; 1.0] in
+  let g2b = from_float_list [2] [3.0; -4.0] in
+  let (clipped_n, total_norm) = Nn.clip_grad_norm ~max_norm:10.0
+    [(p1b, g1b); (p2b, g2b)] in
+  check "grad_norm total≈23.45" (Float.abs (total_norm -. Stdlib.sqrt 550.0) < 0.1);
+  let (_, cn1) = List.hd clipped_n in
+  let nv1 = to_float_list cn1 in
+  (* After clipping, all grads scaled by 10/23.45 ≈ 0.4264 *)
+  let scale = 10.0 /. Stdlib.sqrt 550.0 in
+  check "clip_norm[0]≈scaled" (Float.abs (List.nth nv1 0 -. 10.0 *. scale) < 0.01)
+
+(* ---- Test 90: LR schedulers ---- *)
+let test_lr_schedulers () =
+  Printf.printf "\n=== LR Schedulers ===\n%!";
+  (* Step decay: base_lr=0.1, step_size=3, gamma=0.5 *)
+  let s0 = Nn.lr_scheduler_init 0.1 in
+  check "lr_init" (Float.abs (s0.current_lr -. 0.1) < 1e-9);
+  let s1 = Nn.lr_step_decay ~step_size:3 ~gamma:0.5 s0 in
+  check "lr_step1=0.1" (Float.abs (s1.current_lr -. 0.1) < 1e-9);  (* step 1 < 3 *)
+  let s2 = Nn.lr_step_decay ~step_size:3 ~gamma:0.5 s1 in
+  let s3 = Nn.lr_step_decay ~step_size:3 ~gamma:0.5 s2 in
+  check "lr_step3=0.05" (Float.abs (s3.current_lr -. 0.05) < 1e-9);  (* step 3: gamma^1 *)
+  (* Exponential decay: gamma=0.9 *)
+  let e0 = Nn.lr_scheduler_init 1.0 in
+  let e1 = Nn.lr_exponential_decay ~gamma:0.9 e0 in
+  check "lr_exp1=0.9" (Float.abs (e1.current_lr -. 0.9) < 1e-6);
+  let e2 = Nn.lr_exponential_decay ~gamma:0.9 e1 in
+  check "lr_exp2=0.81" (Float.abs (e2.current_lr -. 0.81) < 1e-6);
+  (* Cosine annealing: T_max=10 *)
+  let c0 = Nn.lr_scheduler_init 0.1 in
+  let c5 = ref c0 in
+  for _ = 1 to 5 do c5 := Nn.lr_cosine_annealing ~t_max:10 !c5 done;
+  (* At step 5/10 = 0.5, cos(pi*0.5) = 0, so lr = 0 + 0.5*0.1*(1+0) = 0.05 *)
+  check "lr_cos5≈0.05" (Float.abs ((!c5).current_lr -. 0.05) < 1e-6);
+  let c10 = ref c0 in
+  for _ = 1 to 10 do c10 := Nn.lr_cosine_annealing ~t_max:10 !c10 done;
+  (* At step 10/10 = 1.0, cos(pi) = -1, so lr = 0 + 0.5*0.1*(1-1) = 0 *)
+  check "lr_cos10≈0" (Float.abs ((!c10).current_lr) < 1e-6)
+
+(* ---- Test 91: Model save/load ---- *)
+let test_model_save_load () =
+  Printf.printf "\n=== Model Save/Load ===\n%!";
+  let open Tensor in
+  Schedule.reset ();
+  let w = from_float_list [2; 3] [1.0; 2.0; 3.0; 4.0; 5.0; 6.0] in
+  let b = from_float_list [3] [0.1; 0.2; 0.3] in
+  let tmpfile = Filename.temp_file "tinygrad_test_" ".params" in
+  Nn.save_params tmpfile [("weight", w); ("bias", b)];
+  (* Load and verify weight *)
+  Schedule.reset ();
+  let loaded = Nn.load_params tmpfile in
+  check "load 2 params" (List.length loaded = 2);
+  let (n1, t1) = List.hd loaded in
+  check "load name=weight" (n1 = "weight");
+  check "load shape=[2;3]" (t1.shape = [2; 3]);
+  let v1 = to_float_list t1 in
+  check "load w[0]≈1" (Float.abs (List.nth v1 0 -. 1.0) < 1e-6);
+  check "load w[5]≈6" (Float.abs (List.nth v1 5 -. 6.0) < 1e-6);
+  (* Load again in fresh session for bias *)
+  Schedule.reset ();
+  let loaded2 = Nn.load_params tmpfile in
+  let (n2, t2) = List.nth loaded2 1 in
+  check "load name=bias" (n2 = "bias");
+  check "load b shape=[3]" (t2.shape = [3]);
+  let v2 = to_float_list t2 in
+  (* float32 precision: ~1e-7 relative error *)
+  check "load b[2]≈0.3" (Float.abs (List.nth v2 2 -. 0.3) < 1e-6);
+  (* Clean up *)
+  Sys.remove tmpfile
 
 (* ---- Test 86: CUDA backend registration ---- *)
 let test_cuda_backend () =
@@ -3449,6 +3539,9 @@ let () =
   run_test "nn_self_attention" test_nn_self_attention;
   run_test "attention_full" test_attention_full;
   run_test "embedding_validation" test_embedding_validation;
+  run_test "grad_clipping" test_grad_clipping;
+  run_test "lr_schedulers" test_lr_schedulers;
+  run_test "model_save_load" test_model_save_load;
   run_test "cuda_backend" test_cuda_backend;
   run_test "backend_availability" test_backend_availability;
   Printf.printf "\n============================\n%!";

@@ -408,3 +408,11 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Full attention end-to-end**: `scaled_dot_product_attention` and `Nn.self_attention_forward` both work as single function calls now, producing correct results without manual staging. Causal mask verified: first row only attends to first token.
 - **Architecture note**: The forward-reference `realize_ref` pattern enables complex operations to trigger intermediate realization. This is a pragmatic alternative to automatic graph splitting — the operation itself decides where to split.
 - **Test count**: 896 passing tests.
+
+## Claude round 47 decisions
+
+- **Codex review fix (round 45)**: Fixed `pow_` semantics for negative bases — now correctly handles even vs odd integer exponents. Uses `trunc` to detect integer exponents and `trunc(exp/2)*2 != trunc(exp)` for odd/even parity. `(-3)^2 = 9` (was incorrectly `-9`), `(-2)^3 = -8` (correct). Non-integer exponents with negative bases return magnitude (positive).
+- **Gradient clipping**: `Nn.clip_grad_value ~clip_value` clips each gradient element to `[-v, v]`. `Nn.clip_grad_norm ~max_norm` scales all gradients proportionally if global L2 norm exceeds threshold, returns `(clipped_grads, total_norm)`.
+- **LR schedulers**: `lr_step_decay ~step_size ~gamma` (step decay), `lr_exponential_decay ~gamma` (exponential), `lr_cosine_annealing ~t_max ?eta_min` (cosine annealing). All operate on `lr_scheduler` state record.
+- **Model save/load**: `Nn.save_params filename params` serializes named tensors to text file (name|shape|values). `Nn.load_params filename` deserializes back. `Nn.save_sequential` saves all parameters from a sequential model with layer-qualified names. Float32 precision preserved through `%.17g` format.
+- **Test count**: 916 passing tests.
