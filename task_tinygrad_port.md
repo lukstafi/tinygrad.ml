@@ -308,3 +308,12 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Layer normalization**: Added `layer_norm` with optional weight/bias, normalizing over configurable `normalized_shape` dimensions. Uses `mean` + `var(correction=0)` internally.
 - **Layer norm backward**: Forward correctness verified; backward produces finite gradients. Full backward numerical correctness limited by autograd's handling of shared subexpressions (x appears in mean, var, and numerator simultaneously).
 - **Test count**: 676 passing tests.
+
+## Claude round 37 decisions
+
+- **Codex review fixes (round 35)**:
+  - `cat` now validates axis bounds and consistent device/dtype across input tensors.
+  - `var` now raises `Invalid_argument` when `correction >= sample_count`, preventing NaN/inf.
+- **Random tensor creation**: Added `rand` (uniform [0,1)), `randn` (normal via Box-Muller), `kaiming_uniform` (weight initialization with fan_in scaling), `rand_like`, `randn_like`.
+- **Dropout**: Added `dropout` with configurable probability and 1/(1-p) scaling. Edge cases: p=0 identity, p=1 all-zeros.
+- **Test count**: 710 passing tests.

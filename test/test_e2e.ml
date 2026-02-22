@@ -2290,7 +2290,115 @@ let test_layer_norm_backward () =
   ) gv;
   check "ln_grad has nonzero" (List.exists (fun g -> Float.abs g > 1e-6) gv)
 
-(* ---- Test 60: CUDA backend registration ---- *)
+(* ---- Test 60: Random tensor creation ---- *)
+let test_random_tensors () =
+  Schedule.reset ();
+  Printf.printf "\n=== Random Tensors ===\n%!";
+  let open Tensor in
+  (* rand: all values in [0, 1) *)
+  Random.self_init ();
+  let r = rand [100] in
+  let rv = to_float_list r in
+  check "rand shape" (r.shape = [100]);
+  check "rand in [0,1)" (List.for_all (fun v -> v >= 0.0 && v < 1.0) rv);
+  check "rand not all same" (List.exists (fun v -> v <> List.hd rv) rv);
+  (* randn: mean ≈ 0, std ≈ 1 *)
+  Schedule.reset ();
+  let rn = randn [1000] in
+  let rnv = to_float_list rn in
+  let mean_val = List.fold_left (+.) 0.0 rnv /. 1000.0 in
+  let var_val = List.fold_left (fun acc v -> acc +. (v -. mean_val) ** 2.0) 0.0 rnv /. 1000.0 in
+  check_float "randn mean≈0" mean_val 0.0 0.15;
+  check_float "randn var≈1" var_val 1.0 0.2;
+  (* kaiming_uniform *)
+  Schedule.reset ();
+  let k = kaiming_uniform ~fan_in:784 [256; 784] in
+  let kv = to_float_list k in
+  check "kaiming shape" (k.shape = [256; 784]);
+  let bound = Stdlib.sqrt (6.0 /. 784.0) in
+  check "kaiming in bounds" (List.for_all (fun v -> v >= -.bound && v <= bound) kv);
+  check "kaiming not all same" (List.exists (fun v -> v <> List.hd kv) kv)
+
+(* ---- Test 61: Dropout ---- *)
+let test_dropout () =
+  Schedule.reset ();
+  Printf.printf "\n=== Dropout ===\n%!";
+  let open Tensor in
+  Random.init 42;
+  let x = ones [100] in
+  let d = dropout ~p:0.5 x in
+  let dv = to_float_list d in
+  (* Values should be either 0 or 2.0 (scaled by 1/(1-0.5)=2) *)
+  let all_valid = List.for_all (fun v ->
+    Float.abs v < 1e-6 || Float.abs (v -. 2.0) < 1e-6
+  ) dv in
+  check "dropout values 0 or 2" all_valid;
+  let n_kept = List.length (List.filter (fun v -> v > 1.0) dv) in
+  (* Roughly 50% should be kept (with some variance) *)
+  check "dropout ~50% kept" (n_kept > 20 && n_kept < 80);
+  (* dropout p=0 should be identity *)
+  Schedule.reset ();
+  let x2 = from_float_list [4] [1.0; 2.0; 3.0; 4.0] in
+  let d2 = dropout ~p:0.0 x2 in
+  let dv2 = to_float_list d2 in
+  List.iteri (fun i v ->
+    check_float (Printf.sprintf "dropout_p0[%d]" i) v (float_of_int (Stdlib.(+) i 1)) 1e-6
+  ) dv2;
+  (* dropout p=1 should be all zeros *)
+  Schedule.reset ();
+  let x3 = from_float_list [4] [1.0; 2.0; 3.0; 4.0] in
+  let d3 = dropout ~p:1.0 x3 in
+  let dv3 = to_float_list d3 in
+  List.iter (fun v -> check_float "dropout_p1" v 0.0 1e-6) dv3
+
+(* ---- Test 62: cat validation ---- *)
+let test_cat_validation () =
+  Schedule.reset ();
+  Printf.printf "\n=== Cat Validation ===\n%!";
+  let open Tensor in
+  (* axis out of range *)
+  let a = from_float_list [2] [1.0; 2.0] in
+  let b = from_float_list [2] [3.0; 4.0] in
+  let caught_axis = try ignore (cat ~axis:5 [a; b]); false with Invalid_argument _ -> true in
+  check "cat axis out of range" caught_axis;
+  (* var correction edge case *)
+  Schedule.reset ();
+  let x = from_float_list [1] [5.0] in
+  let caught_var = try ignore (var x); false with Invalid_argument _ -> true in
+  check "var correction>=n" caught_var
+
+(* ---- Test 63: Kaiming-initialized forward pass ---- *)
+let test_kaiming_forward () =
+  Schedule.reset ();
+  Printf.printf "\n=== Kaiming Forward ===\n%!";
+  let open Tensor in
+  Random.init 123;
+  (* Verify kaiming-initialized linear layer produces reasonable output *)
+  let x = from_float_list [2; 3] [1.0; 2.0; 3.0; 4.0; 5.0; 6.0] in
+  let w = kaiming_uniform ~fan_in:3 [3; 2] in
+  let out = matmul x w in
+  let ov = to_float_list out in
+  check "kaiming_fwd shape" (out.shape = [2; 2]);
+  (* All values should be finite and bounded *)
+  List.iteri (fun i v ->
+    check (Printf.sprintf "kaiming_fwd[%d] finite" i) (Float.is_finite v)
+  ) ov;
+  (* Verify kaiming bound is reasonable *)
+  let wv = to_float_list w in
+  let bound = Stdlib.sqrt (6.0 /. 3.0) in
+  List.iter (fun v ->
+    check "w in kaiming range" (Float.abs v <= bound +. 1e-6)
+  ) wv;
+  (* rand_like, randn_like *)
+  Schedule.reset ();
+  let t = from_float_list [3; 2] [1.0; 2.0; 3.0; 4.0; 5.0; 6.0] in
+  let rl = rand_like t in
+  check "rand_like shape" (rl.shape = t.shape);
+  check "rand_like device" (rl.device = t.device);
+  let rlv = to_float_list rl in
+  check "rand_like in [0,1)" (List.for_all (fun v -> v >= 0.0 && v < 1.0) rlv)
+
+(* ---- Test 64: CUDA backend registration ---- *)
 let test_cuda_backend () =
   Printf.printf "\n=== CUDA Backend ===\n%!";
   (* Verify CUDA backend is recognized and returns a module *)
@@ -2647,6 +2755,10 @@ let () =
   run_test "creation_helpers" test_creation_helpers;
   run_test "layer_norm" test_layer_norm;
   run_test "layer_norm_backward" test_layer_norm_backward;
+  run_test "random_tensors" test_random_tensors;
+  run_test "dropout" test_dropout;
+  run_test "cat_validation" test_cat_validation;
+  run_test "kaiming_forward" test_kaiming_forward;
   run_test "cuda_backend" test_cuda_backend;
   Printf.printf "\n============================\n%!";
   Printf.printf "Results: %d passed, %d failed\n%!" !pass_count !fail_count;
