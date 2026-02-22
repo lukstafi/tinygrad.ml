@@ -433,3 +433,11 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Nn.dropout_layer**: Layer wrapper around `Tensor.dropout` with configurable `p` and `training` flag. Identity pass-through when `training=false`.
 - **Nn.multi_head_attention**: Multi-head attention with `n_heads` parallel attention heads. Splits Q/K/V via shrink along feature dimension, applies per-head scaled dot-product attention with intermediate realization, concatenates heads, applies output projection. Validates `d_model % n_heads = 0`.
 - **Test count**: 977 passing tests.
+
+## Claude round 50 decisions
+
+- **Codex review fix (round 48)**: LayerNorm trailing-shape validation — `layer_norm_forward` now checks that the last N dims of input match `normalized_shape`, raising `Invalid_argument` with both shapes on mismatch.
+- **Tensor.conv2d**: 2D convolution via sliding-window decomposition. Input `[C_in, H, W]` * weight `[C_out, C_in, KH, KW]` → `[C_out, OH, OW]`. Supports stride and padding. Extracts weight values as floats (via `to_float_list` on realized weight), then for each kernel position: shrinks input to get spatial patch, multiplies by scalar weight constant, realizes each contribution. Pairwise-sums contributions per output channel, then concatenates channels. Forward reference pattern (`conv2d_ref`) used because `to_float_list` is defined after `conv2d` in the file.
+- **Nn.conv2d**: Layer wrapper with Kaiming-initialized weight `[C_out, C_in, KH, KW]` and optional bias `[C_out]`. Bias added via broadcast after convolution.
+- **Key insight**: Operator shadowing (`let (+) = add` etc.) at file level means `_conv2d_impl` must locally rebind `Stdlib.(+)` etc. for integer arithmetic.
+- **Test count**: 1015 passing tests.

@@ -3373,6 +3373,92 @@ let test_nn_multi_head_attention () =
   let params = Nn.multi_head_attention_params mha in
   check "mha 4 params" (List.length params = 4)
 
+(* ---- Test 86g: LayerNorm shape validation ---- *)
+let test_layer_norm_validation () =
+  Printf.printf "\n=== LayerNorm Validation ===\n%!";
+  Schedule.reset ();
+  let ln = Nn.layer_norm [4] in
+  (* Matching trailing dim should work *)
+  let x_ok = Tensor.from_float_list [2; 4] [1.;2.;3.;4.;5.;6.;7.;8.] in
+  let y = Nn.layer_norm_forward ln x_ok in
+  check "ln valid shape" (y.shape = [2; 4]);
+  (* Mismatching trailing dim should fail *)
+  Schedule.reset ();
+  let x_bad = Tensor.from_float_list [2; 3] [1.;2.;3.;4.;5.;6.] in
+  let caught = try ignore (Nn.layer_norm_forward ln x_bad); false
+    with Invalid_argument _ -> true in
+  check "ln shape mismatch rejected" caught;
+  (* Too few dims should fail *)
+  let caught2 = try
+    let ln2 = Nn.layer_norm [2; 3] in
+    let x_1d = Tensor.from_float_list [3] [1.;2.;3.] in
+    ignore (Nn.layer_norm_forward ln2 x_1d); false
+  with Invalid_argument _ -> true in
+  check "ln too few dims rejected" caught2
+
+(* ---- Test 86h: Conv2D basic ---- *)
+let test_conv2d_basic () =
+  Printf.printf "\n=== Conv2D Basic ===\n%!";
+  Schedule.reset ();
+  (* Simple 1-channel, 1-filter, 2x2 kernel on 3x3 input *)
+  (* Input [1, 3, 3]: identity-like *)
+  let inp = Tensor.from_float_list [1; 3; 3]
+    [1.;2.;3.; 4.;5.;6.; 7.;8.;9.] in
+  (* Weight [1, 1, 2, 2]: all ones → each output = sum of 2x2 patch *)
+  let w = Tensor.from_float_list [1; 1; 2; 2]
+    [1.;1.;1.;1.] in
+  let out = Tensor.conv2d inp w in
+  (* Output: [1, 2, 2], no padding, stride=1 *)
+  check "conv2d shape" (out.shape = [1; 2; 2]);
+  let v = Tensor.to_float_list out in
+  check "conv2d len=4" (List.length v = 4);
+  (* Top-left: 1+2+4+5=12, top-right: 2+3+5+6=16,
+     bot-left: 4+5+7+8=24, bot-right: 5+6+8+9=28 *)
+  check_float "conv2d[0,0]" (List.nth v 0) 12.0 1e-4;
+  check_float "conv2d[0,1]" (List.nth v 1) 16.0 1e-4;
+  check_float "conv2d[1,0]" (List.nth v 2) 24.0 1e-4;
+  check_float "conv2d[1,1]" (List.nth v 3) 28.0 1e-4
+
+(* ---- Test 86i: Conv2D with padding ---- *)
+let test_conv2d_padding () =
+  Printf.printf "\n=== Conv2D Padding ===\n%!";
+  Schedule.reset ();
+  let inp = Tensor.from_float_list [1; 3; 3]
+    [1.;2.;3.; 4.;5.;6.; 7.;8.;9.] in
+  let w = Tensor.from_float_list [1; 1; 3; 3]
+    [1.;0.;0.; 0.;1.;0.; 0.;0.;1.] in
+  (* Same-padding conv with 3x3 identity-like kernel, padding=1 *)
+  let out = Tensor.conv2d ~padding:1 inp w in
+  check "conv2d pad shape" (out.shape = [1; 3; 3]);
+  let v = Tensor.to_float_list out in
+  check "conv2d pad len=9" (List.length v = 9);
+  (* Center element: 1*1 + 5*1 + 9*1 = 15 (diagonal kernel on center) *)
+  check_float "conv2d pad center" (List.nth v 4) 15.0 1e-4
+
+(* ---- Test 86j: Nn.Conv2D layer ---- *)
+let test_nn_conv2d () =
+  Printf.printf "\n=== Nn Conv2D Layer ===\n%!";
+  Schedule.reset ();
+  let c = Nn.conv2d ~in_channels:1 ~out_channels:2 ~kernel_size:(2, 2) () in
+  check "nn_conv2d out_channels" (c.out_channels = 2);
+  check "nn_conv2d in_channels" (c.in_channels = 1);
+  check "nn_conv2d kernel_size" (c.kernel_size = (2, 2));
+  (* Forward pass *)
+  let inp = Tensor.from_float_list [1; 4; 4]
+    (List.init 16 (fun i -> Float.of_int (i + 1))) in
+  let out = Nn.conv2d_forward c inp in
+  check "nn_conv2d out shape" (out.shape = [2; 3; 3]);
+  let v = Tensor.to_float_list out in
+  check "nn_conv2d out len=18" (List.length v = 18);
+  List.iteri (fun i vi ->
+    check (Printf.sprintf "nn_conv2d[%d] finite" i) (Float.is_finite vi)
+  ) v;
+  (* Params: weight + bias = 2 tensors *)
+  let params = Nn.conv2d_params c in
+  check "nn_conv2d 2 params" (List.length params = 2);
+  check "nn_conv2d weight shape" ((List.hd params).shape = [2; 1; 2; 2]);
+  check "nn_conv2d bias shape" ((List.nth params 1).shape = [2])
+
 (* ---- Test 86: CUDA backend registration ---- *)
 let test_cuda_backend () =
   Printf.printf "\n=== CUDA Backend ===\n%!";
@@ -3781,6 +3867,10 @@ let () =
   run_test "nn_flatten" test_nn_flatten;
   run_test "nn_dropout" test_nn_dropout;
   run_test "nn_multi_head_attention" test_nn_multi_head_attention;
+  run_test "layer_norm_validation" test_layer_norm_validation;
+  run_test "conv2d_basic" test_conv2d_basic;
+  run_test "conv2d_padding" test_conv2d_padding;
+  run_test "nn_conv2d" test_nn_conv2d;
   run_test "cuda_backend" test_cuda_backend;
   run_test "backend_availability" test_backend_availability;
   Printf.printf "\n============================\n%!";

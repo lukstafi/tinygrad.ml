@@ -151,6 +151,11 @@ let layer_norm_forward (ln : layer_norm) (x : Tensor.t) : Tensor.t =
   let norm_ndim = List.length ln.normalized_shape in
   if ndim < norm_ndim then
     invalid_arg "LayerNorm: input has fewer dims than normalized_shape";
+  let trailing = List.filteri (fun i _ -> i >= ndim - norm_ndim) x.shape in
+  if trailing <> ln.normalized_shape then
+    invalid_arg (Printf.sprintf "LayerNorm: trailing dims %s != normalized_shape %s"
+      (String.concat "," (List.map string_of_int trailing))
+      (String.concat "," (List.map string_of_int ln.normalized_shape)));
   (* Reduce over the last norm_ndim dimensions *)
   let reduce_axes = List.init norm_ndim (fun i -> ndim - norm_ndim + i) in
   let m = Tensor.mean ~axes:reduce_axes x in
@@ -348,6 +353,53 @@ let of_multi_head_attention ?mask name (mha : multi_head_attention) : layer =
   { name;
     forward = multi_head_attention_forward ?mask mha;
     params = (fun () -> multi_head_attention_params mha) }
+
+(** 2D convolution layer.
+    weight: [out_channels, in_channels, kernel_h, kernel_w]
+    bias: [out_channels] (optional) *)
+type conv2d = {
+  conv_weight: Tensor.t;
+  conv_bias: Tensor.t option;
+  conv_stride: int;
+  conv_padding: int;
+  out_channels: int;
+  in_channels: int;
+  kernel_size: int * int;
+}
+
+let conv2d ?(device="CPU") ?(dtype=Dtype.float32) ?(bias=true)
+    ?(stride=1) ?(padding=0) ~in_channels ~out_channels ~kernel_size () =
+  let kh, kw = kernel_size in
+  let fan_in = in_channels * kh * kw in
+  let w = Tensor.kaiming_uniform ~device ~dtype [out_channels; in_channels; kh; kw] ~fan_in in
+  let b = if bias then
+    Some (Tensor.zeros ~device ~dtype [out_channels])
+  else None in
+  { conv_weight = w; conv_bias = b; conv_stride = stride;
+    conv_padding = padding; out_channels; in_channels;
+    kernel_size = (kh, kw) }
+
+let conv2d_forward (c : conv2d) (x : Tensor.t) : Tensor.t =
+  let out = Tensor.conv2d ~stride:c.conv_stride ~padding:c.conv_padding x c.conv_weight in
+  match c.conv_bias with
+  | None -> out
+  | Some b ->
+    (* bias: [out_channels] → [out_channels, 1, 1] → broadcast *)
+    let oh = List.nth out.shape 1 in
+    let ow = List.nth out.shape 2 in
+    let b3 = Tensor.reshape b [c.out_channels; 1; 1] in
+    let b_exp = Tensor.expand b3 [c.out_channels; oh; ow] in
+    Tensor.add out b_exp
+
+let conv2d_params (c : conv2d) : Tensor.t list =
+  match c.conv_bias with
+  | None -> [c.conv_weight]
+  | Some b -> [c.conv_weight; b]
+
+let of_conv2d name (c : conv2d) : layer =
+  { name;
+    forward = conv2d_forward c;
+    params = (fun () -> conv2d_params c) }
 
 (** Adam optimizer state *)
 type adam_state = {
