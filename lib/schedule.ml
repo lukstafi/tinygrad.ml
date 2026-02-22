@@ -294,6 +294,38 @@ let pad_index ~(padded_shape : int list) ~(padding : (int * int) list)
     (!inner_idx, !mask)
   end
 
+(** Transform a flat index through a FLIP operation.
+    Given flat_idx over [shape] and axes (the set of axes to flip),
+    return a flat index where selected axes have coord replaced with (dim-1-coord).
+    Shape is unchanged by FLIP. *)
+let flip_index ~(shape : int list) ~(axes : int list) (flat_idx : Uop.t) : Uop.t =
+  let ndims = List.length shape in
+  if ndims = 0 then flat_idx
+  else begin
+    let sh_arr = Array.of_list shape in
+    let strides = Array.make ndims 1 in
+    for i = ndims - 2 downto 0 do
+      strides.(i) <- strides.(i + 1) * sh_arr.(i + 1)
+    done;
+    let is_flipped d = List.mem d axes in
+    let result = ref (Uop.const_int Dtype.int32 0) in
+    let remaining = ref flat_idx in
+    for d = 0 to ndims - 1 do
+      let coord = if d = ndims - 1 then !remaining
+        else Uop.idiv !remaining (Uop.const_int Dtype.int32 strides.(d)) in
+      if d < ndims - 1 then
+        remaining := Uop.mod_ !remaining (Uop.const_int Dtype.int32 strides.(d));
+      let new_coord = if is_flipped d then
+        Uop.sub (Uop.const_int Dtype.int32 (sh_arr.(d) - 1)) coord
+      else coord in
+      if strides.(d) = 1 then
+        result := Uop.add !result new_coord
+      else
+        result := Uop.add !result (Uop.mul new_coord (Uop.const_int Dtype.int32 strides.(d)))
+    done;
+    !result
+  end
+
 (** Rebuild an expression, replacing buffer references with PARAM-based loads.
     Movement ops are stripped. When the same buffer is accessed through different
     reshape/expand paths, each path gets its own broadcast index (avoiding the
@@ -376,6 +408,13 @@ let rebuild_expr ~buf_id_to_param ~loop_idx ~output_shape (root : Uop.t) : Uop.t
        | _ -> None)
     | Ops.CONTIGUOUS | Ops.CAST | Ops.FLIP when n.src <> [] ->
       infer_shape (List.hd n.src)
+    | Ops.BUFFER -> get_realized_shape n.id
+    | Ops.REDUCE_AXIS ->
+      (* Infer output shape from Axis_arg: original shape with reduced axes set to 1 *)
+      (match n.arg with
+       | Uop.Axis_arg (axes, _, src_shape) when src_shape <> [] ->
+         Some (List.mapi (fun i d -> if List.mem i axes then 1 else d) src_shape)
+       | _ -> None)
     | _ -> None
   in
 
@@ -496,7 +535,15 @@ let rebuild_expr ~buf_id_to_param ~loop_idx ~output_shape (root : Uop.t) : Uop.t
                 (Ops.to_string child.op))
           end else
             rebuild child ~eff_shape ~cur_idx ~idx_shape
-        | Ops.CONTIGUOUS | Ops.FLIP ->
+        | Ops.FLIP ->
+          let axes = match u.arg with Uop.Int_list a -> a | _ -> [] in
+          let child = List.hd u.src in
+          if axes <> [] then begin
+            let new_idx = flip_index ~shape:idx_shape ~axes cur_idx in
+            rebuild child ~eff_shape ~cur_idx:new_idx ~idx_shape
+          end else
+            rebuild child ~eff_shape ~cur_idx ~idx_shape
+        | Ops.CONTIGUOUS ->
           rebuild (List.hd u.src) ~eff_shape ~cur_idx ~idx_shape
         | Ops.CAST ->
           let new_src = List.map (fun s -> rebuild s ~eff_shape:None ~cur_idx ~idx_shape) u.src in
