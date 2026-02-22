@@ -264,10 +264,11 @@ let relu (t : t) =
   let cond = lt zero t in  (* 0 < x *)
   where_ cond t zero
 
-(** Contiguous *)
-let contiguous (t : t) =
+(** Contiguous: marks a tensor for contiguous storage *)
+let contiguous (t : t) : t =
   let uop = Uop.contiguous t.uop in
   { t with uop; lazy_uop = None }
+[@@warning "-32"]
 
 (** Realize: trigger computation.
     This is where lazy evaluation ends and actual work begins.
@@ -341,6 +342,37 @@ let numel (t : t) = Helpers.prod t.shape
 
 (** Number of dimensions *)
 let ndim (t : t) = List.length t.shape
+
+(** Extract a single float from a scalar or 1-element tensor *)
+let item (t : t) : float =
+  let n = Helpers.prod t.shape in
+  if n <> 1 then
+    invalid_arg (Printf.sprintf "Tensor.item: expected scalar, got shape [%s] (numel=%d)"
+      (String.concat ";" (List.map string_of_int t.shape)) n);
+  List.hd (to_float_list t)
+
+(** Create a 1-D tensor with values [0, 1, ..., n-1] *)
+let arange ?(device="CPU") ?(dtype=Dtype.float32) (n : int) : t =
+  from_float_list ~device ~dtype [n] (List.init n Float.of_int)
+
+(** Contiguous: marks a tensor for contiguous storage *)
+let contiguous (t : t) : t =
+  let uop = Uop.create Ops.CONTIGUOUS t.dtype [t.uop] in
+  { t with uop; lazy_uop = None }
+
+(** One-hot encoding: indices [batch] → one_hot [batch; num_classes] *)
+let one_hot ?(device="CPU") ?(dtype=Dtype.float32) ~num_classes (indices : t) : t =
+  (* indices shape must be 1-D *)
+  assert (List.length indices.shape = 1);
+  let batch = List.hd indices.shape in
+  (* Create class indices: [0, 1, ..., num_classes-1] expanded to [batch, num_classes] *)
+  let cls = arange ~device ~dtype num_classes in
+  let cls_exp = expand (reshape cls [1; num_classes]) [batch; num_classes] in
+  (* Expand input indices to [batch, num_classes] *)
+  let idx_exp = expand (reshape indices [batch; 1]) [batch; num_classes] in
+  (* Compare: one_hot[i][j] = 1 if indices[i] == j, else 0 *)
+  let mask = eq idx_exp cls_exp in
+  cast dtype mask
 
 (** Compute gradients of a scalar loss w.r.t. target tensors.
     [loss] must be a scalar (numel=1) tensor.

@@ -442,9 +442,13 @@ let rebuild_expr ~buf_id_to_param ~loop_idx ~output_shape (root : Uop.t) : Uop.t
 
   let rec rebuild (u : Uop.t) ~(eff_shape : int list option) ~(cur_idx : Uop.t)
       ~(idx_shape : int list) : Uop.t =
-    (* For non-buffer nodes, check cache *)
+    (* For non-buffer nodes, check cache.
+       ALU/CAST nodes are path-dependent when eff_shape is set, since they
+       propagate eff_shape to children and the same ALU node reached from
+       different EXPAND→RESHAPE chains could need different broadcast indices. *)
     match Hashtbl.find_opt cache u.id with
-    | Some r when not (is_path_dependent u.op) -> r
+    | Some r when not (is_path_dependent u.op)
+                  && not (eff_shape <> None && Ops.Group.is_alu u.op) -> r
     | _ ->
       let result = match u.op with
         | Ops.BUFFER ->

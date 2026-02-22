@@ -1826,7 +1826,92 @@ let test_reshape_reduce_backward () =
   check_float "dx[1][1]" (List.nth dv 4) 2.0 1e-4;
   check_float "dx[1][2]" (List.nth dv 5) 2.0 1e-4
 
-(* ---- Test 48: CUDA backend registration ---- *)
+(* ---- Test: shared ALU subgraph via different view paths ---- *)
+let test_shared_alu_dual_path () =
+  Printf.printf "\n=== Shared ALU Dual View Path ===\n%!";
+  (* Test that a shared ALU expression (a*b) accessed through two different
+     EXPAND paths gets correct broadcast indices for each path.
+     a = [1,2] (shape [2]), b = [3,4] (shape [2])
+     ab = a * b = [3, 8]
+     path1: reshape ab to [2,1], expand to [2,2]  → [[3,3],[8,8]]
+     path2: reshape ab to [1,2], expand to [2,2]  → [[3,8],[3,8]]
+     result = path1 + path2 → [[6,11],[11,16]]
+     loss = sum(result) = 6+11+11+16 = 44
+     d/da = d(sum)/d(a) through both paths:
+       path1 contributes: each a[i]*b[i] is expanded to 2 elements → d/da[i] = 2*b[i]
+       path2 contributes: each a[i]*b[i] is expanded to 2 elements → d/da[i] = 2*b[i]
+       total: d/da[i] = 4*b[i] → [12, 16] *)
+  Schedule.reset ();
+  let a = Tensor.from_float_list [2] [1.; 2.] in
+  let b = Tensor.from_float_list [2] [3.; 4.] in
+  let ab = Tensor.mul a b in
+  let p1 = Tensor.expand (Tensor.reshape ab [2; 1]) [2; 2] in
+  let p2 = Tensor.expand (Tensor.reshape ab [1; 2]) [2; 2] in
+  let result = Tensor.add p1 p2 in
+  let rv = Tensor.to_float_list result in
+  check "dual path len" (List.length rv = 4);
+  check_float "dual[0,0]" (List.nth rv 0) 6.0 1e-4;
+  check_float "dual[0,1]" (List.nth rv 1) 11.0 1e-4;
+  check_float "dual[1,0]" (List.nth rv 2) 11.0 1e-4;
+  check_float "dual[1,1]" (List.nth rv 3) 16.0 1e-4;
+  (* Backward *)
+  Schedule.reset ();
+  let a2 = Tensor.from_float_list [2] [1.; 2.] in
+  let b2 = Tensor.from_float_list [2] [3.; 4.] in
+  let ab2 = Tensor.mul a2 b2 in
+  let p1b = Tensor.expand (Tensor.reshape ab2 [2; 1]) [2; 2] in
+  let p2b = Tensor.expand (Tensor.reshape ab2 [1; 2]) [2; 2] in
+  let res2 = Tensor.add p1b p2b in
+  let loss = Tensor.sum res2 in
+  let grads = Tensor.backward loss [a2] in
+  let (_, da) = List.hd grads in
+  let dav = Tensor.to_float_list da in
+  check "dual path grad len" (List.length dav = 2);
+  check_float "da[0]" (List.nth dav 0) 12.0 1e-4;
+  check_float "da[1]" (List.nth dav 1) 16.0 1e-4
+
+(* ---- Test: Tensor.item, arange, one_hot ---- *)
+let test_tensor_utilities () =
+  Printf.printf "\n=== Tensor Utilities ===\n%!";
+  (* item: extract scalar *)
+  Schedule.reset ();
+  let s = Tensor.from_float_list [1] [42.0] in
+  check_float "item scalar" (Tensor.item s) 42.0 1e-6;
+  let s2 = Tensor.full [1; 1] 7.0 in
+  check_float "item [1;1]" (Tensor.item s2) 7.0 1e-6;
+  (* arange *)
+  Schedule.reset ();
+  let a = Tensor.arange 5 in
+  let av = Tensor.to_float_list a in
+  check "arange len" (List.length av = 5);
+  check_float "arange[0]" (List.nth av 0) 0.0 1e-6;
+  check_float "arange[1]" (List.nth av 1) 1.0 1e-6;
+  check_float "arange[4]" (List.nth av 4) 4.0 1e-6;
+  (* contiguous *)
+  Schedule.reset ();
+  let c = Tensor.contiguous (Tensor.from_float_list [3] [10.; 20.; 30.]) in
+  let cv = Tensor.to_float_list c in
+  check_float "contig[0]" (List.nth cv 0) 10.0 1e-6;
+  check_float "contig[2]" (List.nth cv 2) 30.0 1e-6;
+  (* one_hot *)
+  Schedule.reset ();
+  let idx = Tensor.from_float_list [3] [0.; 2.; 1.] in
+  let oh = Tensor.one_hot ~num_classes:3 idx in
+  check "one_hot shape" (oh.shape = [3; 3]);
+  let ohv = Tensor.to_float_list oh in
+  check "one_hot len" (List.length ohv = 9);
+  (* Expected: [[1,0,0],[0,0,1],[0,1,0]] *)
+  check_float "oh[0][0]" (List.nth ohv 0) 1.0 1e-4;
+  check_float "oh[0][1]" (List.nth ohv 1) 0.0 1e-4;
+  check_float "oh[0][2]" (List.nth ohv 2) 0.0 1e-4;
+  check_float "oh[1][0]" (List.nth ohv 3) 0.0 1e-4;
+  check_float "oh[1][1]" (List.nth ohv 4) 0.0 1e-4;
+  check_float "oh[1][2]" (List.nth ohv 5) 1.0 1e-4;
+  check_float "oh[2][0]" (List.nth ohv 6) 0.0 1e-4;
+  check_float "oh[2][1]" (List.nth ohv 7) 1.0 1e-4;
+  check_float "oh[2][2]" (List.nth ohv 8) 0.0 1e-4
+
+(* ---- Test 50: CUDA backend registration ---- *)
 let test_cuda_backend () =
   Printf.printf "\n=== CUDA Backend ===\n%!";
   (* Verify CUDA backend is recognized and returns a module *)
@@ -2169,6 +2254,8 @@ let () =
   run_test "classification_matmul" test_classification_matmul;
   run_test "cross_entropy_axis0" test_cross_entropy_axis0;
   run_test "reshape_reduce_backward" test_reshape_reduce_backward;
+  run_test "shared_alu_dual_path" test_shared_alu_dual_path;
+  run_test "tensor_utilities" test_tensor_utilities;
   run_test "cuda_backend" test_cuda_backend;
   Printf.printf "\n============================\n%!";
   Printf.printf "Results: %d passed, %d failed\n%!" !pass_count !fail_count;
