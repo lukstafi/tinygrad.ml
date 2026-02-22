@@ -1700,7 +1700,76 @@ let test_classification_training () =
   let pv = Tensor.to_float_list pred in
   check "class0 prob > 0.9" (List.nth pv 0 > 0.9)
 
-(* ---- Test 45: CUDA backend registration ---- *)
+(* ---- Test 45: Matmul backward regression (non-identity inputs) ---- *)
+let test_matmul_backward_regression () =
+  Printf.printf "\n=== Matmul Backward (regression) ===\n%!";
+  (* Verify matmul backward with non-identity x and masked loss.
+     x = [[1,2],[3,4]], w = [[0.1,0.1],[0.1,0.1]]
+     matmul(x,w) = [[0.3,0.3],[0.7,0.7]]
+     mask = [[1,0],[0,0]], loss = sum(matmul(x,w) * mask) = 0.3
+     Expected dw = x^T @ mask = [[1,0],[2,0]]
+     Expected dx = mask @ w^T = [[0.1,0.1],[0,0]] *)
+  Schedule.reset ();
+  let x = Tensor.from_float_list [2; 2] [1.;2.; 3.;4.] in
+  let w = Tensor.from_float_list [2; 2] [0.1;0.1; 0.1;0.1] in
+  let logits = Tensor.matmul x w in
+  let mask = Tensor.from_float_list [2; 2] [1.;0.;0.;0.] in
+  let loss = Tensor.sum (Tensor.mul logits mask) in
+  let grads = Tensor.backward loss [w; x] in
+  let (_, dw) = List.nth grads 0 in
+  let (_, dx) = List.nth grads 1 in
+  let dw_v = Tensor.to_float_list dw in
+  let dx_v = Tensor.to_float_list dx in
+  Printf.printf "  dw = [%s]\n%!"
+    (String.concat "; " (List.map (Printf.sprintf "%.4f") dw_v));
+  Printf.printf "  dx = [%s]\n%!"
+    (String.concat "; " (List.map (Printf.sprintf "%.4f") dx_v));
+  check_float "dw[0][0]" (List.nth dw_v 0) 1.0 1e-4;
+  check_float "dw[0][1]" (List.nth dw_v 1) 0.0 1e-4;
+  check_float "dw[1][0]" (List.nth dw_v 2) 2.0 1e-4;
+  check_float "dw[1][1]" (List.nth dw_v 3) 0.0 1e-4;
+  check_float "dx[0][0]" (List.nth dx_v 0) 0.1 1e-4;
+  check_float "dx[0][1]" (List.nth dx_v 1) 0.1 1e-4;
+  check_float "dx[1][0]" (List.nth dx_v 2) 0.0 1e-4;
+  check_float "dx[1][1]" (List.nth dx_v 3) 0.0 1e-4
+
+(* ---- Test 46: CE classification with matmul ---- *)
+let test_classification_matmul () =
+  Printf.printf "\n=== Classification with Matmul (CE) ===\n%!";
+  (* Train a linear classifier: logits = x @ w, loss = cross_entropy(logits, targets)
+     x = [[1,0],[0,1]], targets = [[1,0],[0,1]] (identity mapping)
+     Should learn w ≈ large diagonal values *)
+  let lr = 0.5 in
+  let w_val = ref [0.1; 0.1; 0.1; 0.1] in
+  let final_loss = ref 1.0 in
+  for _step = 0 to 29 do
+    Schedule.reset ();
+    let x = Tensor.from_float_list [2; 2] [1.;0.; 0.;1.] in
+    let targets = Tensor.from_float_list [2; 2] [1.;0.; 0.;1.] in
+    let w = Tensor.from_float_list [2; 2] !w_val in
+    let logits = Tensor.matmul x w in
+    let loss = Tensor.cross_entropy logits targets in
+    let lv = Tensor.to_float_list loss in
+    final_loss := List.hd lv;
+    let grads = Tensor.backward loss [w] in
+    let (_, dw) = List.hd grads in
+    let dwv = Tensor.to_float_list dw in
+    w_val := List.map2 (fun wi dwi -> wi -. lr *. dwi) !w_val dwv;
+  done;
+  Printf.printf "    final_loss = %.6f, w = [%s]\n%!" !final_loss
+    (String.concat "; " (List.map (Printf.sprintf "%.4f") !w_val));
+  check "matmul CE loss < 0.1" (!final_loss < 0.1);
+  (* Verify predictions *)
+  Schedule.reset ();
+  let x_test = Tensor.from_float_list [2; 2] [1.;0.; 0.;1.] in
+  let w_final = Tensor.from_float_list [2; 2] !w_val in
+  let logits = Tensor.matmul x_test w_final in
+  let pred = Tensor.softmax logits in
+  let pv = Tensor.to_float_list pred in
+  check "matmul CE pred[0,0] > 0.9" (List.nth pv 0 > 0.9);
+  check "matmul CE pred[1,1] > 0.9" (List.nth pv 3 > 0.9)
+
+(* ---- Test 47: CUDA backend registration ---- *)
 let test_cuda_backend () =
   Printf.printf "\n=== CUDA Backend ===\n%!";
   (* Verify CUDA backend is recognized and returns a module *)
@@ -2039,6 +2108,8 @@ let () =
   run_test "exp_log" test_exp_log;
   run_test "cross_entropy" test_cross_entropy;
   run_test "classification_training" test_classification_training;
+  run_test "matmul_backward_regression" test_matmul_backward_regression;
+  run_test "classification_matmul" test_classification_matmul;
   run_test "cuda_backend" test_cuda_backend;
   Printf.printf "\n============================\n%!";
   Printf.printf "Results: %d passed, %d failed\n%!" !pass_count !fail_count;
