@@ -275,6 +275,8 @@ let flatten_layer ?(start_dim=1) name : layer =
       let shape = x.shape in
       let ndim = List.length shape in
       let sd = if start_dim < 0 then ndim + start_dim else start_dim in
+      if sd < 0 || sd > ndim then
+        invalid_arg (Printf.sprintf "flatten_layer: start_dim=%d out of range for %d-D input" start_dim ndim);
       let prefix = List.filteri (fun i _ -> i < sd) shape in
       let suffix = List.filteri (fun i _ -> i >= sd) shape in
       let flat_dim = List.fold_left ( * ) 1 suffix in
@@ -306,6 +308,8 @@ type multi_head_attention = {
 }
 
 let multi_head_attention ?(device="CPU") ?(dtype=Dtype.float32) ~d_model ~n_heads () =
+  if n_heads <= 0 then
+    invalid_arg (Printf.sprintf "multi_head_attention: n_heads must be > 0, got %d" n_heads);
   if d_model mod n_heads <> 0 then
     invalid_arg (Printf.sprintf "multi_head_attention: d_model=%d not divisible by n_heads=%d" d_model n_heads);
   let head_dim = d_model / n_heads in
