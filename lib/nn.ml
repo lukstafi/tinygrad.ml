@@ -151,6 +151,46 @@ let of_embedding name (emb : embedding) : layer =
     forward = embedding_forward emb;
     params = (fun () -> embedding_params emb) }
 
+(** Single-head self-attention layer.
+    Projects input [seq; d_model] → Q, K, V via learned linear projections,
+    then applies scaled dot-product attention. *)
+type self_attention = {
+  wq: linear;
+  wk: linear;
+  wv: linear;
+  wo: linear;  (** Output projection *)
+  d_model: int;
+}
+
+(** Create a self-attention layer *)
+let self_attention ?(device="CPU") ?(dtype=Dtype.float32) ~d_model () =
+  { wq = linear ~device ~dtype ~bias:false ~in_features:d_model ~out_features:d_model ();
+    wk = linear ~device ~dtype ~bias:false ~in_features:d_model ~out_features:d_model ();
+    wv = linear ~device ~dtype ~bias:false ~in_features:d_model ~out_features:d_model ();
+    wo = linear ~device ~dtype ~bias:false ~in_features:d_model ~out_features:d_model ();
+    d_model }
+
+(** Forward pass for self-attention.
+    x: [seq; d_model], optional mask: [seq; seq].
+    Returns: [seq; d_model]. *)
+let self_attention_forward ?mask (attn : self_attention) (x : Tensor.t) : Tensor.t =
+  let q = linear_forward attn.wq x in
+  let k = linear_forward attn.wk x in
+  let v = linear_forward attn.wv x in
+  let attended = Tensor.scaled_dot_product_attention ?mask q k v in
+  linear_forward attn.wo attended
+
+(** Get all trainable parameters from a self-attention layer *)
+let self_attention_params (attn : self_attention) : Tensor.t list =
+  linear_params attn.wq @ linear_params attn.wk @
+  linear_params attn.wv @ linear_params attn.wo
+
+(** Wrap a self-attention layer *)
+let of_self_attention ?mask name (attn : self_attention) : layer =
+  { name;
+    forward = self_attention_forward ?mask attn;
+    params = (fun () -> self_attention_params attn) }
+
 (** Adam optimizer state *)
 type adam_state = {
   m: float array;   (** First moment estimate *)

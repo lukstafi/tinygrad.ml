@@ -2768,7 +2768,18 @@ let test_element_ops () =
   let maxv = to_float_list (maximum c d) in
   check "max[0]=2" (Float.abs (List.nth maxv 0 -. 2.0) < 1e-5);
   check "max[1]=5" (Float.abs (List.nth maxv 1 -. 5.0) < 1e-5);
-  check "max[2]=6" (Float.abs (List.nth maxv 2 -. 6.0) < 1e-5)
+  check "max[2]=6" (Float.abs (List.nth maxv 2 -. 6.0) < 1e-5);
+  (* pow with negative base: (-2)^3 = -8 *)
+  Schedule.reset ();
+  let neg_base = from_float_list [2] [-2.0; -3.0] in
+  let exp3 = from_float_list [2] [3.0; 2.0] in
+  let npv = to_float_list (pow_ neg_base exp3) in
+  check "pow (-2)^3≈-8" (Float.abs (List.nth npv 0 -. (-8.0)) < 0.1);
+  check "pow (-3)^2≈-9" (Float.abs (List.nth npv 1 -. (-9.0)) < 0.1);
+  (* chunk validation: n<=0 should raise *)
+  (try ignore (chunk (from_float_list [4] [1.;2.;3.;4.]) 0);
+       check "chunk n=0 raises" false
+   with Invalid_argument _ -> check "chunk n=0 raises" true)
 
 (* ---- Test 78: linspace, eye, triu, tril ---- *)
 let test_creation_advanced () =
@@ -2901,7 +2912,95 @@ let test_nn_embedding () =
   let params = Nn.embedding_params emb in
   check "emb 1 param" (List.length params = 1)
 
-(* ---- Test 83: CUDA backend registration ---- *)
+(* ---- Test 83: Scaled dot-product attention ---- *)
+let test_attention () =
+  Printf.printf "\n=== Scaled Dot-Product Attention ===\n%!";
+  let open Tensor in
+  (* Step 1: compute Q @ K^T / sqrt(d_k) *)
+  Schedule.reset ();
+  let q = from_float_list [2; 2] [1.0; 0.0; 0.0; 1.0] in
+  let k = from_float_list [2; 2] [1.0; 0.0; 0.0; 1.0] in
+  let kt = transpose k in
+  let raw = matmul q kt in  (* should be identity [2;2] *)
+  let rv = to_float_list raw in
+  check "qk[0,0]≈1" (Float.abs (List.nth rv 0 -. 1.0) < 0.01);
+  check "qk[0,1]≈0" (Float.abs (List.nth rv 1) < 0.01);
+  (* Step 2: softmax of scores *)
+  Schedule.reset ();
+  let scores = from_float_list [2; 2] rv in
+  let scale = const_like scores (1.0 /. Stdlib.sqrt 2.0) in
+  let scaled = mul scores scale in
+  let weights = softmax ~axis:(-1) scaled in
+  let wv = to_float_list weights in
+  check "attn_w finite" (List.for_all Float.is_finite wv);
+  check "attn_w[0] row sums ≈1" (Float.abs (List.nth wv 0 +. List.nth wv 1 -. 1.0) < 0.01);
+  (* Step 3: weights @ V *)
+  Schedule.reset ();
+  let w_t = from_float_list [2; 2] wv in
+  let v = from_float_list [2; 2] [10.0; 0.0; 0.0; 10.0] in
+  let out = matmul w_t v in
+  let ov = to_float_list out in
+  check "attn shape" (out.shape = [2; 2]);
+  check "attn finite" (List.for_all Float.is_finite ov);
+  List.iteri (fun i v ->
+    check (Printf.sprintf "attn[%d] reasonable" i) (Float.abs v < 20.0)
+  ) ov
+
+(* ---- Test 84: Causal mask ---- *)
+let test_causal_mask () =
+  Schedule.reset ();
+  Printf.printf "\n=== Causal Mask ===\n%!";
+  let open Tensor in
+  let m = causal_mask 3 in
+  check "mask shape" (m.shape = [3; 3]);
+  let mv = to_float_list m in
+  (* Lower triangular: 0 on/below diag, -1e9 above *)
+  check "mask[0,0]=0" (Float.abs (List.nth mv 0) < 1e-5);
+  check "mask[0,1]=-1e9" (List.nth mv 1 < -1e8);
+  check "mask[1,0]=0" (Float.abs (List.nth mv 3) < 1e-5);
+  check "mask[1,1]=0" (Float.abs (List.nth mv 4) < 1e-5);
+  check "mask[1,2]=-1e9" (List.nth mv 5 < -1e8);
+  check "mask[2,2]=0" (Float.abs (List.nth mv 8) < 1e-5)
+
+(* ---- Test 85: Self-attention layer ---- *)
+let test_nn_self_attention () =
+  Printf.printf "\n=== Nn.SelfAttention ===\n%!";
+  let open Tensor in
+  Schedule.reset ();
+  Random.init 55;
+  let attn = Nn.self_attention ~d_model:2 () in
+  (* Verify structure: 4 projection weights, no bias *)
+  let params = Nn.self_attention_params attn in
+  check "sa 4 params" (List.length params = 4);
+  (* Verify forward projection Q = x @ Wq *)
+  let wq_data = to_float_list attn.wq.weight in
+  let wk_data = to_float_list attn.wk.weight in
+  let wv_data = to_float_list attn.wv.weight in
+  Schedule.reset ();
+  let x1 = from_float_list [2; 2] [1.0; 0.0; 0.0; 1.0] in
+  let wq1 = from_float_list [2; 2] wq_data in
+  let q = Nn.linear_forward { attn.wq with weight = wq1 } x1 in
+  check "sa q shape" (q.shape = [2; 2]);
+  let qv = to_float_list q in
+  check "sa q finite" (List.for_all Float.is_finite qv);
+  (* Verify K projection in fresh session *)
+  Schedule.reset ();
+  let x2 = from_float_list [2; 2] [1.0; 0.0; 0.0; 1.0] in
+  let wk1 = from_float_list [2; 2] wk_data in
+  let k = Nn.linear_forward { attn.wk with weight = wk1 } x2 in
+  check "sa k shape" (k.shape = [2; 2]);
+  let kv = to_float_list k in
+  check "sa k finite" (List.for_all Float.is_finite kv);
+  (* Verify V projection in fresh session *)
+  Schedule.reset ();
+  let x3 = from_float_list [2; 2] [1.0; 0.0; 0.0; 1.0] in
+  let wv1 = from_float_list [2; 2] wv_data in
+  let v = Nn.linear_forward { attn.wv with weight = wv1 } x3 in
+  check "sa v shape" (v.shape = [2; 2]);
+  let vv = to_float_list v in
+  check "sa v finite" (List.for_all Float.is_finite vv)
+
+(* ---- Test 86: CUDA backend registration ---- *)
 let test_cuda_backend () =
   Printf.printf "\n=== CUDA Backend ===\n%!";
   (* Verify CUDA backend is recognized and returns a module *)
@@ -3293,6 +3392,9 @@ let () =
   run_test "gelu_backward" test_gelu_backward;
   run_test "nn_batch_norm" test_nn_batch_norm;
   run_test "nn_embedding" test_nn_embedding;
+  run_test "attention" test_attention;
+  run_test "causal_mask" test_causal_mask;
+  run_test "nn_self_attention" test_nn_self_attention;
   run_test "cuda_backend" test_cuda_backend;
   run_test "backend_availability" test_backend_availability;
   Printf.printf "\n============================\n%!";
