@@ -1631,6 +1631,75 @@ let test_exp_log () =
   check_float "log(exp(1.0))" (List.nth vr 1) 1.0 1e-4;
   check_float "log(exp(2.0))" (List.nth vr 2) 2.0 1e-4
 
+(* ---- Test: Cross-entropy loss ---- *)
+let test_cross_entropy () =
+  Printf.printf "\n=== Cross-Entropy Loss ===\n%!";
+  Schedule.reset ();
+  (* logits = [[-1, 2, -3], [1, -2, 3]]  (batch=2, classes=3)
+     targets = [[0,1,0], [0,0,1]]  (one-hot for classes 1 and 2)
+     log_softmax([-1,2,-3]) ≈ [-3.0550, -0.0550, -5.0550]
+     log_softmax([1,-2,3])  ≈ [-2.1328, -5.1328, -0.1328]
+     per-sample CE: -log_sm[0][1] = 0.0550, -log_sm[1][2] = 0.1328
+     mean CE ≈ (0.0550 + 0.1328) / 2 ≈ 0.0939 *)
+  let logits = Tensor.from_float_list [2; 3] [-1.;2.;-3.;1.;-2.;3.] in
+  let targets = Tensor.from_float_list [2; 3] [0.;1.;0.;0.;0.;1.] in
+  let loss = Tensor.cross_entropy logits targets in
+  let v = Tensor.to_float_list loss in
+  check "ce scalar" (List.length v = 1);
+  check_float "ce value" (List.hd v) 0.0939 5e-3;
+  (* Gradient of CE w.r.t. logits *)
+  Schedule.reset ();
+  let logits2 = Tensor.from_float_list [2; 3] [-1.;2.;-3.;1.;-2.;3.] in
+  let targets2 = Tensor.from_float_list [2; 3] [0.;1.;0.;0.;0.;1.] in
+  let loss2 = Tensor.cross_entropy logits2 targets2 in
+  let grads = Tensor.backward loss2 [logits2] in
+  let (_, dlogits) = List.hd grads in
+  let dv = Tensor.to_float_list dlogits in
+  check "ce grad len" (List.length dv = 6);
+  (* d CE/d logit[i][j] = (1/batch) * (softmax[i][j] - target[i][j])
+     softmax([-1,2,-3]) ≈ [0.0471, 0.9465, 0.0064]
+     softmax([1,-2,3])  ≈ [0.1185, 0.0059, 0.8756]
+     grad[0] = (sm - target) / 2 ≈ [0.0236, -0.0268, 0.0032]
+     grad[1] = (sm - target) / 2 ≈ [0.0592, 0.0029, -0.0622] *)
+  check_float "ce_grad[0]" (List.nth dv 0) 0.0236 5e-3;
+  check_float "ce_grad[1]" (List.nth dv 1) (-0.0268) 5e-3;
+  (* Gradient should sum to ≈ 0 per sample *)
+  let row1_sum = List.nth dv 0 +. List.nth dv 1 +. List.nth dv 2 in
+  let row2_sum = List.nth dv 3 +. List.nth dv 4 +. List.nth dv 5 in
+  check_float "ce_grad row1 sum≈0" row1_sum 0.0 1e-3;
+  check_float "ce_grad row2 sum≈0" row2_sum 0.0 1e-3
+
+(* ---- Test: Classification training with cross-entropy ---- *)
+let test_classification_training () =
+  Printf.printf "\n=== Classification Training (CE) ===\n%!";
+  (* Train on a single 2-class sample: learn logits that push probability
+     toward the correct class. Uses direct logit parameters (no matmul). *)
+  let lr = 1.0 in
+  let logit_val = ref [0.0; 0.0] in  (* start uniform *)
+  let target_data = [1.;0.] in  (* class 0 *)
+  let final_loss = ref 1.0 in
+  for _step = 0 to 19 do
+    Schedule.reset ();
+    let logits = Tensor.from_float_list [1; 2] !logit_val in
+    let targets = Tensor.from_float_list [1; 2] target_data in
+    let loss = Tensor.cross_entropy logits targets in
+    let loss_v = Tensor.to_float_list loss in
+    final_loss := List.hd loss_v;
+    let grads = Tensor.backward loss [logits] in
+    let (_, dlogits) = List.hd grads in
+    let dv = Tensor.to_float_list dlogits in
+    logit_val := List.map2 (fun li di -> li -. lr *. di) !logit_val dv;
+  done;
+  Printf.printf "    final_loss = %.6f, logits = [%s]\n%!" !final_loss
+    (String.concat ";" (List.map (Printf.sprintf "%.4f") !logit_val));
+  check "ce training loss < 0.1" (!final_loss < 0.1);
+  (* Verify: softmax of trained logits should strongly favor class 0 *)
+  Schedule.reset ();
+  let final_logits = Tensor.from_float_list [1; 2] !logit_val in
+  let pred = Tensor.softmax final_logits in
+  let pv = Tensor.to_float_list pred in
+  check "class0 prob > 0.9" (List.nth pv 0 > 0.9)
+
 (* ---- Test 45: CUDA backend registration ---- *)
 let test_cuda_backend () =
   Printf.printf "\n=== CUDA Backend ===\n%!";
@@ -1968,6 +2037,8 @@ let () =
   run_test "log_softmax" test_log_softmax;
   run_test "softmax_backward" test_softmax_backward;
   run_test "exp_log" test_exp_log;
+  run_test "cross_entropy" test_cross_entropy;
+  run_test "classification_training" test_classification_training;
   run_test "cuda_backend" test_cuda_backend;
   Printf.printf "\n============================\n%!";
   Printf.printf "Results: %d passed, %d failed\n%!" !pass_count !fail_count;
