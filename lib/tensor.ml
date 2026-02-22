@@ -55,6 +55,11 @@ let full ?(device="CPU") ?(dtype=Dtype.float32) shape (value : float) =
 let zeros ?(device="CPU") ?(dtype=Dtype.float32) shape = full ~device ~dtype shape 0.0
 let ones ?(device="CPU") ?(dtype=Dtype.float32) shape = full ~device ~dtype shape 1.0
 
+(** Create tensors with same shape/dtype/device as another tensor *)
+let full_like (t : t) value = full ~device:t.device ~dtype:t.dtype t.shape value
+let zeros_like (t : t) = full_like t 0.0
+let ones_like (t : t) = full_like t 1.0
+
 (** Create a tensor from a list of floats *)
 let from_float_list ?(device="CPU") ?(dtype=Dtype.float32) shape (data : float list) =
   let numel = Helpers.prod shape in
@@ -176,6 +181,50 @@ let flip (t : t) axes =
   let uop = Uop.flip t.uop axes in
   { t with uop; lazy_uop = None }
 
+(** Transpose: swap last two dimensions (for 2D+) *)
+let transpose (t : t) =
+  let n = List.length t.shape in
+  if n < 2 then failwith "Tensor.transpose: need at least 2 dimensions";
+  let axes = List.init n (fun i ->
+    if i = n - 2 then n - 1
+    else if i = n - 1 then n - 2
+    else i
+  ) in
+  permute t axes
+
+(** Squeeze: remove dimensions of size 1 *)
+let squeeze ?(axes=[]) (t : t) =
+  let new_shape = if axes = [] then
+    List.filter (fun s -> s <> 1) t.shape
+  else
+    List.filteri (fun i s ->
+      not (List.mem i axes && s = 1)
+    ) t.shape
+  in
+  if new_shape = [] then reshape t [1]  (* keep at least 1 dim *)
+  else reshape t new_shape
+
+(** Unsqueeze: insert a dimension of size 1 at the given axis *)
+let unsqueeze (t : t) axis =
+  let axis = if axis < 0 then List.length t.shape + 1 + axis else axis in
+  let n = List.length t.shape in
+  let new_shape = List.init (n + 1) (fun i ->
+    if i < axis then List.nth t.shape i
+    else if i = axis then 1
+    else List.nth t.shape (i - 1)
+  ) in
+  reshape t new_shape
+
+(** Flatten: collapse dimensions from start_dim to end_dim into one *)
+let flatten ?(start_dim=0) ?(end_dim= -1) (t : t) =
+  let n = List.length t.shape in
+  let end_dim = if end_dim < 0 then n + end_dim else end_dim in
+  let before = List.filteri (fun i _ -> i < start_dim) t.shape in
+  let middle = List.filteri (fun i _ -> i >= start_dim && i <= end_dim) t.shape in
+  let after = List.filteri (fun i _ -> i > end_dim) t.shape in
+  let flat_dim = List.fold_left ( * ) 1 middle in
+  reshape t (before @ [flat_dim] @ after)
+
 (** Reduction operations *)
 let reduce op (t : t) axes =
   let new_shape = List.mapi (fun i s ->
@@ -288,6 +337,30 @@ let cross_entropy ?(axis= -1) (logits : t) (targets : t) =
   let per_sample = neg_ (sum ~axes:[if axis < 0 then List.length logits.shape + axis else axis]
                            (mul ls targets)) in
   mean per_sample
+
+(** Layer normalization over the last [n] dimensions.
+    layer_norm(x, normalized_shape) = (x - mean) / sqrt(var + eps)
+    Optionally scales by [weight] and shifts by [bias]. *)
+let layer_norm ?(eps=1e-5) ?weight ?bias (t : t) ~normalized_shape =
+  let ndim = List.length t.shape in
+  let n_norm = List.length normalized_shape in
+  let axes = List.init n_norm (fun i -> ndim - n_norm + i) in
+  let m = expand (mean ~axes t) t.shape in
+  let diff = sub t m in
+  let v = expand (var ~axes ~correction:0 t) t.shape in
+  let eps_t = const_like t eps in
+  let normalized = div diff (sqrt_ (add v eps_t)) in
+  (* Broadcast shape: [1; ...; 1; norm_dim0; norm_dim1; ...] *)
+  let bcast_shape = List.init ndim (fun i ->
+    if i < ndim - n_norm then 1 else List.nth t.shape i
+  ) in
+  let scaled = match weight with
+    | Some w -> mul normalized (expand (reshape w bcast_shape) t.shape)
+    | None -> normalized
+  in
+  match bias with
+  | Some b -> add scaled (expand (reshape b bcast_shape) t.shape)
+  | None -> scaled
 
 (** Matrix multiply: a[N, K] @ b[K, M] = c[N, M].
     Both inputs must be exactly 2-D.
