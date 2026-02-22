@@ -400,3 +400,11 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Nn.self_attention**: Single-head self-attention layer with learned Wq/Wk/Wv/Wo linear projections (no bias). Forward pass: project → attention → output projection. `self_attention_params` collects all 4 weight matrices.
 - **Scheduler complexity limitation**: Full attention graph (matmul→scale→softmax→matmul) exceeds single-session scheduler capacity, producing degenerate C code. Tests stage computation with intermediate `Schedule.reset()` + realize between steps. Self-attention test verifies each projection independently.
 - **Test count**: 883 passing tests.
+
+## Claude round 46 decisions
+
+- **Codex review fix (round 44)**: BatchNorm docstring now clearly states eval-mode only. `embedding_forward` validates indices are in `[0, num_embeddings)` with `Invalid_argument` for out-of-range.
+- **Multi-kernel graph support**: `scaled_dot_product_attention` now uses intermediate realization — materializes Q@K^T scores and softmax weights as separate kernels. Uses `realize_ref` forward reference pattern to call `realize` before its lexical definition.
+- **Full attention end-to-end**: `scaled_dot_product_attention` and `Nn.self_attention_forward` both work as single function calls now, producing correct results without manual staging. Causal mask verified: first row only attends to first token.
+- **Architecture note**: The forward-reference `realize_ref` pattern enables complex operations to trigger intermediate realization. This is a pragmatic alternative to automatic graph splitting — the operation itself decides where to split.
+- **Test count**: 896 passing tests.

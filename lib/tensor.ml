@@ -36,6 +36,10 @@ let () = Schedule.register_reset_hook (fun () -> next_buf_id := 0)
 let lazy_graph_map : (int, Uop.t) Hashtbl.t = Hashtbl.create 64
 let () = Schedule.register_reset_hook (fun () -> Hashtbl.clear lazy_graph_map)
 
+(** Forward reference for realize, used by operations that need intermediate
+    materialization (e.g., scaled_dot_product_attention). *)
+let realize_ref : (t -> t) ref = ref (fun _ -> failwith "realize not yet initialized")
+
 (** Create a tensor from a pre-built UOp *)
 let of_uop ?(device="CPU") ?(requires_grad=false) shape dtype uop =
   { uop; lazy_uop = None; shape; dtype; device; requires_grad }
@@ -710,13 +714,13 @@ let scaled_dot_product_attention ?mask (q : t) (k : t) (v : t) : t =
     invalid_arg "scaled_dot_product_attention: Q, K, V must be 2-D";
   let d_k = List.nth q.shape 1 in
   let kt = transpose k in
-  let raw_scores = matmul q kt in  (* [seq_q; seq_k] *)
+  let raw_scores = !realize_ref (matmul q kt) in  (* [seq_q; seq_k] — materialize *)
   let scale = const_like raw_scores (1.0 /. Stdlib.sqrt (Float.of_int d_k)) in
   let scores = mul raw_scores scale in
   let scores = match mask with
     | Some m -> add scores m
     | None -> scores in
-  let attn_weights = softmax ~axis:(-1) scores in
+  let attn_weights = !realize_ref (softmax ~axis:(-1) scores) in  (* materialize *)
   matmul attn_weights v
 
 (** Causal (lower-triangular) attention mask for sequence length [n].
@@ -768,6 +772,7 @@ let realize (t : t) =
      t.uop <- buf_uop
    | None -> ());
   t
+let () = realize_ref := realize
 
 (** Find the realized Device.buffer for this tensor.
     First checks if the root UOp itself was realized (computed result),

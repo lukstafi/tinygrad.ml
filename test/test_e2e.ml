@@ -2972,33 +2972,85 @@ let test_nn_self_attention () =
   (* Verify structure: 4 projection weights, no bias *)
   let params = Nn.self_attention_params attn in
   check "sa 4 params" (List.length params = 4);
-  (* Verify forward projection Q = x @ Wq *)
+  (* Extract weight data for reconstruction *)
   let wq_data = to_float_list attn.wq.weight in
   let wk_data = to_float_list attn.wk.weight in
   let wv_data = to_float_list attn.wv.weight in
+  let wo_data = to_float_list attn.wo.weight in
+  (* Run full self_attention_forward in a fresh session *)
   Schedule.reset ();
-  let x1 = from_float_list [2; 2] [1.0; 0.0; 0.0; 1.0] in
-  let wq1 = from_float_list [2; 2] wq_data in
-  let q = Nn.linear_forward { attn.wq with weight = wq1 } x1 in
-  check "sa q shape" (q.shape = [2; 2]);
-  let qv = to_float_list q in
-  check "sa q finite" (List.for_all Float.is_finite qv);
-  (* Verify K projection in fresh session *)
+  let attn2 = {
+    Nn.wq = { attn.wq with weight = from_float_list [2; 2] wq_data };
+    wk = { attn.wk with weight = from_float_list [2; 2] wk_data };
+    wv = { attn.wv with weight = from_float_list [2; 2] wv_data };
+    wo = { attn.wo with weight = from_float_list [2; 2] wo_data };
+    d_model = 2;
+  } in
+  let x = from_float_list [3; 2] [1.0; 0.0; 0.0; 1.0; 0.5; 0.5] in
+  let out = Nn.self_attention_forward attn2 x in
+  check "sa full shape" (out.shape = [3; 2]);
+  let ov = to_float_list out in
+  check "sa full finite" (List.for_all Float.is_finite ov);
+  check "sa full len" (List.length ov = 6)
+
+(* ---- Test 87: Full scaled_dot_product_attention (multi-kernel) ---- *)
+let test_attention_full () =
+  Printf.printf "\n=== Full Attention (multi-kernel) ===\n%!";
+  let open Tensor in
   Schedule.reset ();
-  let x2 = from_float_list [2; 2] [1.0; 0.0; 0.0; 1.0] in
-  let wk1 = from_float_list [2; 2] wk_data in
-  let k = Nn.linear_forward { attn.wk with weight = wk1 } x2 in
-  check "sa k shape" (k.shape = [2; 2]);
-  let kv = to_float_list k in
-  check "sa k finite" (List.for_all Float.is_finite kv);
-  (* Verify V projection in fresh session *)
+  (* Identity Q, K → scores = I, softmax(I/sqrt(2)) → weighted V *)
+  let q = from_float_list [3; 2] [1.0; 0.0; 0.0; 1.0; 1.0; 1.0] in
+  let k = from_float_list [3; 2] [1.0; 0.0; 0.0; 1.0; 1.0; 1.0] in
+  let v = from_float_list [3; 2] [10.0; 0.0; 0.0; 10.0; 5.0; 5.0] in
+  let out = scaled_dot_product_attention q k v in
+  check "attn_full shape" (out.shape = [3; 2]);
+  let ov = to_float_list out in
+  check "attn_full finite" (List.for_all Float.is_finite ov);
+  check "attn_full len" (List.length ov = 6);
+  (* Verify values are reasonable (weighted combination of V rows) *)
+  List.iteri (fun i v ->
+    check (Printf.sprintf "attn_full[%d] bounded" i) (Float.abs v < 20.0)
+  ) ov;
+  (* Test with causal mask *)
   Schedule.reset ();
-  let x3 = from_float_list [2; 2] [1.0; 0.0; 0.0; 1.0] in
-  let wv1 = from_float_list [2; 2] wv_data in
-  let v = Nn.linear_forward { attn.wv with weight = wv1 } x3 in
-  check "sa v shape" (v.shape = [2; 2]);
-  let vv = to_float_list v in
-  check "sa v finite" (List.for_all Float.is_finite vv)
+  let q2 = from_float_list [3; 2] [1.0; 0.0; 0.0; 1.0; 1.0; 1.0] in
+  let k2 = from_float_list [3; 2] [1.0; 0.0; 0.0; 1.0; 1.0; 1.0] in
+  let v2 = from_float_list [3; 2] [10.0; 0.0; 0.0; 10.0; 5.0; 5.0] in
+  let mask = causal_mask 3 in
+  let out2 = scaled_dot_product_attention ~mask q2 k2 v2 in
+  check "attn_causal shape" (out2.shape = [3; 2]);
+  let ov2 = to_float_list out2 in
+  check "attn_causal finite" (List.for_all Float.is_finite ov2);
+  (* First row only sees first token *)
+  check "attn_causal[0] ≈ V[0,0]" (Float.abs (List.nth ov2 0 -. 10.0) < 0.1);
+  check "attn_causal[1] ≈ V[0,1]" (Float.abs (List.nth ov2 1) < 0.1)
+
+(* ---- Test 88: Embedding index validation ---- *)
+let test_embedding_validation () =
+  Printf.printf "\n=== Embedding Index Validation ===\n%!";
+  let open Tensor in
+  Schedule.reset ();
+  let emb = Nn.embedding ~num_embeddings:5 ~embedding_dim:3 () in
+  (* Valid indices should work *)
+  let idx = from_float_list [3] [0.0; 2.0; 4.0] in
+  let out = Nn.embedding_forward emb idx in
+  check "emb_valid shape" (out.shape = [3; 3]);
+  (* Out-of-range index should raise Invalid_argument *)
+  Schedule.reset ();
+  let emb2 = Nn.embedding ~num_embeddings:5 ~embedding_dim:3 () in
+  let bad_idx = from_float_list [2] [1.0; 5.0] in
+  let caught = try
+    ignore (Nn.embedding_forward emb2 bad_idx); false
+  with Invalid_argument _ -> true in
+  check "emb_oob caught" caught;
+  (* Negative index should also be caught *)
+  Schedule.reset ();
+  let emb3 = Nn.embedding ~num_embeddings:5 ~embedding_dim:3 () in
+  let neg_idx = from_float_list [2] [(-1.0); 0.0] in
+  let caught_neg = try
+    ignore (Nn.embedding_forward emb3 neg_idx); false
+  with Invalid_argument _ -> true in
+  check "emb_neg caught" caught_neg
 
 (* ---- Test 86: CUDA backend registration ---- *)
 let test_cuda_backend () =
@@ -3395,6 +3447,8 @@ let () =
   run_test "attention" test_attention;
   run_test "causal_mask" test_causal_mask;
   run_test "nn_self_attention" test_nn_self_attention;
+  run_test "attention_full" test_attention_full;
+  run_test "embedding_validation" test_embedding_validation;
   run_test "cuda_backend" test_cuda_backend;
   run_test "backend_availability" test_backend_availability;
   Printf.printf "\n============================\n%!";
