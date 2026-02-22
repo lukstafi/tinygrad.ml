@@ -279,3 +279,10 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **ALU cache path-dependence fix**: Per codex round 31 review, ALU nodes are now bypassed from cache when `eff_shape` is set, preventing incorrect reuse of cached ALU results from different EXPAND→RESHAPE paths. Added `test_shared_alu_dual_path` — shared `a*b` accessed through two different reshape→expand chains ([2,1]→[2,2] vs [1,2]→[2,2]) with verified forward and backward correctness.
 - **Tensor utilities**: Added `Tensor.item` (scalar extraction), `Tensor.arange` (0..n-1), `Tensor.contiguous`, and `Tensor.one_hot` (indices→one-hot encoding via comparison+cast). All tested in `test_tensor_utilities`.
 - **Test count**: 557 passing tests.
+
+## Claude round 34 decisions
+
+- **Cross-entropy shape error test**: Added `test_cross_entropy_shape_error` per codex review suggestion — verifies `cross_entropy` raises `Invalid_argument` when logits and targets have mismatched shapes.
+- **Metal GPU matmul backward**: Added `test_metal_matmul_backward` — verifies dw and dx through matmul on Metal GPU device (dw=[1,0,2,0], dx=[0.1,0.1,0,0]), ensuring the `eff_shape` propagation fix works correctly on GPU.
+- **Metal GPU softmax + CE pipeline**: Added `test_metal_softmax_ce` — verifies softmax row sums ≈ 1.0, CE value ≈ 0.4076, and CE gradient sum ≈ 0.0 on Metal GPU.
+- **Test count**: 572 passing tests.

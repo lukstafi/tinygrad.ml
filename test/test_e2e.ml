@@ -1911,7 +1911,83 @@ let test_tensor_utilities () =
   check_float "oh[2][1]" (List.nth ohv 7) 1.0 1e-4;
   check_float "oh[2][2]" (List.nth ohv 8) 0.0 1e-4
 
-(* ---- Test 50: CUDA backend registration ---- *)
+(* ---- Test: CE shape mismatch error ---- *)
+let test_cross_entropy_shape_error () =
+  Printf.printf "\n=== CE Shape Mismatch ===\n%!";
+  Schedule.reset ();
+  let logits = Tensor.from_float_list [2; 3] [1.;2.;3.; 4.;5.;6.] in
+  let targets = Tensor.from_float_list [3; 2] [1.;0.; 0.;1.; 0.;0.] in
+  let caught = try ignore (Tensor.cross_entropy logits targets); false
+    with Invalid_argument msg ->
+      check "ce error mentions shape" (String.length msg > 0
+        && (try ignore (Str.search_forward (Str.regexp_string "logits shape") msg 0); true
+            with Not_found -> false));
+      true
+  in
+  check "ce shape mismatch raises" caught
+
+(* ---- Test: Metal matmul backward ---- *)
+let test_metal_matmul_backward () =
+  Printf.printf "\n=== Metal Matmul Backward ===\n%!";
+  (* Same as CPU regression test but on Metal GPU.
+     x = [[1,2],[3,4]], w = [[0.1,0.1],[0.1,0.1]]
+     loss = sum(matmul(x,w) * mask), mask=[[1,0],[0,0]]
+     Expected dw = [1,0,2,0], dx = [0.1,0.1,0,0] *)
+  Schedule.reset ();
+  let x = Tensor.from_float_list ~device:"METAL" [2; 2] [1.;2.; 3.;4.] in
+  let w = Tensor.from_float_list ~device:"METAL" [2; 2] [0.1;0.1; 0.1;0.1] in
+  let logits = Tensor.matmul x w in
+  let mask = Tensor.from_float_list ~device:"METAL" [2; 2] [1.;0.;0.;0.] in
+  let loss = Tensor.sum (Tensor.mul logits mask) in
+  let lv = Tensor.to_float_list loss in
+  check_float "metal matmul loss" (List.hd lv) 0.3 1e-4;
+  let grads = Tensor.backward loss [w; x] in
+  let (_, dw) = List.nth grads 0 in
+  let (_, dx) = List.nth grads 1 in
+  let dw_v = Tensor.to_float_list dw in
+  let dx_v = Tensor.to_float_list dx in
+  check_float "metal dw[0][0]" (List.nth dw_v 0) 1.0 1e-4;
+  check_float "metal dw[0][1]" (List.nth dw_v 1) 0.0 1e-4;
+  check_float "metal dw[1][0]" (List.nth dw_v 2) 2.0 1e-4;
+  check_float "metal dw[1][1]" (List.nth dw_v 3) 0.0 1e-4;
+  check_float "metal dx[0][0]" (List.nth dx_v 0) 0.1 1e-4;
+  check_float "metal dx[0][1]" (List.nth dx_v 1) 0.1 1e-4;
+  check_float "metal dx[1][0]" (List.nth dx_v 2) 0.0 1e-4;
+  check_float "metal dx[1][1]" (List.nth dx_v 3) 0.0 1e-4
+
+(* ---- Test: Metal softmax + CE pipeline ---- *)
+let test_metal_softmax_ce () =
+  Printf.printf "\n=== Metal Softmax + CE ===\n%!";
+  (* Verify softmax and cross-entropy produce correct results on Metal GPU *)
+  Schedule.reset ();
+  let logits = Tensor.from_float_list ~device:"METAL" [1; 3] [1.0; 2.0; 3.0] in
+  let sm = Tensor.softmax logits in
+  let smv = Tensor.to_float_list sm in
+  check "metal softmax len" (List.length smv = 3);
+  let sm_sum = List.fold_left ( +. ) 0.0 smv in
+  check_float "metal softmax sum=1" sm_sum 1.0 1e-4;
+  (* CE on Metal *)
+  Schedule.reset ();
+  let logits2 = Tensor.from_float_list ~device:"METAL" [1; 3] [1.0; 2.0; 3.0] in
+  let targets = Tensor.from_float_list ~device:"METAL" [1; 3] [0.0; 0.0; 1.0] in
+  let loss = Tensor.cross_entropy logits2 targets in
+  let lv = Tensor.to_float_list loss in
+  (* Expected: -log(softmax([1,2,3])[2]) = -log(exp(3)/sum(exp([1,2,3])))
+     = -3 + log(exp(1)+exp(2)+exp(3)) ≈ -3 + 3.4076 ≈ 0.4076 *)
+  check_float "metal CE value" (List.hd lv) 0.4076 5e-3;
+  (* CE backward on Metal *)
+  Schedule.reset ();
+  let logits3 = Tensor.from_float_list ~device:"METAL" [1; 3] [1.0; 2.0; 3.0] in
+  let targets3 = Tensor.from_float_list ~device:"METAL" [1; 3] [0.0; 0.0; 1.0] in
+  let loss3 = Tensor.cross_entropy logits3 targets3 in
+  let grads = Tensor.backward loss3 [logits3] in
+  let (_, dlogits) = List.hd grads in
+  let dv = Tensor.to_float_list dlogits in
+  (* Gradient should sum to ≈ 0 *)
+  let dsum = List.fold_left ( +. ) 0.0 dv in
+  check_float "metal CE grad sum≈0" dsum 0.0 1e-3
+
+(* ---- Test 51: CUDA backend registration ---- *)
 let test_cuda_backend () =
   Printf.printf "\n=== CUDA Backend ===\n%!";
   (* Verify CUDA backend is recognized and returns a module *)
@@ -2256,6 +2332,9 @@ let () =
   run_test "reshape_reduce_backward" test_reshape_reduce_backward;
   run_test "shared_alu_dual_path" test_shared_alu_dual_path;
   run_test "tensor_utilities" test_tensor_utilities;
+  run_test "cross_entropy_shape_error" test_cross_entropy_shape_error;
+  run_test "metal_matmul_backward" test_metal_matmul_backward;
+  run_test "metal_softmax_ce" test_metal_softmax_ce;
   run_test "cuda_backend" test_cuda_backend;
   Printf.printf "\n============================\n%!";
   Printf.printf "Results: %d passed, %d failed\n%!" !pass_count !fail_count;
