@@ -184,6 +184,59 @@ let test_pad_shrink_composed_cpu () =
     [| 0.0; 1.0; 0.0; 2.0; 0.0; 3.0 |]
     (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c shrunk)
 
+let test_movement_chain_cpu () =
+  let x =
+    Tinygrad_ml.Tensor.reshape
+      (Tinygrad_ml.Tensor.from_array [| 1.0; 2.0; 3.0; 4.0 |])
+      [| 1; 2; 2 |]
+  in
+  let y =
+    x
+    |> fun t -> Tinygrad_ml.Tensor.expand t [| 2; 2; 2 |]
+    |> fun t -> Tinygrad_ml.Tensor.permute t [| 1; 0; 2 |]
+    |> fun t -> Tinygrad_ml.Tensor.pad t [| (0, 0); (0, 0); (1, 0) |]
+    |> fun t -> Tinygrad_ml.Tensor.shrink t [| (0, 2); (0, 2); (0, 2) |]
+    |> fun t -> Tinygrad_ml.Tensor.flip t [| 0; 2 |]
+  in
+  check_array ~msg:"movement chain forward"
+    [| 3.0; 0.0; 3.0; 0.0; 1.0; 0.0; 1.0; 0.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c y)
+
+let test_movement_over_reduction_cpu () =
+  let x =
+    Tinygrad_ml.Tensor.reshape
+      (Tinygrad_ml.Tensor.from_array [| 1.0; 2.0; 3.0; 4.0; 5.0; 6.0 |])
+      [| 2; 3 |]
+  in
+  let y =
+    x
+    |> Tinygrad_ml.Tensor.sum_axis ~axes:[ 1 ]
+    |> fun t -> Tinygrad_ml.Tensor.permute t [| 1; 0 |]
+    |> fun t -> Tinygrad_ml.Tensor.pad t [| (1, 0); (0, 1) |]
+    |> fun t -> Tinygrad_ml.Tensor.flip t [| 1 |]
+  in
+  check_array ~msg:"movement over reduction forward"
+    [| 0.0; 0.0; 0.0; 0.0; 15.0; 6.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c y);
+  let sq = Tinygrad_ml.Tensor.mul x x in
+  let w =
+    Tinygrad_ml.Tensor.reshape
+      (Tinygrad_ml.Tensor.from_array [| 10.0; 20.0 |])
+      [| 1; 2 |]
+  in
+  let z =
+    sq
+    |> Tinygrad_ml.Tensor.sum_axis ~axes:[ 1 ]
+    |> fun t -> Tinygrad_ml.Tensor.permute t [| 1; 0 |]
+    |> fun t -> Tinygrad_ml.Tensor.flip t [| 1 |]
+    |> fun t -> Tinygrad_ml.Tensor.mul t w
+  in
+  let grads = Tinygrad_ml.Tensor.backward ~wrt:[ x ] z in
+  let _, dx = List.hd grads in
+  check_array ~msg:"movement over reduction backward weighted"
+    [| 40.0; 80.0; 120.0; 80.0; 100.0; 120.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c dx)
+
 let test_matmul_cpu () =
   let a =
     Tinygrad_ml.Tensor.reshape
@@ -614,6 +667,8 @@ let () =
   test_flip_cpu ();
   test_pad_shrink_cpu ();
   test_pad_shrink_composed_cpu ();
+  test_movement_chain_cpu ();
+  test_movement_over_reduction_cpu ();
   test_matmul_cpu ();
   test_where_cmp_relu_cpu ();
   test_where_branch_selection_cpu ();

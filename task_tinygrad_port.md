@@ -315,3 +315,20 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - Validation:
   - `dune exec test/test_cpu.exe` passes.
   - `dune test` passes (`test_cpu: ok`, `test_metal: ok`, CUDA skipped when unavailable).
+
+## Codex round 27 decisions
+
+- Added high-signal movement-op integration coverage in `test/test_cpu.ml`:
+  - `test_movement_chain_cpu`: validates a full composed movement pipeline
+    `reshape -> expand -> permute -> pad -> shrink -> flip`
+    with explicit expected output.
+  - This directly addresses the remaining integration-risk class where individual movement ops pass in isolation but composition can regress index routing.
+- Added movement-over-reduction regression in `test/test_cpu.ml`:
+  - `test_movement_over_reduction_cpu` verifies forward behavior for
+    `sum_axis -> permute -> pad -> flip`.
+  - Includes a weighted backward check through `sum_axis -> permute -> flip`
+    to ensure non-uniform gradients map to the correct pre-reduction rows/elements.
+- Validation:
+  - `dune exec test/test_cpu.exe` passes.
+  - `dune test` passes (`test_cpu: ok` in this environment).
+  - `dune exec test/test_metal.exe` passes (`test_metal: ok`).
