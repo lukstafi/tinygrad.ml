@@ -383,3 +383,12 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **GeLU backward test**: Verified gradient flow through gelu activation.
 - **Important pattern**: Tests that call `Schedule.reset()` between subtests must recreate tensors after reset — stale tensor references become invalid after buffer data is cleared.
 - **Test count**: 843 passing tests.
+
+## Claude round 44 decisions
+
+- **Codex review fix (round 42)**: `Cuda_backend.is_available` changed from `true` to `false` — the placeholder stubs are non-operational so `Device.is_available "CUDA"` must not claim availability.
+- **Backend availability test**: Regression test verifying `Device.is_available` semantics: CPU always true, Metal matches package selection, CUDA false (placeholder), unknown devices false.
+- **Nn.BatchNorm**: Eval-mode batch normalization with running_mean/running_var statistics, learnable weight/bias. Input shape `[batch; channels; ...]`, normalizes over all dims except dim 1. Broadcasting via reshape to `[1; C; 1; ...]`.
+- **Nn.Embedding**: Lookup table layer. Forward uses one_hot @ weight for differentiable embedding retrieval. Supports arbitrary vocabulary size and embedding dimension.
+- **Nn layer wrappers**: `of_batch_norm` and `of_embedding` for composable sequential models.
+- **Test count**: 856 passing tests.
