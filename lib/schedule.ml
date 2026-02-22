@@ -131,6 +131,61 @@ let broadcast_index ~(buf_shape : int list) ~(out_shape : int list) (flat_idx : 
   !result
 
 
+(** Transform a flat index through a permutation.
+    Given flat_idx over [perm_shape] (the permuted/output shape) and axes
+    (the permutation that produced perm_shape from the original shape),
+    return a flat index into the original (unpermuted) layout.
+
+    For example, if original shape is [2,3] and axes=[1,0], then perm_shape=[3,2].
+    A flat index i into [3,2] is decomposed into coords, inverse-permuted, and
+    recomposed into a flat index into [2,3]. *)
+let permute_index ~(perm_shape : int list) ~(axes : int list) (flat_idx : Uop.t) : Uop.t =
+  let ndims = List.length perm_shape in
+  if ndims <= 1 then flat_idx  (* 0-D or 1-D: no-op *)
+  else begin
+    let perm_arr = Array.of_list perm_shape in
+    (* Compute strides for the permuted shape (row-major) *)
+    let perm_strides = Array.make ndims 1 in
+    for i = ndims - 2 downto 0 do
+      perm_strides.(i) <- perm_strides.(i + 1) * perm_arr.(i + 1)
+    done;
+    (* Decompose flat_idx into coordinates in perm_shape *)
+    let coords = Array.make ndims (Uop.const_int Dtype.int32 0) in
+    let remaining = ref flat_idx in
+    for d = 0 to ndims - 1 do
+      if d = ndims - 1 then coords.(d) <- !remaining
+      else begin
+        coords.(d) <- Uop.idiv !remaining (Uop.const_int Dtype.int32 perm_strides.(d));
+        remaining := Uop.mod_ !remaining (Uop.const_int Dtype.int32 perm_strides.(d))
+      end
+    done;
+    (* Compute inverse permutation: inv_axes[axes[i]] = i *)
+    let inv_axes = Array.make ndims 0 in
+    List.iteri (fun i a -> inv_axes.(a) <- i) axes;
+    (* Original shape: orig_shape[i] = perm_shape[inv_axes[i]] ... wait, that's circular.
+       Actually: perm_shape[i] = orig_shape[axes[i]], so orig_shape[j] = perm_shape[inv_axes[j]].
+       But simpler: coords in orig space: orig_coord[j] = perm_coord[inv_axes[j]]. *)
+    let orig_shape = Array.make ndims 0 in
+    for j = 0 to ndims - 1 do
+      orig_shape.(j) <- perm_arr.(inv_axes.(j))
+    done;
+    (* Compute strides for original shape *)
+    let orig_strides = Array.make ndims 1 in
+    for i = ndims - 2 downto 0 do
+      orig_strides.(i) <- orig_strides.(i + 1) * orig_shape.(i + 1)
+    done;
+    (* Recompose: sum of orig_coord[j] * orig_stride[j] *)
+    let result = ref (Uop.const_int Dtype.int32 0) in
+    for j = 0 to ndims - 1 do
+      let orig_coord = coords.(inv_axes.(j)) in
+      if orig_strides.(j) = 1 then
+        result := Uop.add !result orig_coord
+      else
+        result := Uop.add !result (Uop.mul orig_coord (Uop.const_int Dtype.int32 orig_strides.(j)))
+    done;
+    !result
+  end
+
 (** Rebuild an expression, replacing buffer references with PARAM-based loads.
     Movement ops are stripped. When the same buffer is accessed through different
     reshape/expand paths, each path gets its own broadcast index (avoiding the
@@ -147,8 +202,10 @@ let rebuild_expr ~buf_id_to_param ~loop_idx ~output_shape ~numel (root : Uop.t) 
   let cache : (int, Uop.t) Hashtbl.t = Hashtbl.create 64 in
 
   (* Generate a load for a realized buffer with the given effective shape context.
-     [effective_shape] comes from the RESHAPE above the buffer (if any). *)
-  let make_load buf_id effective_shape =
+     [effective_shape] comes from the RESHAPE above the buffer (if any).
+     [cur_idx] is the current flat index (may differ from loop_idx if a PERMUTE
+     has been applied upstream). *)
+  let make_load buf_id effective_shape cur_idx =
     match Hashtbl.find_opt buf_id_to_param buf_id with
     | Some (param, dbuf) ->
       let idx_expr =
@@ -170,34 +227,42 @@ let rebuild_expr ~buf_id_to_param ~loop_idx ~output_shape ~numel (root : Uop.t) 
               | _ -> None
           in
           match buf_shape with
-          | Some bs -> broadcast_index ~buf_shape:bs ~out_shape:output_shape loop_idx
+          | Some bs -> broadcast_index ~buf_shape:bs ~out_shape:output_shape cur_idx
           | None ->
             if dbuf.Device.size = 1 then Uop.const_int Dtype.int32 0
-            else Uop.idiv loop_idx (Uop.const_int Dtype.int32 (numel / dbuf.Device.size))
-        else loop_idx
+            else Uop.idiv cur_idx (Uop.const_int Dtype.int32 (numel / dbuf.Device.size))
+        else cur_idx
       in
       Uop.load (Uop.index param idx_expr)
     | None -> failwith (Printf.sprintf "rebuild_expr: buffer %d not in param map" buf_id)
   in
 
-  let rec rebuild (u : Uop.t) ~(eff_shape : int list option) : Uop.t =
+  (* Path-dependent ops: the result depends on eff_shape flowing down from the
+     root, so the same node may need different lowerings on different paths.
+     These must bypass the per-node result cache.
+     Note: CAST is a view_wrapper but resets eff_shape, so it's NOT path-dependent. *)
+  let is_path_dependent (op : Ops.t) = match op with
+    | Ops.BUFFER | Ops.REDUCE_AXIS | Ops.INDEX | Ops.LOAD
+    | Ops.RESHAPE | Ops.EXPAND -> true
+    | Ops.CAST -> false
+    | _ when Ops.Group.is_view_wrapper op -> true  (* CONTIGUOUS, PERMUTE, PAD, etc. *)
+    | _ -> false
+  in
+
+  let rec rebuild (u : Uop.t) ~(eff_shape : int list option) ~(cur_idx : Uop.t) : Uop.t =
     (* For non-buffer nodes, check cache *)
     match Hashtbl.find_opt cache u.id with
-    | Some r when (match u.op with
-        | Ops.BUFFER | Ops.REDUCE_AXIS | Ops.INDEX | Ops.LOAD
-        | Ops.RESHAPE | Ops.EXPAND | Ops.CONTIGUOUS
-        | Ops.PERMUTE | Ops.PAD | Ops.SHRINK | Ops.FLIP -> false
-        | _ -> true) -> r
+    | Some r when not (is_path_dependent u.op) -> r
     | _ ->
       let result = match u.op with
         | Ops.BUFFER ->
           if Hashtbl.mem buf_id_to_param u.id then
-            make_load u.id eff_shape
+            make_load u.id eff_shape cur_idx
           else u
         | Ops.INDEX ->
-          rebuild (List.hd u.src) ~eff_shape
+          rebuild (List.hd u.src) ~eff_shape ~cur_idx
         | Ops.LOAD ->
-          rebuild (List.hd u.src) ~eff_shape
+          rebuild (List.hd u.src) ~eff_shape ~cur_idx
         | Ops.RESHAPE ->
           (* Only set effective shape if not already set by an outer EXPAND.
              The outermost RESHAPE (closest to EXPAND) determines the broadcast shape. *)
@@ -206,7 +271,7 @@ let rebuild_expr ~buf_id_to_param ~loop_idx ~output_shape ~numel (root : Uop.t) 
             | Some _ -> eff_shape  (* already set by outer context, don't override *)
             | None -> if target_shape <> [] then Some target_shape else None
           in
-          rebuild (List.hd u.src) ~eff_shape:new_eff
+          rebuild (List.hd u.src) ~eff_shape:new_eff ~cur_idx
         | Ops.EXPAND ->
           (* The EXPAND's child shape (with 1s for broadcast dims) determines
              the buffer's effective shape. Walk through simple wrappers
@@ -214,7 +279,7 @@ let rebuild_expr ~buf_id_to_param ~loop_idx ~output_shape ~numel (root : Uop.t) 
           let rec find_reshape (n : Uop.t) =
             match n.op with
             | Ops.RESHAPE -> (match n.arg with Uop.Shape s -> Some s | _ -> None)
-            | Ops.CONTIGUOUS | Ops.PERMUTE | Ops.PAD | Ops.SHRINK | Ops.FLIP | Ops.CAST ->
+            | _ when Ops.Group.is_view_wrapper n.op && n.src <> [] ->
               find_reshape (List.hd n.src)
             | _ -> None
           in
@@ -224,38 +289,58 @@ let rebuild_expr ~buf_id_to_param ~loop_idx ~output_shape ~numel (root : Uop.t) 
             | Some s -> Some s  (* use the reshape shape before expand *)
             | None -> eff_shape
           in
-          rebuild child ~eff_shape:new_eff
-        | Ops.CONTIGUOUS | Ops.PERMUTE | Ops.PAD | Ops.SHRINK | Ops.FLIP ->
-          rebuild (List.hd u.src) ~eff_shape
+          rebuild child ~eff_shape:new_eff ~cur_idx
+        | Ops.PERMUTE ->
+          (* Apply index permutation: decompose flat index using the permuted
+             (output) shape, inverse-permute coordinates, recompose using
+             the original (child) shape.
+             The child's shape comes from the nearest RESHAPE below PERMUTE.
+             perm_shape[i] = child_shape[axes[i]]. *)
+          let axes = match u.arg with Uop.Int_list a -> a | _ -> [] in
+          let child = List.hd u.src in
+          (* Find child shape from nearest RESHAPE *)
+          let rec find_child_shape (n : Uop.t) = match n.op with
+            | Ops.RESHAPE -> (match n.arg with Uop.Shape s -> Some s | _ -> None)
+            | _ when Ops.Group.is_view_wrapper n.op && n.src <> [] ->
+              find_child_shape (List.hd n.src)
+            | _ -> None
+          in
+          let child_shape_opt = find_child_shape child in
+          begin match axes, child_shape_opt with
+          | _ :: _, Some child_shape when List.length axes = List.length child_shape ->
+            (* perm_shape[i] = child_shape[axes[i]] *)
+            let perm_shape = List.map (List.nth child_shape) axes in
+            let new_idx = permute_index ~perm_shape ~axes cur_idx in
+            rebuild child ~eff_shape ~cur_idx:new_idx
+          | _ ->
+            (* No shape info available — pass through (identity permute or 1-D) *)
+            rebuild child ~eff_shape ~cur_idx
+          end
+        | Ops.CONTIGUOUS | Ops.PAD | Ops.SHRINK | Ops.FLIP ->
+          rebuild (List.hd u.src) ~eff_shape ~cur_idx
         | Ops.CAST ->
-          let new_src = List.map (fun s -> rebuild s ~eff_shape:None) u.src in
+          let new_src = List.map (fun s -> rebuild s ~eff_shape:None ~cur_idx) u.src in
           Uop.cast u.dtype (List.hd new_src)
         | _ when Ops.Group.is_alu u.op ->
-          let new_src = List.map (fun s -> rebuild s ~eff_shape:None) u.src in
+          let new_src = List.map (fun s -> rebuild s ~eff_shape:None ~cur_idx) u.src in
           Uop.alu u.op u.dtype new_src
         | Ops.REDUCE_AXIS ->
           (* If this reduction was already realized, treat it as a buffer load *)
           (match get_realized u.id with
            | Some _dbuf ->
              if Hashtbl.mem buf_id_to_param u.id then
-               make_load u.id eff_shape
+               make_load u.id eff_shape cur_idx
              else u
            | None -> u)
         | Ops.CONST -> u
         | _ -> u
       in
-      (* Cache only nodes that are NOT path-dependent.
-         BUFFER, REDUCE_AXIS: different paths may need different broadcast indices.
-         INDEX, LOAD, RESHAPE, EXPAND: lie on the path between ALU and BUFFER,
-         so they must be traversed per-path to correctly propagate eff_shape. *)
-      (match u.op with
-       | Ops.BUFFER | Ops.REDUCE_AXIS
-       | Ops.INDEX | Ops.LOAD | Ops.RESHAPE | Ops.EXPAND
-       | Ops.CONTIGUOUS | Ops.PERMUTE | Ops.PAD | Ops.SHRINK | Ops.FLIP -> ()
-       | _ -> Hashtbl.replace cache u.id result);
+      (* Cache only nodes whose result does NOT depend on the incoming eff_shape. *)
+      if not (is_path_dependent u.op) then
+        Hashtbl.replace cache u.id result;
       result
   in
-  rebuild root ~eff_shape:None
+  rebuild root ~eff_shape:None ~cur_idx:loop_idx
 
 (** Lower a lazy UOp expression tree into a concrete kernel UOp graph.
     Given a root UOp that represents a lazy computation (ALU ops over

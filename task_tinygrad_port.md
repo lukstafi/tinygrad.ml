@@ -170,3 +170,16 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
   - Metal linear training (y=2x regression, 100 SGD steps, converges to w=2.000000 on GPU)
 - **Float32 precision characterization**: Discovered that CPU and Metal produce identical forward/backward results per-step, but tiny float32 rounding differences compound over many iterations on chaotic loss surfaces (XOR MLP). The XOR problem at lr=0.1 diverges on Metal around step 120 while converging on CPU. Linear regression converges identically on both backends. This is expected behavior — not a bug.
 - Total tests: 96 unit + 311 e2e = 407 all passing.
+
+## Claude round 21 decisions
+
+- **Structural `view_wrapper` predicate (codex review feedback)**: Added `Ops.Group.view_wrapper` list and `is_view_wrapper` predicate to `lib/ops.ml`. This replaces hardcoded op lists in the scheduler with a semantic predicate for single-source view/wrapper ops (RESHAPE, EXPAND, PERMUTE, PAD, SHRINK, FLIP, CAST, CONTIGUOUS). Used in `find_reshape` (EXPAND shape walker) and the new `is_path_dependent` helper.
+- **Consolidated path-dependent cache bypass**: Extracted `is_path_dependent` helper in `rebuild_expr` that uses `is_view_wrapper` for movement ops, with explicit CAST exclusion (CAST resets eff_shape, so its result doesn't depend on the incoming path context). Replaces duplicated hardcoded op lists at cache lookup and cache store sites.
+- **PERMUTE forward execution**: Implemented proper PERMUTE index transformation in the scheduler. When `rebuild_expr` encounters a PERMUTE node, it:
+  1. Finds the child's shape from the nearest RESHAPE via `find_child_shape` walker
+  2. Computes the permuted shape from child_shape and axes
+  3. Generates a `permute_index` UOp expression that decomposes the flat output index into multi-dim coordinates, applies the inverse permutation, and recomposes into a flat input index
+  4. Threads the transformed index via new `~cur_idx` parameter through `rebuild`
+  This enables correct element reordering for transpose and general permutations. Added `permute_index` helper function and threaded `cur_idx` through all `rebuild` recursive calls.
+- **New test**: `test_permute_forward` verifies that [2,3] transposed to [3,2] produces correct element order [1,4,2,5,3,6].
+- Total tests: 96 unit + 318 e2e = 414 all passing.

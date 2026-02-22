@@ -865,6 +865,28 @@ let test_gradient_permute () =
     check_float (Printf.sprintf "permute grad[%d]" i) v 1.0 1e-6
   ) dx_vals
 
+(* ---- Test 29b: Permute forward (transpose element order) ---- *)
+let test_permute_forward () =
+  Printf.printf "\n=== Permute (forward) ===\n%!";
+  Schedule.reset ();
+  (* x is [2;3] with values [[1,2,3],[4,5,6]].
+     permute([1;0]) transposes to [3;2] = [[1,4],[2,5],[3,6]].
+     Add 0 to force a compute kernel (otherwise permute alone
+     might just return the same buffer without reordering).
+     Flat storage after transpose: [1,4,2,5,3,6]. *)
+  let x = Tensor.from_float_list [2; 3] [1.0; 2.0; 3.0; 4.0; 5.0; 6.0] in
+  let xp = Tensor.permute x [1; 0] in
+  let zeros = Tensor.from_float_list [3; 2] [0.;0.;0.;0.;0.;0.] in
+  let result = Tensor.add xp zeros in
+  let vals = Tensor.to_float_list result in
+  Printf.printf "  permute result: [%s]\n%!"
+    (String.concat ", " (List.map string_of_float vals));
+  check "permute forward length" (List.length vals = 6);
+  let expected = [1.0; 4.0; 2.0; 5.0; 3.0; 6.0] in
+  List.iteri (fun i v ->
+    check_float (Printf.sprintf "permute fwd[%d]" i) v (List.nth expected i) 1e-6
+  ) vals
+
 (* ---- Test 30: Where + comparison ops (elementwise max via where) ---- *)
 let test_where_cmp () =
   Printf.printf "\n=== Where + Comparison ===\n%!";
@@ -1426,6 +1448,7 @@ let () =
   run_test "leading_axis_broadcast" test_leading_axis_broadcast;
   run_test "gradient_log2" test_gradient_log2;
   run_test "gradient_permute" test_gradient_permute;
+  run_test "permute_forward" test_permute_forward;
   run_test "where_cmp" test_where_cmp;
   run_test "cast_forward" test_cast_forward;
   run_test "gradient_expand" test_gradient_expand;
