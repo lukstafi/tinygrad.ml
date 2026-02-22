@@ -342,3 +342,13 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **MSE loss**: `mse_loss` = mean((pred-target)^2), with verified backward gradients.
 - **Binary cross-entropy loss**: `binary_cross_entropy` with eps-clamped predictions for numerical stability.
 - **Test count**: 756 passing tests.
+
+## Claude round 40 decisions
+
+- **Codex review fixes (round 38)**:
+  - Fixed `nn.ml` comment: `y = x @ W^T + b` → `y = x @ W + b` (weight is `[in; out]`, no transpose).
+  - Simplified `linear_forward` to use auto-broadcasting for bias addition.
+- **Adam optimizer**: Added `adam_state`, `adam_init`, `adam_step` to `nn.ml`. Implements bias-corrected first/second moment updates. Tested: parameter movement, state tracking, moment population.
+- **Nn sequential backward test**: Verified gradients flow through a 2-layer MLP (Linear→ReLU→Linear) via `backward`. All gradients finite, at least some non-zero.
+- **Known limitation**: Multi-step optimizer tests hit systemic UOp ID growth issue (IDs > 28000 after many `Schedule.reset()` cycles cause `/*unknown_*/` in rendered C code). Tests limited to single-step verification.
+- **Test count**: 780 passing tests.
