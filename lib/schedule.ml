@@ -453,8 +453,10 @@ let rebuild_expr ~buf_id_to_param ~loop_idx ~output_shape (root : Uop.t) : Uop.t
             (* After permute, the index is now in the child's (unpermuted) coordinate frame *)
             rebuild child ~eff_shape ~cur_idx:new_idx ~idx_shape:child_shape
           | _ ->
-            (* No shape info available — pass through (identity permute or 1-D) *)
-            rebuild child ~eff_shape ~cur_idx ~idx_shape
+            failwith (Printf.sprintf
+              "rebuild: PERMUTE shape inference failed (axes=%s, child op=%s)"
+              (String.concat "," (List.map string_of_int axes))
+              (Ops.to_string child.op))
           end
         | Ops.SHRINK ->
           (* SHRINK: extract a sub-region. Transform index by adding lower-bound offsets. *)
@@ -467,7 +469,10 @@ let rebuild_expr ~buf_id_to_param ~loop_idx ~output_shape (root : Uop.t) : Uop.t
               let new_idx = shrink_index ~shrunk_shape ~bounds ~orig_shape cur_idx in
               rebuild child ~eff_shape ~cur_idx:new_idx ~idx_shape:orig_shape
             | _ ->
-              rebuild child ~eff_shape ~cur_idx ~idx_shape
+              failwith (Printf.sprintf
+                "rebuild: SHRINK shape inference failed (bounds=%s, child op=%s)"
+                (String.concat "," (List.map (fun (lo,hi) -> Printf.sprintf "(%d,%d)" lo hi) bounds))
+                (Ops.to_string child.op))
           end else
             rebuild child ~eff_shape ~cur_idx ~idx_shape
         | Ops.PAD ->
@@ -485,7 +490,10 @@ let rebuild_expr ~buf_id_to_param ~loop_idx ~output_shape (root : Uop.t) : Uop.t
               (* Apply mask: where(mask != 0, child_val, 0.0) *)
               Uop.alu Ops.MUL Dtype.float32 [child_val; mask]
             | _ ->
-              rebuild child ~eff_shape ~cur_idx ~idx_shape
+              failwith (Printf.sprintf
+                "rebuild: PAD shape inference failed (padding=%s, child op=%s)"
+                (String.concat "," (List.map (fun (b,a) -> Printf.sprintf "(%d,%d)" b a) padding))
+                (Ops.to_string child.op))
           end else
             rebuild child ~eff_shape ~cur_idx ~idx_shape
         | Ops.CONTIGUOUS | Ops.FLIP ->

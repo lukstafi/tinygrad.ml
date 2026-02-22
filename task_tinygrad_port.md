@@ -209,3 +209,13 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **PAD handler**: Now uses `infer_shape child` instead of inline `find_shape`.
 - **New tests**: `test_pad_permute` ([2;3] → permute → pad → [4;3]) and `test_shrink_permute` ([2;3] → permute → shrink → [2;2]) verify that composed movement op chains produce correct element ordering.
 - Total tests: 96 unit + 368 e2e = 464 all passing.
+
+## Claude round 25 decisions
+
+- **Fail loudly on shape inference failure (codex review feedback)**: Replaced silent pass-through fallbacks in PERMUTE, SHRINK, and PAD handlers with `failwith` that reports the op, child op, and relevant args. Previously, if `infer_shape` returned `None`, the movement op was silently treated as identity — producing wrong results without any error. Now, a missing shape causes an immediate, diagnosable crash. This is the correct behavior: shape inference failure means the UOp graph has an unexpected structure, and silently producing wrong values is worse than crashing.
+- **Reverse-direction composition tests (codex review feedback)**: Added `test_permute_pad` (pad → permute) and `test_permute_shrink` (shrink → permute) to complement the existing `test_pad_permute` and `test_shrink_permute`. All four composition directions now have explicit e2e coverage:
+  - `pad(permute(x))` — round 24
+  - `shrink(permute(x))` — round 24
+  - `permute(pad(x))` — round 25
+  - `permute(shrink(x))` — round 25
+- Total tests: 96 unit + 390 e2e = 486 all passing.

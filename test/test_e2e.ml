@@ -1522,6 +1522,44 @@ let test_shrink_permute () =
     check_float (Printf.sprintf "shrink_perm[%d]" i) vv (List.nth expected i) 1e-6
   ) v
 
+(* ---- Test 48: PERMUTE(PAD(x)) composed movement ops ---- *)
+let test_permute_pad () =
+  Printf.printf "\n=== PERMUTE(PAD) ===\n%!";
+  Schedule.reset ();
+  (* x = [[1,2],[3,4]] shape [2;2]
+     pad [(1,0);(0,1)] → [[0,0,0],[1,2,0],[3,4,0]] shape [3;3]
+     permute [1;0] → transpose: [[0,1,3],[0,2,4],[0,0,0]] shape [3;3] *)
+  let x = Tensor.from_float_list [2; 2] [1.;2.;3.;4.] in
+  let xp = Tensor.pad x [(1, 0); (0, 1)] in
+  let xpp = Tensor.permute xp [1; 0] in
+  let zeros = Tensor.from_float_list [3; 3] (List.init 9 (fun _ -> 0.0)) in
+  let r = Tensor.add xpp zeros in
+  let v = Tensor.to_float_list r in
+  check "permute_pad len" (List.length v = 9);
+  let expected = [0.;1.;3.; 0.;2.;4.; 0.;0.;0.] in
+  List.iteri (fun i vv ->
+    check_float (Printf.sprintf "perm_pad[%d]" i) vv (List.nth expected i) 1e-6
+  ) v
+
+(* ---- Test 49: PERMUTE(SHRINK(x)) composed movement ops ---- *)
+let test_permute_shrink () =
+  Printf.printf "\n=== PERMUTE(SHRINK) ===\n%!";
+  Schedule.reset ();
+  (* x = [[1,2,3],[4,5,6],[7,8,9]] shape [3;3]
+     shrink [(0,2);(1,3)] → [[2,3],[5,6]] shape [2;2]
+     permute [1;0] → [[2,5],[3,6]] shape [2;2] *)
+  let x = Tensor.from_float_list [3; 3] [1.;2.;3.;4.;5.;6.;7.;8.;9.] in
+  let xs = Tensor.shrink x [(0, 2); (1, 3)] in
+  let xsp = Tensor.permute xs [1; 0] in
+  let zeros = Tensor.from_float_list [2; 2] [0.;0.;0.;0.] in
+  let r = Tensor.add xsp zeros in
+  let v = Tensor.to_float_list r in
+  check "permute_shrink len" (List.length v = 4);
+  let expected = [2.;5.;3.;6.] in
+  List.iteri (fun i vv ->
+    check_float (Printf.sprintf "perm_shrink[%d]" i) vv (List.nth expected i) 1e-6
+  ) v
+
 let run_test name f =
   try f () with e ->
     incr fail_count;
@@ -1592,6 +1630,8 @@ let () =
   run_test "metal_training" test_metal_training;
   run_test "pad_permute" test_pad_permute;
   run_test "shrink_permute" test_shrink_permute;
+  run_test "permute_pad" test_permute_pad;
+  run_test "permute_shrink" test_permute_shrink;
   run_test "cuda_backend" test_cuda_backend;
   Printf.printf "\n============================\n%!";
   Printf.printf "Results: %d passed, %d failed\n%!" !pass_count !fail_count;
