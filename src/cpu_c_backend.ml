@@ -73,6 +73,26 @@ let call_kernel (k : compiled_kernel) ~(out_ptr : float ptr) ~(input_ptrs : floa
           (ptr float @-> ptr float @-> ptr float @-> ptr float @-> ptr float @-> ptr float @-> ptr float @-> int @-> returning void)
       in
       fn out_ptr in0 in1 in2 in3 in4 in5 n
+  | 7, [ in0; in1; in2; in3; in4; in5; in6 ] ->
+      let fn = f k.function_name
+          (ptr float @-> ptr float @-> ptr float @-> ptr float @-> ptr float @-> ptr float @-> ptr float @-> ptr float @-> int @-> returning void)
+      in
+      fn out_ptr in0 in1 in2 in3 in4 in5 in6 n
+  | 8, [ in0; in1; in2; in3; in4; in5; in6; in7 ] ->
+      let fn = f k.function_name
+          (ptr float @-> ptr float @-> ptr float @-> ptr float @-> ptr float @-> ptr float @-> ptr float @-> ptr float @-> ptr float @-> int @-> returning void)
+      in
+      fn out_ptr in0 in1 in2 in3 in4 in5 in6 in7 n
+  | 9, [ in0; in1; in2; in3; in4; in5; in6; in7; in8 ] ->
+      let fn = f k.function_name
+          (ptr float @-> ptr float @-> ptr float @-> ptr float @-> ptr float @-> ptr float @-> ptr float @-> ptr float @-> ptr float @-> ptr float @-> int @-> returning void)
+      in
+      fn out_ptr in0 in1 in2 in3 in4 in5 in6 in7 in8 n
+  | 10, [ in0; in1; in2; in3; in4; in5; in6; in7; in8; in9 ] ->
+      let fn = f k.function_name
+          (ptr float @-> ptr float @-> ptr float @-> ptr float @-> ptr float @-> ptr float @-> ptr float @-> ptr float @-> ptr float @-> ptr float @-> ptr float @-> int @-> returning void)
+      in
+      fn out_ptr in0 in1 in2 in3 in4 in5 in6 in7 in8 in9 n
   | _ ->
       failwith
         (Printf.sprintf "unsupported input arity for CPU kernel: expected %d got %d"

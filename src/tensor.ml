@@ -3,6 +3,8 @@ type node =
   | Const of float
   | Binop of Uop.binop * t * t
   | Unop of Uop.unop * t
+  | Cast of Dtype.scalar * t
+  | Where of t * t * t
   | Reshape of t
   | Expand of t
   | Permute of int array * t
@@ -70,13 +72,12 @@ let reciprocal a = unop Uop.Reciprocal a
 let exp2 a = unop Uop.Exp2 a
 let log2 a = unop Uop.Log2 a
 let sin a = unop Uop.Sin a
+let cast ~dtype a = { shape = Array.copy a.shape; node = Cast (dtype, a); cache = [] }
 
 let where_ cond t f =
   assert_same_shape cond t;
   assert_same_shape t f;
-  (* cond is expected to be 0/1 mask (e.g. from comparisons). *)
-  let one = ones_like cond in
-  add (mul cond t) (mul (sub one cond) f)
+  { shape = Array.copy t.shape; node = Where (cond, t, f); cache = [] }
 
 let relu t =
   let zero = zeros_like t in
@@ -263,6 +264,14 @@ let rec lower_to_expr_with_shape ~device t current_shape inputs =
   | Unop (op, x) ->
       let x_expr, inputs = lower_to_expr_with_shape ~device x current_shape inputs in
       (Uop.Unop (op, x_expr), inputs)
+  | Cast (dtype, x) ->
+      let x_expr, inputs = lower_to_expr_with_shape ~device x current_shape inputs in
+      (Uop.Cast (dtype, x_expr), inputs)
+  | Where (c, t, f) ->
+      let c_expr, inputs = lower_to_expr_with_shape ~device c current_shape inputs in
+      let t_expr, inputs = lower_to_expr_with_shape ~device t current_shape inputs in
+      let f_expr, inputs = lower_to_expr_with_shape ~device f current_shape inputs in
+      (Uop.Where (c_expr, t_expr, f_expr), inputs)
   | Reshape inner ->
       lower_to_expr_with_shape ~device inner current_shape inputs
   | Expand _ | Permute _ | Reduce_axis _ ->
@@ -430,6 +439,8 @@ let children t =
   | Data _ | Const _ -> []
   | Binop (_, a, b) -> [ a; b ]
   | Unop (_, x) -> [ x ]
+  | Cast (_, x) -> [ x ]
+  | Where (c, t, f) -> [ c; t; f ]
   | Reshape x -> [ x ]
   | Expand x -> [ x ]
   | Permute (_, x) -> [ x ]
@@ -561,6 +572,11 @@ let local_grads t upstream =
       let half_pi = full_with_shape x.shape (Float.pi /. 2.0) in
       let cos_x = sin (sub half_pi x) in
       [ (x, mul upstream cos_x) ]
+  | Cast (Dtype.F32, x) -> [ (x, upstream) ]
+  | Cast (Dtype.I32, x) | Cast (Dtype.Bool, x) -> [ (x, zeros_like x) ]
+  | Where (c, t, f) ->
+      let zero = zeros_like upstream in
+      [ (c, zeros_like c); (t, where_ c upstream zero); (f, where_ c zero upstream) ]
   | Binop (Uop.Add, a, b) -> [ (a, upstream); (b, upstream) ]
   | Binop (Uop.Sub, a, b) -> [ (a, upstream); (b, neg upstream) ]
   | Binop (Uop.Mul, a, b) -> [ (a, mul upstream b); (b, mul upstream a) ]

@@ -14,6 +14,13 @@ let rec render_expr = function
   | Uop.Unop (Uop.Exp2, x) -> Printf.sprintf "exp2f(%s)" (render_expr x)
   | Uop.Unop (Uop.Log2, x) -> Printf.sprintf "log2f(%s)" (render_expr x)
   | Uop.Unop (Uop.Sin, x) -> Printf.sprintf "sinf(%s)" (render_expr x)
+  | Uop.Cast (Dtype.F32, x) -> Printf.sprintf "(%s)" (render_expr x)
+  | Uop.Cast (Dtype.I32, x) -> Printf.sprintf "((float)((int)(%s)))" (render_expr x)
+  | Uop.Cast (Dtype.Bool, x) ->
+      Printf.sprintf "((%s) != 0.0f ? 1.0f : 0.0f)" (render_expr x)
+  | Uop.Where (c, t, f) ->
+      Printf.sprintf "((%s) != 0.0f ? (%s) : (%s))"
+        (render_expr c) (render_expr t) (render_expr f)
 
 let render_expr_kernel ~(expr : Uop.expr) ~(ninputs : int) ~(length : int) : Program_spec.t =
   let expression_key = Uop.expr_to_key expr in

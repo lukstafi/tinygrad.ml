@@ -195,6 +195,44 @@ let test_where_cmp_relu_cpu () =
     [| 0.0; 0.0; 0.0; 1.0 |]
     (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c dx)
 
+let test_where_branch_selection_cpu () =
+  let cond = Tinygrad_ml.Tensor.from_array [| 1.0; 0.0; 1.0; 0.0 |] in
+  let t = Tinygrad_ml.Tensor.from_array [| 2.0; Float.nan; 4.0; Float.nan |] in
+  let f = Tinygrad_ml.Tensor.from_array [| Float.nan; 30.0; Float.nan; 50.0 |] in
+  let y = Tinygrad_ml.Tensor.where_ cond t f in
+  let out = Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c y in
+  check_close ~msg:"where select 0" 2.0 out.(0);
+  check_close ~msg:"where select 1" 30.0 out.(1);
+  check_close ~msg:"where select 2" 4.0 out.(2);
+  check_close ~msg:"where select 3" 50.0 out.(3)
+
+let test_cast_cpu () =
+  let x = Tinygrad_ml.Tensor.from_array [| -1.9; -0.1; 0.0; 2.7 |] in
+  let xi = Tinygrad_ml.Tensor.cast ~dtype:Tinygrad_ml.Dtype.I32 x in
+  check_array ~msg:"cast i32 truncates toward zero"
+    [| -1.0; 0.0; 0.0; 2.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c xi);
+  let xb = Tinygrad_ml.Tensor.cast ~dtype:Tinygrad_ml.Dtype.Bool x in
+  check_array ~msg:"cast bool nonzero mask"
+    [| 1.0; 1.0; 0.0; 1.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c xb);
+  let xf = Tinygrad_ml.Tensor.cast ~dtype:Tinygrad_ml.Dtype.F32 x in
+  check_array ~msg:"cast f32 identity"
+    [| -1.9; -0.1; 0.0; 2.7 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c xf);
+  let _, dx_f32 = List.hd (Tinygrad_ml.Tensor.backward ~wrt:[ x ] xf) in
+  check_array ~msg:"d/dx cast f32"
+    [| 1.0; 1.0; 1.0; 1.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c dx_f32);
+  let _, dx_i32 = List.hd (Tinygrad_ml.Tensor.backward ~wrt:[ x ] xi) in
+  check_array ~msg:"d/dx cast i32"
+    [| 0.0; 0.0; 0.0; 0.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c dx_i32);
+  let _, dx_bool = List.hd (Tinygrad_ml.Tensor.backward ~wrt:[ x ] xb) in
+  check_array ~msg:"d/dx cast bool"
+    [| 0.0; 0.0; 0.0; 0.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c dx_bool)
+
 let test_linear_layer_training_cpu () =
   let x_data = [| 1.0; 0.0; 0.0; 1.0; 1.0; 1.0 |] in
   let target_data = [| 2.0; 3.0; 5.0 |] in
@@ -230,6 +268,34 @@ let test_linear_layer_training_cpu () =
     failwith (Printf.sprintf "linear matmul w0: expected ~2.0, got %.8f" (!w).(0));
   if Float.abs ((!w).(1) -. 3.0) > 0.1 then
     failwith (Printf.sprintf "linear matmul w1: expected ~3.0, got %.8f" (!w).(1))
+
+let test_relu_training_cpu () =
+  let x_data = [| -1.0; -1.0; -1.0; 1.0; 1.0; -1.0; 1.0; 1.0 |] in
+  let target_data = [| 0.0; 0.0; 0.0; 2.0 |] in
+  let lr = 0.05 in
+  let w = ref [| 0.1; 0.1 |] in
+  for _step = 1 to 150 do
+    let x = Tinygrad_ml.Tensor.reshape (Tinygrad_ml.Tensor.from_array x_data) [| 4; 2 |] in
+    let target = Tinygrad_ml.Tensor.reshape (Tinygrad_ml.Tensor.from_array target_data) [| 4; 1 |] in
+    let w_t = Tinygrad_ml.Tensor.reshape (Tinygrad_ml.Tensor.from_array !w) [| 2; 1 |] in
+    let pred = Tinygrad_ml.Tensor.relu (Tinygrad_ml.Tensor.matmul x w_t) in
+    let diff = Tinygrad_ml.Tensor.sub pred target in
+    let loss = Tinygrad_ml.Tensor.mean_axis ~axes:[ 0; 1 ] (Tinygrad_ml.Tensor.mul diff diff) in
+    let grads = Tinygrad_ml.Tensor.backward ~wrt:[ w_t ] loss in
+    let _, dw = List.hd grads in
+    let dw_arr = Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c dw in
+    for i = 0 to Array.length !w - 1 do
+      (!w).(i) <- (!w).(i) -. (lr *. dw_arr.(i))
+    done
+  done;
+  let x_eval = Tinygrad_ml.Tensor.reshape (Tinygrad_ml.Tensor.from_array x_data) [| 4; 2 |] in
+  let w_eval = Tinygrad_ml.Tensor.reshape (Tinygrad_ml.Tensor.from_array !w) [| 2; 1 |] in
+  let pred_eval = Tinygrad_ml.Tensor.relu (Tinygrad_ml.Tensor.matmul x_eval w_eval) in
+  let pred = Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c pred_eval in
+  if pred.(0) > 0.15 || pred.(1) > 0.15 || pred.(2) > 0.15 then
+    failwith "relu training negatives should stay near 0";
+  if Float.abs (pred.(3) -. 2.0) > 0.25 then
+    failwith (Printf.sprintf "relu training positive sample expected ~2.0, got %.8f" pred.(3))
 
 let test_noncontiguous_axis_reductions_cpu () =
   let a =
@@ -447,11 +513,14 @@ let () =
   test_permute_cpu ();
   test_matmul_cpu ();
   test_where_cmp_relu_cpu ();
+  test_where_branch_selection_cpu ();
+  test_cast_cpu ();
   test_noncontiguous_axis_reductions_cpu ();
   test_reshape_preserves_realize_cache_cpu ();
   test_backward_basic_cpu ();
   test_gradient_descent_cpu ();
   test_linear_layer_training_cpu ();
+  test_relu_training_cpu ();
   test_backward_reductions_cpu ();
   test_backward_expand_cpu ();
   test_backward_permute_cpu ();

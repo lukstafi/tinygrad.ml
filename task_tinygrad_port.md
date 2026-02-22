@@ -205,3 +205,35 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
   - `where_` forward,
   - `relu` forward and backward mask behavior.
 - Added an end-to-end matmul training loop regression in CPU tests (`y = x @ w`, MSE + SGD for 100 steps) to exercise multi-step forward/backward/update dynamics.
+
+## Codex round 20 decisions
+
+- Replaced mask-arithmetic `where_` lowering with a native ternary expression path:
+  - Added `Uop.Where` in expression IR.
+  - Wired ternary rendering in CPU/CUDA/Metal renderers using conditional select syntax.
+  - Updated `Tensor.where_` to build an explicit `Where` node instead of expanding to `cond*t + (1-cond)*f`.
+- Added explicit autograd rule for `Where`:
+  - No gradient through condition (zero mask gradient).
+  - Branch gradients routed with conditional masking:
+    - `d/dt = where(cond, upstream, 0)`
+    - `d/df = where(cond, 0, upstream)`.
+- Added CPU regressions to target prior review risks:
+  - `where` branch-selection test with `NaN` values in non-selected branches.
+  - Nonlinear multi-step training test using `relu(matmul(...))` to ensure gradient flow through `where`/comparison/relu across optimization steps.
+- Extended CPU C backend call dispatch arity support to 10 input buffers, which is needed for larger fused expressions produced by native `where` + training graphs.
+
+## Codex round 21 decisions
+
+- Added explicit `cast` support across tensor graph and expression IR:
+  - New tensor node `Cast (dtype, x)` and expression node `Uop.Cast (dtype, x)`.
+  - New `Tensor.cast ~dtype` API with support for `Dtype.F32`, `Dtype.I32`, and `Dtype.Bool`.
+- Implemented backend renderer lowering for cast on CPU/CUDA/Metal:
+  - `F32`: identity,
+  - `I32`: truncating cast (via `int` conversion then back to float storage),
+  - `Bool`: `0/1` mask from nonzero test.
+- Added autograd rules for cast:
+  - `cast -> F32` passes upstream gradient through unchanged.
+  - `cast -> I32` and `cast -> Bool` are treated as non-differentiable (zero gradient).
+- Added CPU regression coverage for cast forward/backward semantics:
+  - Forward checks for `I32`, `Bool`, and `F32`.
+  - Backward checks that only `cast(F32)` propagates gradient.
