@@ -1987,7 +1987,185 @@ let test_metal_softmax_ce () =
   let dsum = List.fold_left ( +. ) 0.0 dv in
   check_float "metal CE grad sum≈0" dsum 0.0 1e-3
 
-(* ---- Test 51: CUDA backend registration ---- *)
+(* ---- Test 51: Sigmoid, Tanh, Abs, Sign, Clamp ---- *)
+let test_activations () =
+  Schedule.reset ();
+  Printf.printf "\n=== Activations (sigmoid/tanh/abs/sign/clamp) ===\n%!";
+  let open Tensor in
+  let x = from_float_list [4] [-2.0; -0.5; 0.0; 1.0] in
+  (* Sigmoid: 1 / (1 + exp(-x)) *)
+  let s = sigmoid x in
+  let sv = to_float_list s in
+  let expected_sig = [1.0 /. (1.0 +. Stdlib.exp 2.0);
+                      1.0 /. (1.0 +. Stdlib.exp 0.5);
+                      0.5;
+                      1.0 /. (1.0 +. Stdlib.exp (-1.0))] in
+  List.iteri (fun i v ->
+    check_float (Printf.sprintf "sigmoid[%d]" i) v (List.nth expected_sig i) 1e-4
+  ) sv;
+  (* Tanh: 2*sigmoid(2x) - 1 *)
+  Schedule.reset ();
+  let x2 = from_float_list [3] [-1.0; 0.0; 1.0] in
+  let th = tanh_ x2 in
+  let tv = to_float_list th in
+  List.iteri (fun i v ->
+    let expected = Stdlib.Float.tanh (List.nth [-1.0; 0.0; 1.0] i) in
+    check_float (Printf.sprintf "tanh[%d]" i) v expected 1e-4
+  ) tv;
+  (* Abs *)
+  Schedule.reset ();
+  let x3 = from_float_list [4] [-3.0; -0.5; 0.0; 2.0] in
+  let a = abs_ x3 in
+  let av = to_float_list a in
+  let expected_abs = [3.0; 0.5; 0.0; 2.0] in
+  List.iteri (fun i v ->
+    check_float (Printf.sprintf "abs[%d]" i) v (List.nth expected_abs i) 1e-6
+  ) av;
+  (* Sign *)
+  Schedule.reset ();
+  let x4 = from_float_list [4] [-3.0; -0.5; 0.0; 2.0] in
+  let sg = sign x4 in
+  let sgv = to_float_list sg in
+  let expected_sign = [-1.0; -1.0; 0.0; 1.0] in
+  List.iteri (fun i v ->
+    check_float (Printf.sprintf "sign[%d]" i) v (List.nth expected_sign i) 1e-6
+  ) sgv;
+  (* Clamp *)
+  Schedule.reset ();
+  let x5 = from_float_list [4] [-3.0; 0.5; 1.5; 5.0] in
+  let cl = clamp ~min_val:0.0 ~max_val:2.0 x5 in
+  let clv = to_float_list cl in
+  let expected_cl = [0.0; 0.5; 1.5; 2.0] in
+  List.iteri (fun i v ->
+    check_float (Printf.sprintf "clamp[%d]" i) v (List.nth expected_cl i) 1e-6
+  ) clv
+
+(* ---- Test 52: ge/le/gt comparisons ---- *)
+let test_comparisons () =
+  Schedule.reset ();
+  Printf.printf "\n=== Comparisons (ge/le/gt) ===\n%!";
+  let open Tensor in
+  let a = from_float_list [4] [1.0; 2.0; 3.0; 4.0] in
+  let b = from_float_list [4] [2.0; 2.0; 1.0; 5.0] in
+  (* ge: a >= b → [0; 1; 1; 0] *)
+  let ge_r = cast Dtype.float32 (ge a b) in
+  let gev = to_float_list ge_r in
+  let expected_ge = [0.0; 1.0; 1.0; 0.0] in
+  List.iteri (fun i v ->
+    check_float (Printf.sprintf "ge[%d]" i) v (List.nth expected_ge i) 1e-6
+  ) gev;
+  (* le: a <= b → [1; 1; 0; 1] *)
+  Schedule.reset ();
+  let a2 = from_float_list [4] [1.0; 2.0; 3.0; 4.0] in
+  let b2 = from_float_list [4] [2.0; 2.0; 1.0; 5.0] in
+  let le_r = cast Dtype.float32 (le a2 b2) in
+  let lev = to_float_list le_r in
+  let expected_le = [1.0; 1.0; 0.0; 1.0] in
+  List.iteri (fun i v ->
+    check_float (Printf.sprintf "le[%d]" i) v (List.nth expected_le i) 1e-6
+  ) lev;
+  (* gt: a > b → [0; 0; 1; 0] *)
+  Schedule.reset ();
+  let a3 = from_float_list [4] [1.0; 2.0; 3.0; 4.0] in
+  let b3 = from_float_list [4] [2.0; 2.0; 1.0; 5.0] in
+  let gt_r = cast Dtype.float32 (gt a3 b3) in
+  let gtv = to_float_list gt_r in
+  let expected_gt = [0.0; 0.0; 1.0; 0.0] in
+  List.iteri (fun i v ->
+    check_float (Printf.sprintf "gt[%d]" i) v (List.nth expected_gt i) 1e-6
+  ) gtv
+
+(* ---- Test 53: Variance and Std ---- *)
+let test_var_std () =
+  Schedule.reset ();
+  Printf.printf "\n=== Variance and Std ===\n%!";
+  let open Tensor in
+  (* var([1,2,3,4], correction=1) = 5/3 ≈ 1.6667 *)
+  let x = from_float_list [4] [1.0; 2.0; 3.0; 4.0] in
+  let v = var x in
+  let vv = to_float_list v in
+  check_float "var([1,2,3,4])" (List.hd vv) (5.0 /. 3.0) 1e-4;
+  (* var with correction=0 (population) = 5/4 = 1.25 *)
+  Schedule.reset ();
+  let x2 = from_float_list [4] [1.0; 2.0; 3.0; 4.0] in
+  let v2 = var ~correction:0 x2 in
+  let vv2 = to_float_list v2 in
+  check_float "var_pop([1,2,3,4])" (List.hd vv2) 1.25 1e-4;
+  (* std = sqrt(var) *)
+  Schedule.reset ();
+  let x3 = from_float_list [4] [1.0; 2.0; 3.0; 4.0] in
+  let s = std x3 in
+  let sv = to_float_list s in
+  check_float "std([1,2,3,4])" (List.hd sv) (Stdlib.sqrt (5.0 /. 3.0)) 1e-4;
+  (* Per-row variance: [[1,2],[3,4]] var along axis=1 *)
+  Schedule.reset ();
+  let x4 = from_float_list [2; 2] [1.0; 2.0; 3.0; 4.0] in
+  let v4 = var ~axes:[1] x4 in
+  let vv4 = to_float_list v4 in
+  (* var([1,2], ddof=1) = 0.5, var([3,4], ddof=1) = 0.5 *)
+  check_float "var row0" (List.nth vv4 0) 0.5 1e-4;
+  check_float "var row1" (List.nth vv4 1) 0.5 1e-4
+
+(* ---- Test 54: Concatenation ---- *)
+let test_cat () =
+  Schedule.reset ();
+  Printf.printf "\n=== Concatenation ===\n%!";
+  let open Tensor in
+  (* cat([1,2], [3,4], axis=0) → [1,2,3,4] *)
+  let a = from_float_list [2] [1.0; 2.0] in
+  let b = from_float_list [2] [3.0; 4.0] in
+  let c = cat [a; b] in
+  let cv = to_float_list c in
+  check "cat shape" (c.shape = [4]);
+  let expected = [1.0; 2.0; 3.0; 4.0] in
+  List.iteri (fun i v ->
+    check_float (Printf.sprintf "cat[%d]" i) v (List.nth expected i) 1e-6
+  ) cv;
+  (* cat along axis=1: [[1,2],[3,4]] ++ [[5],[6]] → [[1,2,5],[3,4,6]] *)
+  Schedule.reset ();
+  let m1 = from_float_list [2; 2] [1.0; 2.0; 3.0; 4.0] in
+  let m2 = from_float_list [2; 1] [5.0; 6.0] in
+  let m3 = cat ~axis:1 [m1; m2] in
+  let mv = to_float_list m3 in
+  check "cat2d shape" (m3.shape = [2; 3]);
+  let expected2 = [1.0; 2.0; 5.0; 3.0; 4.0; 6.0] in
+  List.iteri (fun i v ->
+    check_float (Printf.sprintf "cat2d[%d]" i) v (List.nth expected2 i) 1e-6
+  ) mv;
+  (* cat 3 tensors *)
+  Schedule.reset ();
+  let t1 = from_float_list [1] [10.0] in
+  let t2 = from_float_list [2] [20.0; 30.0] in
+  let t3 = from_float_list [1] [40.0] in
+  let t4 = cat [t1; t2; t3] in
+  let tv = to_float_list t4 in
+  check "cat3 shape" (t4.shape = [4]);
+  let expected3 = [10.0; 20.0; 30.0; 40.0] in
+  List.iteri (fun i v ->
+    check_float (Printf.sprintf "cat3[%d]" i) v (List.nth expected3 i) 1e-6
+  ) tv
+
+(* ---- Test 55: Sigmoid backward ---- *)
+let test_sigmoid_backward () =
+  Schedule.reset ();
+  Printf.printf "\n=== Sigmoid Backward ===\n%!";
+  let open Tensor in
+  (* sigmoid'(x) = sigmoid(x) * (1 - sigmoid(x)) *)
+  let x = from_float_list [3] [0.0; 1.0; -1.0] in
+  let s = sigmoid x in
+  let loss = sum s in
+  let grads = backward loss [x] in
+  let (_, grad) = List.hd grads in
+  let gv = to_float_list grad in
+  let xv = [0.0; 1.0; -1.0] in
+  List.iteri (fun i g ->
+    let xi = List.nth xv i in
+    let si = 1.0 /. (1.0 +. Stdlib.exp (-. xi)) in
+    let expected = si *. (1.0 -. si) in
+    check_float (Printf.sprintf "sigmoid_grad[%d]" i) g expected 1e-4
+  ) gv
+
+(* ---- Test 56: CUDA backend registration ---- *)
 let test_cuda_backend () =
   Printf.printf "\n=== CUDA Backend ===\n%!";
   (* Verify CUDA backend is recognized and returns a module *)
@@ -2335,6 +2513,11 @@ let () =
   run_test "cross_entropy_shape_error" test_cross_entropy_shape_error;
   run_test "metal_matmul_backward" test_metal_matmul_backward;
   run_test "metal_softmax_ce" test_metal_softmax_ce;
+  run_test "activations" test_activations;
+  run_test "comparisons" test_comparisons;
+  run_test "var_std" test_var_std;
+  run_test "cat" test_cat;
+  run_test "sigmoid_backward" test_sigmoid_backward;
   run_test "cuda_backend" test_cuda_backend;
   Printf.printf "\n============================\n%!";
   Printf.printf "Results: %d passed, %d failed\n%!" !pass_count !fail_count;

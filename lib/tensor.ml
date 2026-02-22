@@ -112,6 +112,16 @@ let where_ cond t f =
   let uop = Uop.where_ cond.uop t.uop f.uop in
   { t with uop; lazy_uop = None }
 
+(** ge/le/gt derived from lt: a>=b is !(a<b), i.e. where(a<b, 0, 1) *)
+let ge a b =
+  let cond = lt a b in
+  let one = full ~device:a.device ~dtype:Dtype.bool a.shape 1.0 in
+  let zero = full ~device:a.device ~dtype:Dtype.bool a.shape 0.0 in
+  where_ cond zero one
+
+let le a b = ge b a
+let gt a b = lt b a
+
 (** Scalar constant broadcast to tensor shape *)
 let const_like (t : t) (v : float) =
   full ~device:t.device ~dtype:t.dtype t.shape v
@@ -189,6 +199,55 @@ let mean ?(axes=[]) (t : t) =
   let n_inv = const_like s (1.0 /. Float.of_int n) in
   mul s n_inv
 
+(** Variance along axes: var(x) = mean((x - mean(x))^2).
+    [correction] defaults to 1 (Bessel's correction for unbiased estimate). *)
+let var ?(axes=[]) ?(correction=1) (t : t) =
+  let axes = if axes = [] then List.init (List.length t.shape) Fun.id else axes in
+  let m = expand (mean ~axes t) t.shape in
+  let diff = sub t m in
+  let sq = mul diff diff in
+  let s = sum ~axes sq in
+  let n = List.fold_left (fun acc i -> acc * List.nth t.shape i) 1 axes in
+  let denom = const_like s (1.0 /. Float.of_int (n - correction)) in
+  mul s denom
+
+(** Standard deviation along axes: std(x) = sqrt(var(x)) *)
+let std ?(axes=[]) ?(correction=1) (t : t) =
+  sqrt_ (var ~axes ~correction t)
+
+(** Concatenate tensors along an axis *)
+let cat ?(axis=0) (tensors : t list) =
+  match tensors with
+  | [] -> failwith "Tensor.cat: empty list"
+  | [t] -> t
+  | first :: _ ->
+    let ndim = List.length first.shape in
+    let axis = if axis < 0 then ndim + axis else axis in
+    (* Validate: all tensors same shape except along cat axis *)
+    List.iter (fun (t : t) ->
+      if List.length t.shape <> ndim then
+        failwith "Tensor.cat: all tensors must have same number of dimensions";
+      List.iteri (fun i s ->
+        if i <> axis && s <> List.nth first.shape i then
+          failwith (Printf.sprintf "Tensor.cat: shape mismatch at dim %d" i)
+      ) t.shape
+    ) tensors;
+    let total_size = List.fold_left (fun acc (t : t) -> acc + List.nth t.shape axis) 0 tensors in
+    let out_shape = List.mapi (fun i s -> if i = axis then total_size else s) first.shape in
+    (* Pad each tensor to the output shape and add them together *)
+    let _offset = ref 0 in
+    let padded = List.map (fun (t : t) ->
+      let dim_size = List.nth t.shape axis in
+      let padding = List.mapi (fun i _s ->
+        if i = axis then (!_offset, total_size - !_offset - dim_size)
+        else (0, 0)
+      ) t.shape in
+      _offset := !_offset + dim_size;
+      pad t padding
+    ) tensors in
+    let result = List.fold_left add (List.hd padded) (List.tl padded) in
+    { result with shape = out_shape }
+
 (** Detach: stops gradient flow through this tensor.
     The value passes through unchanged, but backward treats it as a leaf. *)
 let detach (t : t) =
@@ -264,11 +323,45 @@ let relu (t : t) =
   let cond = lt zero t in  (* 0 < x *)
   where_ cond t zero
 
-(** Contiguous: marks a tensor for contiguous storage *)
-let contiguous (t : t) : t =
-  let uop = Uop.contiguous t.uop in
-  { t with uop; lazy_uop = None }
-[@@warning "-32"]
+(** Sigmoid activation: 1 / (1 + exp(-x)).
+    Implemented as exp2(x * (1/ln2)) based formula for numerical stability. *)
+let sigmoid (t : t) =
+  let one = const_like t 1.0 in
+  div one (add one (exp (neg_ t)))
+
+(** Tanh activation: tanh(x) = 2*sigmoid(2x) - 1 *)
+let tanh_ (t : t) =
+  let two = const_like t 2.0 in
+  let one = const_like t 1.0 in
+  sub (mul two (sigmoid (mul two t))) one
+
+(** Absolute value: abs(x) = where(x >= 0, x, -x) *)
+let abs_ (t : t) =
+  let zero = zeros ~device:t.device ~dtype:t.dtype t.shape in
+  let cond = lt t zero in  (* x < 0 *)
+  where_ cond (neg_ t) t
+
+(** Sign: sign(x) = where(x > 0, 1, where(x < 0, -1, 0)) *)
+let sign (t : t) =
+  let zero = zeros ~device:t.device ~dtype:t.dtype t.shape in
+  let one = const_like t 1.0 in
+  let neg_one = const_like t (-1.0) in
+  let pos = lt zero t in  (* 0 < x, i.e. x > 0 *)
+  let neg = lt t zero in  (* x < 0 *)
+  where_ pos one (where_ neg neg_one zero)
+
+(** Clamp: clamp(x, min, max) = max(min, min(x, max_val)) *)
+let clamp ?(min_val= Float.neg_infinity) ?(max_val= Float.infinity) (t : t) =
+  let result = if max_val < Float.infinity then
+    let mx = const_like t max_val in
+    let cond = lt mx t in  (* max < x, i.e. x > max *)
+    where_ cond mx t
+  else t in
+  if min_val > Float.neg_infinity then
+    let mn = const_like result min_val in
+    let cond = lt result mn in  (* x < min *)
+    where_ cond mn result
+  else result
 
 (** Realize: trigger computation.
     This is where lazy evaluation ends and actual work begins.
@@ -361,9 +454,10 @@ let contiguous (t : t) : t =
   { t with uop; lazy_uop = None }
 
 (** One-hot encoding: indices [batch] → one_hot [batch; num_classes] *)
-let one_hot ?(device="CPU") ?(dtype=Dtype.float32) ~num_classes (indices : t) : t =
+let one_hot ?device ?(dtype=Dtype.float32) ~num_classes (indices : t) : t =
   (* indices shape must be 1-D *)
   assert (List.length indices.shape = 1);
+  let device = match device with Some d -> d | None -> indices.device in
   let batch = List.hd indices.shape in
   (* Create class indices: [0, 1, ..., num_classes-1] expanded to [batch, num_classes] *)
   let cls = arange ~device ~dtype num_classes in
