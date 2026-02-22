@@ -3050,7 +3050,116 @@ let test_embedding_validation () =
   let caught_neg = try
     ignore (Nn.embedding_forward emb3 neg_idx); false
   with Invalid_argument _ -> true in
-  check "emb_neg caught" caught_neg
+  check "emb_neg caught" caught_neg;
+  (* Fractional index should be caught *)
+  Schedule.reset ();
+  let emb4 = Nn.embedding ~num_embeddings:5 ~embedding_dim:3 () in
+  let frac_idx = from_float_list [2] [1.5; 2.0] in
+  let caught_frac = try
+    ignore (Nn.embedding_forward emb4 frac_idx); false
+  with Invalid_argument _ -> true in
+  check "emb_frac caught" caught_frac
+
+(* ---- Test 92: Tensor.stack ---- *)
+let test_stack () =
+  Printf.printf "\n=== Tensor Stack ===\n%!";
+  let open Tensor in
+  Schedule.reset ();
+  let a = from_float_list [3] [1.0; 2.0; 3.0] in
+  let b = from_float_list [3] [4.0; 5.0; 6.0] in
+  let s = stack [a; b] in  (* default axis=0 *)
+  check "stack shape" (s.shape = [2; 3]);
+  let sv = to_float_list s in
+  check "stack[0,0]=1" (Float.abs (List.nth sv 0 -. 1.0) < 1e-6);
+  check "stack[0,2]=3" (Float.abs (List.nth sv 2 -. 3.0) < 1e-6);
+  check "stack[1,0]=4" (Float.abs (List.nth sv 3 -. 4.0) < 1e-6);
+  check "stack[1,2]=6" (Float.abs (List.nth sv 5 -. 6.0) < 1e-6);
+  (* Stack along axis 1 *)
+  Schedule.reset ();
+  let c = from_float_list [2] [10.0; 20.0] in
+  let d = from_float_list [2] [30.0; 40.0] in
+  let e = from_float_list [2] [50.0; 60.0] in
+  let s2 = stack ~axis:1 [c; d; e] in
+  check "stack1 shape" (s2.shape = [2; 3]);
+  let s2v = to_float_list s2 in
+  check "stack1[0,0]=10" (Float.abs (List.nth s2v 0 -. 10.0) < 1e-6);
+  check "stack1[0,1]=30" (Float.abs (List.nth s2v 1 -. 30.0) < 1e-6);
+  check "stack1[0,2]=50" (Float.abs (List.nth s2v 2 -. 50.0) < 1e-6);
+  check "stack1[1,0]=20" (Float.abs (List.nth s2v 3 -. 20.0) < 1e-6)
+
+(* ---- Test 93: Nn.LayerNorm layer ---- *)
+let test_nn_layer_norm () =
+  Printf.printf "\n=== Nn.LayerNorm ===\n%!";
+  let open Tensor in
+  Schedule.reset ();
+  (* Simple 1-D: normalize [4] features *)
+  let ln = Nn.layer_norm [4] in
+  check "ln 2 params" (List.length (Nn.layer_norm_params ln) = 2);
+  (* Input with known mean=2.5, var=1.25 *)
+  let x = from_float_list [1; 4] [1.0; 2.0; 3.0; 4.0] in
+  let y = Nn.layer_norm_forward ln x in
+  check "ln shape" (y.shape = [1; 4]);
+  let yv = to_float_list y in
+  check "ln finite" (List.for_all Float.is_finite yv);
+  (* After normalization, output should be ~zero mean *)
+  let mean_out = List.fold_left ( +. ) 0.0 yv /. 4.0 in
+  check "ln mean≈0" (Float.abs mean_out < 0.1);
+  (* First element should be negative (below mean), last positive *)
+  check "ln[0]<0" (List.nth yv 0 < 0.0);
+  check "ln[3]>0" (List.nth yv 3 > 0.0);
+  (* 2-D batch: [2; 4], normalize over last dim *)
+  Schedule.reset ();
+  let ln2 = Nn.layer_norm [4] in
+  let x2 = from_float_list [2; 4] [1.0; 2.0; 3.0; 4.0; 10.0; 20.0; 30.0; 40.0] in
+  let y2 = Nn.layer_norm_forward ln2 x2 in
+  check "ln2 shape" (y2.shape = [2; 4]);
+  let y2v = to_float_list y2 in
+  check "ln2 finite" (List.for_all Float.is_finite y2v);
+  (* Both rows should be independently normalized *)
+  let row1_mean = (List.nth y2v 0 +. List.nth y2v 1 +. List.nth y2v 2 +. List.nth y2v 3) /. 4.0 in
+  let row2_mean = (List.nth y2v 4 +. List.nth y2v 5 +. List.nth y2v 6 +. List.nth y2v 7) /. 4.0 in
+  check "ln2 row1 mean≈0" (Float.abs row1_mean < 0.1);
+  check "ln2 row2 mean≈0" (Float.abs row2_mean < 0.1)
+
+(* ---- Test 94: Training with grad clipping + LR scheduling ---- *)
+let test_training_advanced () =
+  Printf.printf "\n=== Advanced Training (grad clip + LR sched) ===\n%!";
+  let open Tensor in
+  (* Train y = 3x + 2 with gradient clipping and step LR decay *)
+  let sched = ref (Nn.lr_scheduler_init 0.1) in
+  let wv = ref [0.0] in
+  let bv = ref [0.0] in
+  for step = 1 to 15 do
+    Schedule.reset ();
+    let x = from_float_list [4] [1.0; 2.0; 3.0; 4.0] in
+    let target = from_float_list [4] [5.0; 8.0; 11.0; 14.0] in
+    let wt = from_float_list [1] !wv in
+    let bt = from_float_list [1] !bv in
+    let pred = add (mul x wt) bt in
+    let diff = sub pred target in
+    let loss = mean (mul diff diff) in
+    let grads = backward loss [wt; bt] in
+    (* Clip gradients by norm *)
+    let (clipped, _norm) = Nn.clip_grad_norm ~max_norm:5.0 grads in
+    (* Update with scheduled LR *)
+    let lr = (!sched).current_lr in
+    let updated = Nn.sgd_step ~lr clipped in
+    List.iter (fun (param, new_val) ->
+      let nv = to_float_list new_val in
+      if param == wt then wv := nv
+      else if param == bt then bv := nv
+    ) updated;
+    (* Step LR scheduler every 5 steps *)
+    if step mod 5 = 0 then
+      sched := Nn.lr_step_decay ~step_size:1 ~gamma:0.5 !sched;
+    ignore step
+  done;
+  let w_final = List.hd !wv and b_final = List.hd !bv in
+  Printf.printf "  trained: w=%.3f b=%.3f (target: w=3.0 b=2.0)\n%!" w_final b_final;
+  (* After 15 steps with grad clipping, should be moving toward w=3, b=2 *)
+  check "adv_train w>1" (w_final > 1.0);
+  check "adv_train b>0" (b_final > 0.0);
+  check "adv_train w<5" (w_final < 5.0)
 
 (* ---- Test 89: Gradient clipping ---- *)
 let test_grad_clipping () =
@@ -3539,6 +3648,9 @@ let () =
   run_test "nn_self_attention" test_nn_self_attention;
   run_test "attention_full" test_attention_full;
   run_test "embedding_validation" test_embedding_validation;
+  run_test "stack" test_stack;
+  run_test "nn_layer_norm" test_nn_layer_norm;
+  run_test "training_advanced" test_training_advanced;
   run_test "grad_clipping" test_grad_clipping;
   run_test "lr_schedulers" test_lr_schedulers;
   run_test "model_save_load" test_model_save_load;

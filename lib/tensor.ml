@@ -703,6 +703,30 @@ let chunk ?(axis=0) (t : t) (n : int) : t list =
   let sizes = List.init n (fun i -> if i < remainder then base + 1 else base) in
   split ~axis t sizes
 
+(** Stack tensors along a new axis.
+    All tensors must have identical shapes. The result has one more dimension. *)
+let stack ?(axis=0) (tensors : t list) : t =
+  if tensors = [] then invalid_arg "Tensor.stack: empty tensor list";
+  let first = List.hd tensors in
+  let ndim = List.length first.shape in
+  let axis = if axis < 0 then ndim + 1 + axis else axis in
+  if axis < 0 || axis > ndim then
+    invalid_arg (Printf.sprintf "Tensor.stack: axis %d out of range for %d dims" axis ndim);
+  List.iter (fun (t : t) ->
+    if t.shape <> first.shape then
+      invalid_arg "Tensor.stack: all tensors must have identical shapes"
+  ) tensors;
+  (* Insert size-1 dimension at axis, then concatenate *)
+  let expanded = List.map (fun (t : t) ->
+    let new_shape = List.init (ndim + 1) (fun i ->
+      if i < axis then List.nth t.shape i
+      else if i = axis then 1
+      else List.nth t.shape (i - 1)
+    ) in
+    reshape t new_shape
+  ) tensors in
+  cat ~axis expanded
+
 (** Binary cross-entropy loss: -mean(target*log(pred) + (1-target)*log(1-pred)).
     Note: requires exact shape match between pred and target (no implicit broadcasting).
     This is intentional — accidental broadcasting in losses can mask shape bugs. *)
