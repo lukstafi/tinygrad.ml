@@ -39,6 +39,13 @@ let next_id = ref 0
     not GC'd during a computation anyway. *)
 let cache : (Ops.t * int * int list * int, t) Hashtbl.t = Hashtbl.create 4096
 
+(** Reset the UOp ID counter and hash-consing cache.
+    Call between independent computations (e.g. training steps) to prevent
+    unbounded ID growth that causes renderer lookup failures. *)
+let reset () =
+  next_id := 0;
+  Hashtbl.clear cache
+
 (** Hash an arg deterministically *)
 let hash_arg = function
   | No_arg -> 0

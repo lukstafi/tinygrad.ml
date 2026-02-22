@@ -2639,7 +2639,68 @@ let test_nn_backward () =
   ) grads in
   check "nn_grads has nonzero" has_nonzero
 
-(* ---- Test 74: CUDA backend registration ---- *)
+(* ---- Test 74: Multi-step SGD training loop ---- *)
+let test_training_loop () =
+  Schedule.reset ();
+  Printf.printf "\n=== Multi-Step Training Loop ===\n%!";
+  let open Tensor in
+  Random.init 42;
+  (* Train a linear model to fit y = 2*x + 1 with SGD over 20 steps.
+     Each step: build graph, realize, extract floats, reset, create new params. *)
+  let wv = ref [0.0] in
+  let bv = ref [0.0] in
+  let lr = 0.1 in
+  let first_loss = ref 0.0 in
+  let last_loss = ref 0.0 in
+  for step = 0 to 19 do
+    Schedule.reset ();
+    (* Re-create tensors from float values each step (clean UOp graph) *)
+    let w = from_float_list [1] !wv in
+    let b_param = from_float_list [1] !bv in
+    let x = from_float_list [4] [1.0; 2.0; 3.0; 4.0] in
+    let y_true = from_float_list [4] [3.0; 5.0; 7.0; 9.0] in
+    (* Forward: pred = x * w + b (broadcast [1] to [4]) *)
+    let pred = add (mul x w) b_param in
+    let diff = sub pred y_true in
+    let loss = mean (mul diff diff) in
+    let grads = backward loss [w; b_param] in
+    let loss_val = List.hd (to_float_list loss) in
+    if step = 0 then first_loss := loss_val;
+    if step = 19 then last_loss := loss_val;
+    (* Extract gradient values and update *)
+    List.iter (fun (param, grad) ->
+      let pv = to_float_list param in
+      let gv = to_float_list grad in
+      let new_data = List.map2 (fun p g -> p -. lr *. g) pv gv in
+      if param == w then wv := new_data
+      else bv := new_data
+    ) grads
+  done;
+  check "train loss decreased" (!last_loss < !first_loss);
+  check "train loss < 1.0" (!last_loss < 1.0);
+  check "train w≈2" (Float.abs (List.hd !wv -. 2.0) < 0.5);
+  check "train b≈1" (Float.abs (List.hd !bv -. 1.0) < 0.5)
+
+(* ---- Test 75: Loss shape validation ---- *)
+let test_loss_validation () =
+  Schedule.reset ();
+  Printf.printf "\n=== Loss Shape Validation ===\n%!";
+  let open Tensor in
+  let a = from_float_list [2; 3] [1.0; 2.0; 3.0; 4.0; 5.0; 6.0] in
+  let b = from_float_list [3] [1.0; 2.0; 3.0] in
+  (* MSE should reject shape mismatch *)
+  (try ignore (mse_loss a b); check "mse rejects shape mismatch" false
+   with Invalid_argument _ -> check "mse rejects shape mismatch" true);
+  (* BCE should reject shape mismatch *)
+  (try ignore (binary_cross_entropy a b); check "bce rejects shape mismatch" false
+   with Invalid_argument _ -> check "bce rejects shape mismatch" true);
+  (* Broadcast error should be Invalid_argument *)
+  let c = from_float_list [2] [1.0; 2.0] in
+  let d = from_float_list [3] [1.0; 2.0; 3.0] in
+  (try ignore (add c d); check "broadcast Invalid_argument" false
+   with Invalid_argument _ -> check "broadcast Invalid_argument" true)
+
+(* ---- Test 76: CUDA backend registration ---- *)
 let test_cuda_backend () =
   Printf.printf "\n=== CUDA Backend ===\n%!";
   (* Verify CUDA backend is recognized and returns a module *)
@@ -3010,6 +3071,8 @@ let () =
   run_test "randn_like" test_randn_like;
   run_test "adam" test_adam;
   run_test "nn_backward" test_nn_backward;
+  run_test "training_loop" test_training_loop;
+  run_test "loss_validation" test_loss_validation;
   run_test "cuda_backend" test_cuda_backend;
   Printf.printf "\n============================\n%!";
   Printf.printf "Results: %d passed, %d failed\n%!" !pass_count !fail_count;

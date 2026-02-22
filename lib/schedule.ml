@@ -74,6 +74,7 @@ let reset () =
   Hashtbl.clear realized_buffers;
   Hashtbl.clear realized_shapes;
   kernel_counter := 0;
+  Uop.reset ();
   List.iter (fun f -> f ()) !reset_hooks
 
 (** Compute a broadcast-aware index UOp for loading from a buffer with
