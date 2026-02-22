@@ -2854,7 +2854,54 @@ let test_gelu_backward () =
   check "gelu_grad[1] finite" (Float.is_finite (List.nth gv 1));
   check "gelu_grad[2] finite" (Float.is_finite (List.nth gv 2))
 
-(* ---- Test 81: CUDA backend registration ---- *)
+(* ---- Test 81: Nn.BatchNorm ---- *)
+let test_nn_batch_norm () =
+  Schedule.reset ();
+  Printf.printf "\n=== Nn.BatchNorm ===\n%!";
+  let open Tensor in
+  (* Create a BatchNorm for 3 features with known running stats *)
+  let bn = Nn.batch_norm ~eps:1e-5 3 in
+  (* Set running_mean = [1, 2, 3], running_var = [1, 1, 1] *)
+  bn.running_mean.(0) <- 1.0; bn.running_mean.(1) <- 2.0; bn.running_mean.(2) <- 3.0;
+  bn.running_var.(0) <- 1.0; bn.running_var.(1) <- 1.0; bn.running_var.(2) <- 1.0;
+  (* Input: [2; 3] — 2 samples, 3 features (no spatial dims) *)
+  let x = from_float_list [2; 3] [1.0; 2.0; 3.0; 4.0; 5.0; 6.0] in
+  let out = Nn.batch_norm_forward bn x in
+  let ov = to_float_list out in
+  (* (x - mean) / sqrt(var + eps) * weight + bias *)
+  (* weight=1, bias=0 by default *)
+  (* [0]: (1-1)/sqrt(1+1e-5) ≈ 0 *)
+  check "bn[0]≈0" (Float.abs (List.nth ov 0) < 0.01);
+  (* [1]: (2-2)/sqrt(1+1e-5) ≈ 0 *)
+  check "bn[1]≈0" (Float.abs (List.nth ov 1) < 0.01);
+  (* [3]: (4-1)/sqrt(1+1e-5) ≈ 3 *)
+  check "bn[3]≈3" (Float.abs (List.nth ov 3 -. 3.0) < 0.01);
+  (* [4]: (5-2)/sqrt(1+1e-5) ≈ 3 *)
+  check "bn[4]≈3" (Float.abs (List.nth ov 4 -. 3.0) < 0.01);
+  (* Params: weight and bias *)
+  let params = Nn.batch_norm_params bn in
+  check "bn 2 params" (List.length params = 2)
+
+(* ---- Test 82a: Nn.Embedding ---- *)
+let test_nn_embedding () =
+  Schedule.reset ();
+  Printf.printf "\n=== Nn.Embedding ===\n%!";
+  let open Tensor in
+  Random.init 99;
+  (* 5 embeddings of dim 3 *)
+  let emb = Nn.embedding ~num_embeddings:5 ~embedding_dim:3 () in
+  (* Look up indices [0, 2, 4] *)
+  let idx = from_float_list [3] [0.0; 2.0; 4.0] in
+  let out = Nn.embedding_forward emb idx in
+  check "emb out shape" (out.shape = [3; 3]);
+  let ov = to_float_list out in
+  check "emb out finite" (List.for_all Float.is_finite ov);
+  check "emb out len" (List.length ov = 9);
+  (* Params *)
+  let params = Nn.embedding_params emb in
+  check "emb 1 param" (List.length params = 1)
+
+(* ---- Test 83: CUDA backend registration ---- *)
 let test_cuda_backend () =
   Printf.printf "\n=== CUDA Backend ===\n%!";
   (* Verify CUDA backend is recognized and returns a module *)
@@ -2874,6 +2921,18 @@ let test_cuda_backend () =
   check "cuda src has __global__" (String.length pspec.src > 0
     && (try ignore (Str.search_forward (Str.regexp_string "__global__") pspec.src 0); true with Not_found -> false));
   check "cuda src has extern C" (try ignore (Str.search_forward (Str.regexp_string {|extern "C"|}) pspec.src 0); true with Not_found -> false)
+
+(* ---- Test 82: Backend availability semantics ---- *)
+let test_backend_availability () =
+  Printf.printf "\n=== Backend Availability ===\n%!";
+  (* CPU is always available *)
+  check "cpu available" (Device.is_available "CPU");
+  (* Metal: available iff the metal package was selected *)
+  check "metal available" (Device.is_available "METAL" = Metal_device.is_available);
+  (* CUDA: not available since cudajit placeholder stubs are non-operational *)
+  check "cuda not available" (not (Device.is_available "CUDA"));
+  (* Unknown device: not available *)
+  check "unknown not available" (not (Device.is_available "TPU"))
 
 (* ---- Test 46: PAD(PERMUTE(x)) composed movement ops ---- *)
 let test_pad_permute () =
@@ -3232,7 +3291,10 @@ let () =
   run_test "creation_advanced" test_creation_advanced;
   run_test "split_chunk" test_split_chunk;
   run_test "gelu_backward" test_gelu_backward;
+  run_test "nn_batch_norm" test_nn_batch_norm;
+  run_test "nn_embedding" test_nn_embedding;
   run_test "cuda_backend" test_cuda_backend;
+  run_test "backend_availability" test_backend_availability;
   Printf.printf "\n============================\n%!";
   Printf.printf "Results: %d passed, %d failed\n%!" !pass_count !fail_count;
   if !fail_count > 0 then exit 1

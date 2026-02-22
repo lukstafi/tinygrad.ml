@@ -71,6 +71,86 @@ let sgd_step ~lr (grads : (Tensor.t * Tensor.t) list) : (Tensor.t * Tensor.t) li
     (param, new_t)
   ) grads
 
+(** Batch normalization layer.
+    During eval: y = (x - running_mean) / sqrt(running_var + eps) * weight + bias
+    During training (simplified): uses batch statistics. *)
+type batch_norm = {
+  weight: Tensor.t;         (** Scale (gamma), shape [num_features] *)
+  bn_bias: Tensor.t;        (** Shift (beta), shape [num_features] *)
+  running_mean: float array; (** Running mean for eval mode *)
+  running_var: float array;  (** Running var for eval mode *)
+  num_features: int;
+  eps: float;
+  momentum: float;
+}
+
+(** Create a BatchNorm layer *)
+let batch_norm ?(device="CPU") ?(dtype=Dtype.float32) ?(eps=1e-5) ?(momentum=0.1) num_features =
+  { weight = Tensor.ones ~device ~dtype [num_features];
+    bn_bias = Tensor.zeros ~device ~dtype [num_features];
+    running_mean = Array.make num_features 0.0;
+    running_var = Array.make num_features 1.0;
+    num_features; eps; momentum }
+
+(** Forward pass for batch normalization (eval mode).
+    Input x: [batch; channels; ...], normalizes over all dims except dim 1. *)
+let batch_norm_forward (bn : batch_norm) (x : Tensor.t) : Tensor.t =
+  let ndim = List.length x.shape in
+  if ndim < 2 then invalid_arg "BatchNorm: input must have at least 2 dimensions";
+  (* Use running statistics (eval mode) *)
+  let rm = Tensor.from_float_list ~device:x.device ~dtype:x.dtype
+    [bn.num_features] (Array.to_list bn.running_mean) in
+  let rv = Tensor.from_float_list ~device:x.device ~dtype:x.dtype
+    [bn.num_features] (Array.to_list bn.running_var) in
+  (* Reshape [C] → [1, C, 1, 1, ...] for broadcasting *)
+  let bc_shape = List.init ndim (fun i -> if i = 1 then bn.num_features else 1) in
+  let rm_bc = Tensor.reshape rm bc_shape in
+  let rv_bc = Tensor.reshape rv bc_shape in
+  let w_bc = Tensor.reshape bn.weight bc_shape in
+  let b_bc = Tensor.reshape bn.bn_bias bc_shape in
+  let eps_t = Tensor.const_like rv_bc bn.eps in
+  (* Normalize: (x - mean) / sqrt(var + eps) * weight + bias *)
+  let normed = Tensor.div (Tensor.sub x rm_bc) (Tensor.sqrt_ (Tensor.add rv_bc eps_t)) in
+  Tensor.add (Tensor.mul normed w_bc) b_bc
+
+(** Get trainable parameters from a batch_norm layer *)
+let batch_norm_params (bn : batch_norm) : Tensor.t list =
+  [bn.weight; bn.bn_bias]
+
+(** Wrap a batch_norm layer as a generic layer *)
+let of_batch_norm name (bn : batch_norm) : layer =
+  { name;
+    forward = batch_norm_forward bn;
+    params = (fun () -> batch_norm_params bn) }
+
+(** Embedding layer: maps integer indices to dense vectors.
+    weight shape: [num_embeddings; embedding_dim] *)
+type embedding = {
+  emb_weight: Tensor.t;
+  num_embeddings: int;
+  embedding_dim: int;
+}
+
+(** Create an embedding layer with random normal initialization *)
+let embedding ?(device="CPU") ?(dtype=Dtype.float32) ~num_embeddings ~embedding_dim () =
+  let w = Tensor.randn ~device ~dtype [num_embeddings; embedding_dim] in
+  { emb_weight = w; num_embeddings; embedding_dim }
+
+(** Forward pass: look up embeddings by index via one_hot @ weight.
+    Input: [batch] integer tensor → Output: [batch; embedding_dim] *)
+let embedding_forward (emb : embedding) (indices : Tensor.t) : Tensor.t =
+  let oh = Tensor.one_hot ~num_classes:emb.num_embeddings indices in
+  Tensor.matmul oh emb.emb_weight
+
+(** Get trainable parameters from an embedding layer *)
+let embedding_params (emb : embedding) : Tensor.t list = [emb.emb_weight]
+
+(** Wrap an embedding layer as a generic layer *)
+let of_embedding name (emb : embedding) : layer =
+  { name;
+    forward = embedding_forward emb;
+    params = (fun () -> embedding_params emb) }
+
 (** Adam optimizer state *)
 type adam_state = {
   m: float array;   (** First moment estimate *)

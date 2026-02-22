@@ -14,4 +14,4 @@ let copyout (_dst : (char, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarr
 let compile (_name : string) (_src : string) : string = _unavail ()
 let exec (_name : string) (_bin : string) (_ptrs : nativeint list) (_vals : int list) : unit = _unavail ()
 let synchronize () = ()
-let is_available = true
+let is_available = false  (* placeholder: set true once real CUDA bindings are implemented *)
