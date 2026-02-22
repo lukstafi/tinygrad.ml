@@ -569,12 +569,19 @@ let mish (t : t) =
   mul t (tanh_ (softplus t))
 
 (** Element-wise power: base ** exponent.
-    Implemented as exp2(exponent * log2(abs(base))), valid for positive base. *)
+    Uses exp(exponent * log(abs(base))) with sign correction: preserves the sign
+    of the base (negative bases produce negative results). This is exact for
+    integer exponents of negative bases but approximate for fractional exponents
+    of negative bases (returns -(|base|^exp) rather than NaN/complex). *)
 let pow_ (base : t) (exponent : t) =
   let out_shape = broadcast_shape base.shape exponent.shape in
   let base' = broadcast_to base out_shape in
   let exponent' = broadcast_to exponent out_shape in
-  exp (mul exponent' (log (abs_ base')))
+  let magnitude = exp (mul exponent' (log (abs_ base'))) in
+  (* Preserve sign: if base < 0, negate result *)
+  let zero = zeros ~device:base'.device ~dtype:base'.dtype out_shape in
+  let neg_base = lt base' zero in
+  where_ neg_base (neg_ magnitude) magnitude
 
 (** Scalar power: x ** p *)
 let pow_scalar (t : t) (p : float) =
@@ -669,6 +676,7 @@ let split ?(axis=0) (t : t) (sizes : int list) : t list =
 
 (** Chunk: split into n roughly-equal-sized chunks *)
 let chunk ?(axis=0) (t : t) (n : int) : t list =
+  if n <= 0 then invalid_arg (Printf.sprintf "Tensor.chunk: n must be > 0, got %d" n);
   let ndim = List.length t.shape in
   let axis = if axis < 0 then ndim + axis else axis in
   let dim_size = List.nth t.shape axis in
@@ -692,6 +700,33 @@ let binary_cross_entropy (pred : t) (target : t) =
   let term1 = mul target (log clamped) in
   let term2 = mul (sub one target) (log (sub (add one eps) clamped)) in
   neg_ (mean (add term1 term2))
+
+(** Scaled dot-product attention: softmax(Q @ K^T / sqrt(d_k)) @ V.
+    Q: [seq_q; d_k], K: [seq_k; d_k], V: [seq_k; d_v].
+    Optional mask: [seq_q; seq_k] with -inf for masked positions.
+    Returns: [seq_q; d_v]. *)
+let scaled_dot_product_attention ?mask (q : t) (k : t) (v : t) : t =
+  if List.length q.shape <> 2 || List.length k.shape <> 2 || List.length v.shape <> 2 then
+    invalid_arg "scaled_dot_product_attention: Q, K, V must be 2-D";
+  let d_k = List.nth q.shape 1 in
+  let kt = transpose k in
+  let raw_scores = matmul q kt in  (* [seq_q; seq_k] *)
+  let scale = const_like raw_scores (1.0 /. Stdlib.sqrt (Float.of_int d_k)) in
+  let scores = mul raw_scores scale in
+  let scores = match mask with
+    | Some m -> add scores m
+    | None -> scores in
+  let attn_weights = softmax ~axis:(-1) scores in
+  matmul attn_weights v
+
+(** Causal (lower-triangular) attention mask for sequence length [n].
+    Returns [n; n] tensor with 0 on/below diagonal and -1e9 above. *)
+let causal_mask ?(device="CPU") ?(dtype=Dtype.float32) (n : int) : t =
+  let data = List.init (n * n) (fun idx ->
+    let r = idx / n and c = idx mod n in
+    if c <= r then 0.0 else -1e9
+  ) in
+  from_float_list ~device ~dtype [n; n] data
 
 (** Dropout: randomly zero elements with probability [p] during training.
     Scales remaining values by 1/(1-p) to preserve expected value. *)

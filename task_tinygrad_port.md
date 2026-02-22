@@ -392,3 +392,11 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Nn.Embedding**: Lookup table layer. Forward uses one_hot @ weight for differentiable embedding retrieval. Supports arbitrary vocabulary size and embedding dimension.
 - **Nn layer wrappers**: `of_batch_norm` and `of_embedding` for composable sequential models.
 - **Test count**: 856 passing tests.
+
+## Claude round 45 decisions
+
+- **Codex review fix (round 43)**: `pow_` now handles negative bases correctly — uses `where_` to preserve sign instead of silently taking abs. `chunk` validates `n > 0` with `invalid_arg`.
+- **Scaled dot-product attention**: `Tensor.scaled_dot_product_attention ?mask q k v` — computes softmax((Q @ K^T) / sqrt(d_k)) @ V. Accepts optional additive mask (e.g. causal). `Tensor.causal_mask` generates lower-triangular mask with -1e9 for masked positions.
+- **Nn.self_attention**: Single-head self-attention layer with learned Wq/Wk/Wv/Wo linear projections (no bias). Forward pass: project → attention → output projection. `self_attention_params` collects all 4 weight matrices.
+- **Scheduler complexity limitation**: Full attention graph (matmul→scale→softmax→matmul) exceeds single-session scheduler capacity, producing degenerate C code. Tests stage computation with intermediate `Schedule.reset()` + realize between steps. Self-attention test verifies each projection independently.
+- **Test count**: 883 passing tests.
