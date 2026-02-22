@@ -236,3 +236,9 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Movement-over-reduction test**: Added `test_movement_over_reduce` for `sum_axis([1]) → permute([1;0]) → flip([1])`, verifying that `infer_shape`'s BUFFER and REDUCE_AXIS extensions correctly support movement ops applied to realized reduction outputs. Expected: `[15, 6]` (reversed row sums).
 - **Documentation (codex review feedback)**: Documented in `infer_shape` comment that BUFFER resolution depends on `realized_shapes` being populated during copyin/reduction scheduling before kernel lowering.
 - Total tests: 96 unit + 452 e2e = 548 all passing.
+
+## Claude round 28 decisions
+
+- **Metal GPU movement-op cross-device parity (codex review suggestion)**: Added `test_metal_movement` validating all 4 movement ops (PERMUTE, FLIP, PAD, SHRINK) and a composed chain (permute→flip) on Metal GPU. This confirms that in-kernel index transformations generate correct Metal Shading Language code and produce identical results to CPU.
+- **Cross-device validation pattern**: Each sub-test creates fresh tensors on "METAL" device, applies a movement op, forces computation via `add(zeros)`, and verifies element values match CPU expectations. This proves the Metal renderer correctly handles coordinate transformations.
+- All 5 Metal movement sub-tests pass: permute (2D transpose), flip (axis=1), pad (1D), shrink (2D), composed permute→flip.
