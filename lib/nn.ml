@@ -71,9 +71,10 @@ let sgd_step ~lr (grads : (Tensor.t * Tensor.t) list) : (Tensor.t * Tensor.t) li
     (param, new_t)
   ) grads
 
-(** Batch normalization layer.
-    During eval: y = (x - running_mean) / sqrt(running_var + eps) * weight + bias
-    During training (simplified): uses batch statistics. *)
+(** Batch normalization layer (eval mode only).
+    y = (x - running_mean) / sqrt(running_var + eps) * weight + bias
+    Note: this implementation only supports inference/eval mode.
+    Running statistics must be pre-populated; they are not updated during forward. *)
 type batch_norm = {
   weight: Tensor.t;         (** Scale (gamma), shape [num_features] *)
   bn_bias: Tensor.t;        (** Shift (beta), shape [num_features] *)
@@ -92,8 +93,9 @@ let batch_norm ?(device="CPU") ?(dtype=Dtype.float32) ?(eps=1e-5) ?(momentum=0.1
     running_var = Array.make num_features 1.0;
     num_features; eps; momentum }
 
-(** Forward pass for batch normalization (eval mode).
-    Input x: [batch; channels; ...], normalizes over all dims except dim 1. *)
+(** Forward pass for batch normalization (eval mode only).
+    Input x: [batch; channels; ...], normalizes over all dims except dim 1.
+    Uses pre-populated running_mean and running_var; does not compute batch statistics. *)
 let batch_norm_forward (bn : batch_norm) (x : Tensor.t) : Tensor.t =
   let ndim = List.length x.shape in
   if ndim < 2 then invalid_arg "BatchNorm: input must have at least 2 dimensions";
@@ -137,8 +139,19 @@ let embedding ?(device="CPU") ?(dtype=Dtype.float32) ~num_embeddings ~embedding_
   { emb_weight = w; num_embeddings; embedding_dim }
 
 (** Forward pass: look up embeddings by index via one_hot @ weight.
-    Input: [batch] integer tensor → Output: [batch; embedding_dim] *)
+    Input: [batch] integer tensor → Output: [batch; embedding_dim].
+    Validates that all indices are in [0, num_embeddings).
+    Out-of-range indices would silently produce zero rows in the one_hot encoding. *)
 let embedding_forward (emb : embedding) (indices : Tensor.t) : Tensor.t =
+  (* Validate indices are in range by eagerly checking values *)
+  let idx_vals = Tensor.to_float_list indices in
+  List.iteri (fun i v ->
+    let idx = Float.to_int v in
+    if idx < 0 || idx >= emb.num_embeddings then
+      invalid_arg (Printf.sprintf
+        "Embedding: index %d at position %d out of range [0, %d)"
+        idx i emb.num_embeddings)
+  ) idx_vals;
   let oh = Tensor.one_hot ~num_classes:emb.num_embeddings indices in
   Tensor.matmul oh emb.emb_weight
 
