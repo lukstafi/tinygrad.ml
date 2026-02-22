@@ -265,3 +265,11 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Matmul backward regression test**: Added `test_matmul_backward_regression` with non-identity x=[[1,2],[3,4]], verifying both dw and dx against analytic values (dw=[1,0,2,0], dx=[0.1,0.1,0,0]).
 - **Matmul-based classification training**: Added `test_classification_matmul` — trains a linear classifier `logits = x @ w` with cross-entropy loss through matmul backward, verifying convergence and correct predictions.
 - **XOR MLP now works**: The two-layer MLP training test (`test_mlp_training`) now converges to `loss ≈ 0.000001` with predictions [0.000, 0.999, 0.999, 0.001], fully solving XOR.
+
+## Claude round 32 decisions
+
+- **CPU kernel compilation caching**: Added source-code-keyed cache in `device.ml` that skips clang recompilation when the same C source is seen again. Since `Schedule.reset()` resets the kernel name counter, identical computation graphs across training iterations produce identical source strings. This reduced the full test suite from ~10 minutes to ~31 seconds.
+- **Cross-entropy shape validation**: Added explicit `logits.shape <> targets.shape` check in `Tensor.cross_entropy` per codex review feedback.
+- **Non-default axis CE test**: Added `test_cross_entropy_axis0` — verifies CE with `axis=0` (classes along first dim) produces the same loss and gradient zero-sum properties as default axis.
+- **Reshape(reduce) backward regression test**: Added `test_reshape_reduce_backward` — directly tests gradient through `reshape(sum(x, axis=1), [N])` chain, pinning the round 29 RESHAPE gradient fix.
+- **Matmul-based CE classification**: Extended `test_classification_matmul` to 50 steps for reliable convergence, verifying both classes reach > 0.9 confidence.

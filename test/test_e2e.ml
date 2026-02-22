@@ -1742,7 +1742,7 @@ let test_classification_matmul () =
   let lr = 0.5 in
   let w_val = ref [0.1; 0.1; 0.1; 0.1] in
   let final_loss = ref 1.0 in
-  for _step = 0 to 29 do
+  for _step = 0 to 49 do
     Schedule.reset ();
     let x = Tensor.from_float_list [2; 2] [1.;0.; 0.;1.] in
     let targets = Tensor.from_float_list [2; 2] [1.;0.; 0.;1.] in
@@ -1769,7 +1769,64 @@ let test_classification_matmul () =
   check "matmul CE pred[0,0] > 0.9" (List.nth pv 0 > 0.9);
   check "matmul CE pred[1,1] > 0.9" (List.nth pv 3 > 0.9)
 
-(* ---- Test 47: CUDA backend registration ---- *)
+(* ---- Test: CE with non-default axis ---- *)
+let test_cross_entropy_axis0 () =
+  Printf.printf "\n=== Cross-Entropy (axis=0) ===\n%!";
+  (* Transpose the class dimension to axis 0: logits [3;2], targets [3;2]
+     Classes along axis 0, batch along axis 1.
+     Effectively the same data as test_cross_entropy but transposed. *)
+  Schedule.reset ();
+  let logits = Tensor.from_float_list [3; 2] [-1.;1.; 2.;-2.; -3.;3.] in
+  let targets = Tensor.from_float_list [3; 2] [0.;0.; 1.;0.; 0.;1.] in
+  let loss = Tensor.cross_entropy ~axis:0 logits targets in
+  let v = Tensor.to_float_list loss in
+  check "ce axis=0 scalar" (List.length v = 1);
+  (* Same expected value as default axis test: ≈ 0.0939 *)
+  check_float "ce axis=0 value" (List.hd v) 0.0939 5e-3;
+  (* Gradient should sum to ≈ 0 per sample (columns) *)
+  Schedule.reset ();
+  let logits2 = Tensor.from_float_list [3; 2] [-1.;1.; 2.;-2.; -3.;3.] in
+  let targets2 = Tensor.from_float_list [3; 2] [0.;0.; 1.;0.; 0.;1.] in
+  let loss2 = Tensor.cross_entropy ~axis:0 logits2 targets2 in
+  let grads = Tensor.backward loss2 [logits2] in
+  let (_, dlogits) = List.hd grads in
+  let dv = Tensor.to_float_list dlogits in
+  check "ce axis=0 grad len" (List.length dv = 6);
+  let col1_sum = List.nth dv 0 +. List.nth dv 2 +. List.nth dv 4 in
+  let col2_sum = List.nth dv 1 +. List.nth dv 3 +. List.nth dv 5 in
+  check_float "ce axis=0 col1 sum≈0" col1_sum 0.0 1e-3;
+  check_float "ce axis=0 col2 sum≈0" col2_sum 0.0 1e-3
+
+(* ---- Test: reshape(reduce_axis) backward regression ---- *)
+let test_reshape_reduce_backward () =
+  Printf.printf "\n=== Reshape(Reduce) Backward ===\n%!";
+  (* Verify gradient flows correctly through reshape(sum(x, axis=1), [N]).
+     x = [[1,2,3],[4,5,6]] shape [2;3]
+     sum(x, axis=1) = [6, 15] shape [2;1]
+     reshape to [2] → loss = sum(reshaped * w)
+     w = [1, 2] → loss = 6*1 + 15*2 = 36
+     d/dx[i][j] = w[i] (broadcast from reshape→reduce backward)
+     dx = [[1,1,1],[2,2,2]] *)
+  Schedule.reset ();
+  let x = Tensor.from_float_list [2; 3] [1.;2.;3.; 4.;5.;6.] in
+  let w = Tensor.from_float_list [2] [1.; 2.] in
+  let reduced = Tensor.sum ~axes:[1] x in  (* [2;1] *)
+  let flat = Tensor.reshape reduced [2] in
+  let loss = Tensor.sum (Tensor.mul flat w) in
+  let lv = Tensor.to_float_list loss in
+  check_float "reshape_reduce fwd" (List.hd lv) 36.0 1e-4;
+  let grads = Tensor.backward loss [x] in
+  let (_, dx) = List.hd grads in
+  let dv = Tensor.to_float_list dx in
+  check "reshape_reduce grad len" (List.length dv = 6);
+  check_float "dx[0][0]" (List.nth dv 0) 1.0 1e-4;
+  check_float "dx[0][1]" (List.nth dv 1) 1.0 1e-4;
+  check_float "dx[0][2]" (List.nth dv 2) 1.0 1e-4;
+  check_float "dx[1][0]" (List.nth dv 3) 2.0 1e-4;
+  check_float "dx[1][1]" (List.nth dv 4) 2.0 1e-4;
+  check_float "dx[1][2]" (List.nth dv 5) 2.0 1e-4
+
+(* ---- Test 48: CUDA backend registration ---- *)
 let test_cuda_backend () =
   Printf.printf "\n=== CUDA Backend ===\n%!";
   (* Verify CUDA backend is recognized and returns a module *)
@@ -2110,6 +2167,8 @@ let () =
   run_test "classification_training" test_classification_training;
   run_test "matmul_backward_regression" test_matmul_backward_regression;
   run_test "classification_matmul" test_classification_matmul;
+  run_test "cross_entropy_axis0" test_cross_entropy_axis0;
+  run_test "reshape_reduce_backward" test_reshape_reduce_backward;
   run_test "cuda_backend" test_cuda_backend;
   Printf.printf "\n============================\n%!";
   Printf.printf "Results: %d passed, %d failed\n%!" !pass_count !fail_count;
