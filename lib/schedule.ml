@@ -556,10 +556,10 @@ let rebuild_expr ~buf_id_to_param ~loop_idx ~output_shape (root : Uop.t) : Uop.t
         | Ops.CONTIGUOUS | Ops.DETACH ->
           rebuild (List.hd u.src) ~eff_shape ~cur_idx ~idx_shape
         | Ops.CAST ->
-          let new_src = List.map (fun s -> rebuild s ~eff_shape:None ~cur_idx ~idx_shape) u.src in
+          let new_src = List.map (fun s -> rebuild s ~eff_shape ~cur_idx ~idx_shape) u.src in
           Uop.cast u.dtype (List.hd new_src)
         | _ when Ops.Group.is_alu u.op ->
-          let new_src = List.map (fun s -> rebuild s ~eff_shape:None ~cur_idx ~idx_shape) u.src in
+          let new_src = List.map (fun s -> rebuild s ~eff_shape ~cur_idx ~idx_shape) u.src in
           Uop.alu u.op u.dtype new_src
         | Ops.REDUCE_AXIS ->
           (* If this reduction was already realized, treat it as a buffer load *)
