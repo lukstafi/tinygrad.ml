@@ -409,7 +409,7 @@ let rebuild_expr ~buf_id_to_param ~loop_idx ~output_shape (root : Uop.t) : Uop.t
       (match n.arg with
        | Uop.Pad_arg bounds -> Some (List.map (fun (lo, hi) -> hi - lo) bounds)
        | _ -> None)
-    | Ops.CONTIGUOUS | Ops.CAST | Ops.FLIP when n.src <> [] ->
+    | Ops.CONTIGUOUS | Ops.CAST | Ops.FLIP | Ops.DETACH when n.src <> [] ->
       infer_shape (List.hd n.src)
     | Ops.BUFFER -> get_realized_shape n.id
     | Ops.REDUCE_AXIS ->
@@ -418,6 +418,13 @@ let rebuild_expr ~buf_id_to_param ~loop_idx ~output_shape (root : Uop.t) : Uop.t
        | Uop.Axis_arg (axes, _, src_shape) when src_shape <> [] ->
          Some (List.mapi (fun i d -> if List.mem i axes then 1 else d) src_shape)
        | _ -> None)
+    | _ when n.src <> [] && Ops.Group.is_alu n.op ->
+      (* ALU ops preserve shape — try inferring from any source *)
+      let rec try_srcs = function
+        | [] -> None
+        | s :: rest -> (match infer_shape s with Some sh -> Some sh | None -> try_srcs rest)
+      in
+      try_srcs n.src
     | _ -> None
   in
 
@@ -428,7 +435,7 @@ let rebuild_expr ~buf_id_to_param ~loop_idx ~output_shape (root : Uop.t) : Uop.t
      varies (e.g., after a PERMUTE transform). *)
   let is_path_dependent (op : Ops.t) = match op with
     | Ops.BUFFER | Ops.REDUCE_AXIS | Ops.INDEX | Ops.LOAD
-    | Ops.RESHAPE | Ops.EXPAND | Ops.CAST -> true
+    | Ops.RESHAPE | Ops.EXPAND | Ops.CAST | Ops.DETACH -> true
     | _ when Ops.Group.is_view_wrapper op -> true  (* CONTIGUOUS, PERMUTE, PAD, etc. *)
     | _ -> false
   in
@@ -546,7 +553,7 @@ let rebuild_expr ~buf_id_to_param ~loop_idx ~output_shape (root : Uop.t) : Uop.t
             rebuild child ~eff_shape ~cur_idx:new_idx ~idx_shape
           end else
             rebuild child ~eff_shape ~cur_idx ~idx_shape
-        | Ops.CONTIGUOUS ->
+        | Ops.CONTIGUOUS | Ops.DETACH ->
           rebuild (List.hd u.src) ~eff_shape ~cur_idx ~idx_shape
         | Ops.CAST ->
           let new_src = List.map (fun s -> rebuild s ~eff_shape:None ~cur_idx ~idx_shape) u.src in

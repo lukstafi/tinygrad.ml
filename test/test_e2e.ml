@@ -1526,6 +1526,111 @@ let test_metal_movement () =
     check_float (Printf.sprintf "metal pf[%d]" i) v (List.nth exp_c i) 1e-5
   ) vc
 
+(* ---- Test: Softmax forward ---- *)
+let test_softmax_forward () =
+  Printf.printf "\n=== Softmax Forward ===\n%!";
+  Schedule.reset ();
+  (* softmax([1,2,3]) = exp([1,2,3]) / sum(exp([1,2,3]))
+     exp([1,2,3]) ≈ [2.7183, 7.3891, 20.0855]
+     sum ≈ 30.1929
+     softmax ≈ [0.0900, 0.2447, 0.6652] *)
+  let x = Tensor.from_float_list [1; 3] [1.;2.;3.] in
+  let s = Tensor.softmax x in
+  let v = Tensor.to_float_list s in
+  check "softmax len" (List.length v = 3);
+  check_float "softmax[0]" (List.nth v 0) 0.0900 1e-3;
+  check_float "softmax[1]" (List.nth v 1) 0.2447 1e-3;
+  check_float "softmax[2]" (List.nth v 2) 0.6652 1e-3;
+  (* Softmax values should sum to 1 *)
+  let total = List.fold_left (+.) 0.0 v in
+  check_float "softmax sum=1" total 1.0 1e-5;
+  (* 2D softmax along axis 1 *)
+  Schedule.reset ();
+  let x2 = Tensor.from_float_list [2; 3] [1.;2.;3.;4.;5.;6.] in
+  let s2 = Tensor.softmax x2 in
+  let v2 = Tensor.to_float_list s2 in
+  check "softmax 2d len" (List.length v2 = 6);
+  (* Each row should sum to 1 *)
+  let row1_sum = List.nth v2 0 +. List.nth v2 1 +. List.nth v2 2 in
+  let row2_sum = List.nth v2 3 +. List.nth v2 4 +. List.nth v2 5 in
+  check_float "softmax row1 sum=1" row1_sum 1.0 1e-5;
+  check_float "softmax row2 sum=1" row2_sum 1.0 1e-5;
+  (* Both rows have same relative distribution since [1,2,3] and [4,5,6]
+     are just shifted by a constant — softmax is shift-invariant *)
+  check_float "softmax shift invariance [0] vs [3]" (List.nth v2 0) (List.nth v2 3) 1e-5
+
+(* ---- Test: Log-softmax forward + consistency ---- *)
+let test_log_softmax () =
+  Printf.printf "\n=== Log-Softmax ===\n%!";
+  Schedule.reset ();
+  let x = Tensor.from_float_list [1; 3] [1.;2.;3.] in
+  let ls = Tensor.log_softmax x in
+  let v = Tensor.to_float_list ls in
+  check "log_softmax len" (List.length v = 3);
+  (* log_softmax = x - max(x) - log(sum(exp(x - max(x))))
+     = [1,2,3] - 3 - log(exp(-2)+exp(-1)+exp(0))
+     = [-2,-1,0] - log(0.1353+0.3679+1.0) = [-2,-1,0] - 1.4076
+     ≈ [-2.4076, -1.4076, -0.4076] *)
+  check_float "log_sm[0]" (List.nth v 0) (-2.4076) 1e-3;
+  check_float "log_sm[1]" (List.nth v 1) (-1.4076) 1e-3;
+  check_float "log_sm[2]" (List.nth v 2) (-0.4076) 1e-3;
+  (* Consistency: exp(log_softmax(x)) = softmax(x) *)
+  Schedule.reset ();
+  let x2 = Tensor.from_float_list [1; 3] [1.;2.;3.] in
+  let sm = Tensor.softmax x2 in
+  let sm_v = Tensor.to_float_list sm in
+  List.iteri (fun i _vi ->
+    let exp_ls = Float.exp (List.nth v i) in
+    check_float (Printf.sprintf "exp(log_sm[%d])=sm[%d]" i i) exp_ls (List.nth sm_v i) 1e-4
+  ) v
+
+(* ---- Test: Softmax backward ---- *)
+let test_softmax_backward () =
+  Printf.printf "\n=== Softmax Backward ===\n%!";
+  (* loss = sum(softmax(x) * w) with non-uniform weights.
+     d loss/dx_i = sum_j(w_j * dsm_j/dx_i)
+     where dsm_j/dx_i = sm_j*(delta_ij - sm_i) *)
+  Schedule.reset ();
+  let x = Tensor.from_float_list [1; 3] [1.;2.;3.] in
+  let w = Tensor.from_float_list [1; 3] [1.;0.;0.] in
+  let sm = Tensor.softmax x in
+  let loss = Tensor.sum (Tensor.mul sm w) in
+  let grads = Tensor.backward loss [x] in
+  let (_, dx) = List.hd grads in
+  let dv = Tensor.to_float_list dx in
+  check "softmax grad len" (List.length dv = 3);
+  (* With w=[1,0,0], loss = sm[0].
+     d sm[0]/dx_i = sm[0]*(delta_0i - sm[i])
+     d sm[0]/dx_0 = sm[0]*(1 - sm[0]) ≈ 0.0900*(1-0.0900) ≈ 0.0819
+     d sm[0]/dx_1 = sm[0]*(0 - sm[1]) ≈ 0.0900*(-0.2447) ≈ -0.0220
+     d sm[0]/dx_2 = sm[0]*(0 - sm[2]) ≈ 0.0900*(-0.6652) ≈ -0.0599 *)
+  check_float "dsm/dx[0]" (List.nth dv 0) 0.0819 2e-2;
+  check_float "dsm/dx[1]" (List.nth dv 1) (-0.0220) 2e-2;
+  check_float "dsm/dx[2]" (List.nth dv 2) (-0.0599) 2e-2;
+  (* Gradient should sum to 0 (softmax outputs sum to constant 1) *)
+  let grad_sum = List.fold_left (+.) 0.0 dv in
+  check_float "softmax grad sum≈0" grad_sum 0.0 1e-3
+
+(* ---- Test: Exp and log forward ---- *)
+let test_exp_log () =
+  Printf.printf "\n=== Exp/Log Forward ===\n%!";
+  Schedule.reset ();
+  (* exp([0, 1, 2]) ≈ [1.0, 2.7183, 7.3891] *)
+  let x = Tensor.from_float_list [3] [0.;1.;2.] in
+  let e = Tensor.exp x in
+  let ve = Tensor.to_float_list e in
+  check_float "exp[0]" (List.nth ve 0) 1.0 1e-4;
+  check_float "exp[1]" (List.nth ve 1) 2.7183 1e-3;
+  check_float "exp[2]" (List.nth ve 2) 7.3891 1e-3;
+  (* log(exp(x)) ≈ x *)
+  Schedule.reset ();
+  let x2 = Tensor.from_float_list [3] [0.5;1.0;2.0] in
+  let roundtrip = Tensor.log (Tensor.exp x2) in
+  let vr = Tensor.to_float_list roundtrip in
+  check_float "log(exp(0.5))" (List.nth vr 0) 0.5 1e-4;
+  check_float "log(exp(1.0))" (List.nth vr 1) 1.0 1e-4;
+  check_float "log(exp(2.0))" (List.nth vr 2) 2.0 1e-4
+
 (* ---- Test 45: CUDA backend registration ---- *)
 let test_cuda_backend () =
   Printf.printf "\n=== CUDA Backend ===\n%!";
@@ -1859,6 +1964,10 @@ let () =
   run_test "flip_backward_weighted" test_flip_backward_weighted;
   run_test "movement_chain" test_movement_chain;
   run_test "movement_over_reduce" test_movement_over_reduce;
+  run_test "softmax_forward" test_softmax_forward;
+  run_test "log_softmax" test_log_softmax;
+  run_test "softmax_backward" test_softmax_backward;
+  run_test "exp_log" test_exp_log;
   run_test "cuda_backend" test_cuda_backend;
   Printf.printf "\n============================\n%!";
   Printf.printf "Results: %d passed, %d failed\n%!" !pass_count !fail_count;

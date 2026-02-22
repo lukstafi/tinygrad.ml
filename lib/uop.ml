@@ -160,6 +160,9 @@ let reduce_axis ?(src_shape=[]) u op axes =
 (** CONTIGUOUS *)
 let contiguous u = create Ops.CONTIGUOUS u.dtype [u]
 
+(** DETACH — stops gradient flow *)
+let detach u = create Ops.DETACH u.dtype [u]
+
 (** COPY *)
 let copy u device = create ~arg:(String_arg device) Ops.COPY u.dtype [u]
 

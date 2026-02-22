@@ -242,3 +242,12 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Metal GPU movement-op cross-device parity (codex review suggestion)**: Added `test_metal_movement` validating all 4 movement ops (PERMUTE, FLIP, PAD, SHRINK) and a composed chain (permute→flip) on Metal GPU. This confirms that in-kernel index transformations generate correct Metal Shading Language code and produce identical results to CPU.
 - **Cross-device validation pattern**: Each sub-test creates fresh tensors on "METAL" device, applies a movement op, forces computation via `add(zeros)`, and verifies element values match CPU expectations. This proves the Metal renderer correctly handles coordinate transformations.
 - All 5 Metal movement sub-tests pass: permute (2D transpose), flip (axis=1), pad (1D), shrink (2D), composed permute→flip.
+
+## Claude round 29 decisions
+
+- **Softmax + log-softmax (new production feature)**: Implemented `Tensor.softmax` and `Tensor.log_softmax` with numerically stable max-subtraction. Both use `detach(max)` to prevent gradient leakage through the max operation, matching tinygrad's `_softmax` pattern. Forward verified against known values, backward verified with Jacobian structure.
+- **Natural exp/log**: Added `Tensor.exp` (via `exp2(x/ln2)`) and `Tensor.log` (via `log2(x)*ln2`), composing existing base-2 primitives. Roundtrip `log(exp(x))≈x` verified.
+- **DETACH op**: Added `Uop.detach`, `Tensor.detach` with full pipeline support — gradient.ml returns `[None]` (stops gradient flow), schedule.ml passes through like CONTIGUOUS, infer_shape delegates to child. This is essential for numerically stable softmax backward.
+- **EXPAND gradient bug fix**: Fixed EXPAND backward failing when the source is a REDUCE_AXIS node. The gradient code tried to get src_shape from `src.arg` expecting `Shape`, but REDUCE_AXIS uses `Axis_arg`. Now correctly infers the reduce output shape from `Axis_arg` metadata. This fix is required for correct softmax backward (where expand wraps a sum reduction).
+- **ALU shape inference in scheduler**: Extended `infer_shape` to recursively try source nodes for ALU ops, since ALU preserves shape. This fixes shape inference failures when movement ops in backward-generated gradient graphs are applied to ALU nodes that don't carry shape args.
+- New API surface: `exp`, `log`, `detach`, `softmax`, `log_softmax` — enables classification loss functions (cross-entropy = NLL + log_softmax).
