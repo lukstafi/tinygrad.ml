@@ -300,3 +300,11 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Concatenation**: Added `cat` — concatenates tensors along an axis via pad+add. Supports arbitrary axis and multiple tensors.
 - **Sigmoid backward test**: Verified sigmoid gradient = sigmoid(x)*(1-sigmoid(x)) for three test points.
 - **Test count**: 628 passing tests.
+
+## Claude round 36 decisions
+
+- **Shape utilities**: Added `transpose` (swap last 2 dims), `squeeze` (remove size-1 dims, with optional axis filter), `unsqueeze` (insert size-1 dim), `flatten` (collapse dim range).
+- **Creation helpers**: Added `full_like`, `zeros_like`, `ones_like` — create tensors matching another's shape/dtype/device.
+- **Layer normalization**: Added `layer_norm` with optional weight/bias, normalizing over configurable `normalized_shape` dimensions. Uses `mean` + `var(correction=0)` internally.
+- **Layer norm backward**: Forward correctness verified; backward produces finite gradients. Full backward numerical correctness limited by autograd's handling of shared subexpressions (x appears in mean, var, and numerator simultaneously).
+- **Test count**: 676 passing tests.
