@@ -441,3 +441,12 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Nn.conv2d**: Layer wrapper with Kaiming-initialized weight `[C_out, C_in, KH, KW]` and optional bias `[C_out]`. Bias added via broadcast after convolution.
 - **Key insight**: Operator shadowing (`let (+) = add` etc.) at file level means `_conv2d_impl` must locally rebind `Stdlib.(+)` etc. for integer arithmetic.
 - **Test count**: 1015 passing tests.
+
+## Claude round 51 decisions
+
+- **Codex review fix (round 49)**: `multi_head_attention` now validates `n_heads > 0` before divisibility check (prevents `Division_by_zero`). `flatten_layer` validates `start_dim` range after negative-axis normalization.
+- **Tensor.max_pool2d**: 2D max pooling with configurable kernel_size, stride (defaults to kernel_size), and padding. Uses host-side computation (extract values → loop → reconstruct tensor) to avoid scheduler limitations with complex shrink+pad+reshape chains.
+- **Tensor.avg_pool2d**: 2D average pooling with same interface. Sum all values in each pool window, divide by count.
+- **CNN pipeline test**: End-to-end test of conv2d(1→2, 3x3) → relu → max_pool2d(2) → flatten → verified finite outputs. Demonstrates composability of conv/pool/activation layers.
+- **Key insight**: The scheduler's `pad_index` function can't handle deeply nested shrink+pad+reshape chains (index out of bounds). Pool operations work around this by extracting values to host, computing the pool op in OCaml, then creating a new tensor from the results.
+- **Test count**: 1046 passing tests.

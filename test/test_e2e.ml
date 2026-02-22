@@ -3322,7 +3322,16 @@ let test_nn_flatten () =
   check_float "flat0[0]" (List.nth v 0) 1.0 1e-6;
   check_float "flat0[5]" (List.nth v 5) 6.0 1e-6;
   (* params are empty *)
-  check "flat no params" (flat.params () = [])
+  check "flat no params" (flat.params () = []);
+  (* out-of-range start_dim should fail *)
+  let flat_bad = Nn.flatten_layer ~start_dim:5 "flat_bad" in
+  let caught_flat = try ignore (flat_bad.forward x); false
+    with Invalid_argument _ -> true in
+  check "flat start_dim=5 on 2D rejected" caught_flat;
+  let flat_bad2 = Nn.flatten_layer ~start_dim:(-3) "flat_bad2" in
+  let caught_flat2 = try ignore (flat_bad2.forward x); false
+    with Invalid_argument _ -> true in
+  check "flat start_dim=-3 on 2D rejected" caught_flat2
 
 (* ---- Test 86e: Dropout layer ---- *)
 let test_nn_dropout () =
@@ -3349,6 +3358,14 @@ let test_nn_dropout () =
 (* ---- Test 86f: Multi-head attention ---- *)
 let test_nn_multi_head_attention () =
   Printf.printf "\n=== Nn Multi-Head Attention ===\n%!";
+  (* n_heads=0 should fail *)
+  let caught0 = try ignore (Nn.multi_head_attention ~d_model:4 ~n_heads:0 ()); false
+    with Invalid_argument _ -> true in
+  check "mha n_heads=0 rejected" caught0;
+  (* negative n_heads should fail *)
+  let caught_neg = try ignore (Nn.multi_head_attention ~d_model:4 ~n_heads:(-1) ()); false
+    with Invalid_argument _ -> true in
+  check "mha n_heads=-1 rejected" caught_neg;
   (* d_model=4 not divisible by n_heads=3 should fail *)
   let caught = try ignore (Nn.multi_head_attention ~d_model:4 ~n_heads:3 ()); false
     with Invalid_argument _ -> true in
@@ -3458,6 +3475,75 @@ let test_nn_conv2d () =
   check "nn_conv2d 2 params" (List.length params = 2);
   check "nn_conv2d weight shape" ((List.hd params).shape = [2; 1; 2; 2]);
   check "nn_conv2d bias shape" ((List.nth params 1).shape = [2])
+
+(* ---- Test 86k: Max Pool 2D ---- *)
+let test_max_pool2d () =
+  Printf.printf "\n=== Max Pool 2D ===\n%!";
+  Schedule.reset ();
+  (* Input [1, 4, 4], pool_size=2 → [1, 2, 2] *)
+  let inp = Tensor.from_float_list [1; 4; 4]
+    [1.;2.;3.;4.; 5.;6.;7.;8.; 9.;10.;11.;12.; 13.;14.;15.;16.] in
+  let out = Tensor.max_pool2d ~kernel_size:2 inp in
+  check "maxpool shape" (out.shape = [1; 2; 2]);
+  let v = Tensor.to_float_list out in
+  (* Pool windows: [1,2,5,6]→6, [3,4,7,8]→8, [9,10,13,14]→14, [11,12,15,16]→16 *)
+  check_float "maxpool[0,0]" (List.nth v 0) 6.0 1e-4;
+  check_float "maxpool[0,1]" (List.nth v 1) 8.0 1e-4;
+  check_float "maxpool[1,0]" (List.nth v 2) 14.0 1e-4;
+  check_float "maxpool[1,1]" (List.nth v 3) 16.0 1e-4;
+  (* Multi-channel: [2, 4, 4] *)
+  Schedule.reset ();
+  let inp2 = Tensor.from_float_list [2; 4; 4]
+    ((List.init 16 (fun i -> Float.of_int (i + 1))) @
+     (List.init 16 (fun i -> Float.of_int (16 - i)))) in
+  let out2 = Tensor.max_pool2d ~kernel_size:2 inp2 in
+  check "maxpool 2ch shape" (out2.shape = [2; 2; 2]);
+  let v2 = Tensor.to_float_list out2 in
+  check "maxpool 2ch len=8" (List.length v2 = 8);
+  check_float "maxpool ch0[0,0]" (List.nth v2 0) 6.0 1e-4;
+  check_float "maxpool ch1[0,0]" (List.nth v2 4) 16.0 1e-4
+
+(* ---- Test 86l: Avg Pool 2D ---- *)
+let test_avg_pool2d () =
+  Printf.printf "\n=== Avg Pool 2D ===\n%!";
+  Schedule.reset ();
+  let inp = Tensor.from_float_list [1; 4; 4]
+    [1.;2.;3.;4.; 5.;6.;7.;8.; 9.;10.;11.;12.; 13.;14.;15.;16.] in
+  let out = Tensor.avg_pool2d ~kernel_size:2 inp in
+  check "avgpool shape" (out.shape = [1; 2; 2]);
+  let v = Tensor.to_float_list out in
+  (* Pool windows: [1,2,5,6]→3.5, [3,4,7,8]→5.5, [9,10,13,14]→11.5, [11,12,15,16]→13.5 *)
+  check_float "avgpool[0,0]" (List.nth v 0) 3.5 1e-4;
+  check_float "avgpool[0,1]" (List.nth v 1) 5.5 1e-4;
+  check_float "avgpool[1,0]" (List.nth v 2) 11.5 1e-4;
+  check_float "avgpool[1,1]" (List.nth v 3) 13.5 1e-4
+
+(* ---- Test 86m: Simple CNN pipeline ---- *)
+let test_cnn_pipeline () =
+  Printf.printf "\n=== CNN Pipeline ===\n%!";
+  Schedule.reset ();
+  (* Build a tiny CNN: conv2d(1→2, 3x3) → relu → max_pool(2) → flatten → linear(2→1) *)
+  let conv = Nn.conv2d ~in_channels:1 ~out_channels:2 ~kernel_size:(3,3) () in
+  (* Input: 1-channel 6x6 image *)
+  let x = Tensor.from_float_list [1; 6; 6]
+    (List.init 36 (fun i -> Float.of_int (i + 1) /. 36.0)) in
+  (* Conv: [1,6,6] → [2,4,4] *)
+  let c = Nn.conv2d_forward conv x in
+  check "cnn conv shape" (c.shape = [2; 4; 4]);
+  (* ReLU *)
+  let r = Tensor.relu c in
+  check "cnn relu shape" (r.shape = [2; 4; 4]);
+  (* MaxPool: [2,4,4] → [2,2,2] *)
+  let p = Tensor.max_pool2d ~kernel_size:2 r in
+  check "cnn pool shape" (p.shape = [2; 2; 2]);
+  (* Flatten: [2,2,2] → [8] (start_dim=0 since no batch) *)
+  let f = Tensor.reshape p [8] in
+  check "cnn flat shape" (f.shape = [8]);
+  let fv = Tensor.to_float_list f in
+  check "cnn flat len=8" (List.length fv = 8);
+  List.iteri (fun i vi ->
+    check (Printf.sprintf "cnn flat[%d] finite" i) (Float.is_finite vi)
+  ) fv
 
 (* ---- Test 86: CUDA backend registration ---- *)
 let test_cuda_backend () =
@@ -3871,6 +3957,9 @@ let () =
   run_test "conv2d_basic" test_conv2d_basic;
   run_test "conv2d_padding" test_conv2d_padding;
   run_test "nn_conv2d" test_nn_conv2d;
+  run_test "max_pool2d" test_max_pool2d;
+  run_test "avg_pool2d" test_avg_pool2d;
+  run_test "cnn_pipeline" test_cnn_pipeline;
   run_test "cuda_backend" test_cuda_backend;
   run_test "backend_availability" test_backend_availability;
   Printf.printf "\n============================\n%!";

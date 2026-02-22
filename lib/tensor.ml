@@ -1021,3 +1021,102 @@ let _conv2d_impl ?(stride=1) ?(padding=0) (input : t) (weight : t) : t =
   cat ~axis:0 out_channels
 
 let () = conv2d_ref := _conv2d_impl
+
+(** 2D max pooling: input [C, H, W] → [C, OH, OW].
+    kernel_size: pool window size. stride defaults to kernel_size.
+    padding: zero-padding applied before pooling. *)
+let max_pool2d ?(stride=0) ?(padding=0) ~kernel_size (input : t) : t =
+  let ( + ) = Stdlib.( + ) and ( - ) = Stdlib.( - )
+  and ( * ) = Stdlib.( * ) and ( / ) = Stdlib.( / ) in
+  if List.length input.shape <> 3 then
+    invalid_arg (Printf.sprintf "max_pool2d: input must be 3-D [C,H,W], got [%s]"
+      (String.concat "," (List.map string_of_int input.shape)));
+  let stride = if stride = 0 then kernel_size else stride in
+  let c = List.nth input.shape 0 in
+  let ih = List.nth input.shape 1 in
+  let iw = List.nth input.shape 2 in
+  let oh = (ih + 2 * padding - kernel_size) / stride + 1 in
+  let ow = (iw + 2 * padding - kernel_size) / stride + 1 in
+  if oh <= 0 || ow <= 0 then
+    invalid_arg "max_pool2d: output dimensions <= 0";
+  let input_r = !realize_ref input in
+  let inp = if padding > 0 then
+    pad input_r [(0, 0); (padding, padding); (padding, padding)]
+  else input_r in
+  (* For each channel, extract all pool windows and take max.
+     Fast path: when stride = kernel_size and dims are divisible, use reshape+reduce. *)
+  ignore (c);
+  (* Per channel, per output position: extract pool window, compute max.
+     This avoids complex scheduler issues with shrink+pad+reshape chains. *)
+  let out_vals = Array.make (c * oh * ow) 0.0 in
+  (* Realize input and extract all values *)
+  let inp_vals = to_float_list inp in
+  let inp_h = List.nth inp.shape 1 in
+  let inp_w = List.nth inp.shape 2 in
+  let get_inp ic h_idx w_idx =
+    List.nth inp_vals ((ic * inp_h + h_idx) * inp_w + w_idx)
+  in
+  for ic = 0 to c - 1 do
+    for oi = 0 to oh - 1 do
+      for oj = 0 to ow - 1 do
+        let max_val = ref neg_infinity in
+        for ki = 0 to kernel_size - 1 do
+          for kj = 0 to kernel_size - 1 do
+            let hi = oi * stride + ki in
+            let wi = oj * stride + kj in
+            let v = get_inp ic hi wi in
+            if v > !max_val then max_val := v
+          done
+        done;
+        out_vals.((ic * oh + oi) * ow + oj) <- !max_val
+      done
+    done
+  done;
+  from_float_list ~device:input.device ~dtype:input.dtype [c; oh; ow]
+    (Array.to_list out_vals)
+
+(** 2D average pooling: input [C, H, W] → [C, OH, OW]. *)
+let avg_pool2d ?(stride=0) ?(padding=0) ~kernel_size (input : t) : t =
+  let ( + ) = Stdlib.( + ) and ( - ) = Stdlib.( - )
+  and ( * ) = Stdlib.( * ) and ( / ) = Stdlib.( / ) in
+  if List.length input.shape <> 3 then
+    invalid_arg (Printf.sprintf "avg_pool2d: input must be 3-D [C,H,W], got [%s]"
+      (String.concat "," (List.map string_of_int input.shape)));
+  let stride = if stride = 0 then kernel_size else stride in
+  let c = List.nth input.shape 0 in
+  let ih = List.nth input.shape 1 in
+  let iw = List.nth input.shape 2 in
+  let oh = (ih + 2 * padding - kernel_size) / stride + 1 in
+  let ow = (iw + 2 * padding - kernel_size) / stride + 1 in
+  if oh <= 0 || ow <= 0 then
+    invalid_arg "avg_pool2d: output dimensions <= 0";
+  let input_r = !realize_ref input in
+  let inp = if padding > 0 then
+    pad input_r [(0, 0); (padding, padding); (padding, padding)]
+  else input_r in
+  ignore (c);
+  let k_count = Float.of_int (kernel_size * kernel_size) in
+  let out_vals = Array.make (c * oh * ow) 0.0 in
+  let inp_vals = to_float_list inp in
+  let inp_h = List.nth inp.shape 1 in
+  let inp_w = List.nth inp.shape 2 in
+  let get_inp ic h_idx w_idx =
+    List.nth inp_vals ((ic * inp_h + h_idx) * inp_w + w_idx)
+  in
+  for ic = 0 to c - 1 do
+    for oi = 0 to oh - 1 do
+      for oj = 0 to ow - 1 do
+        let sum_val = ref 0.0 in
+        for ki = 0 to kernel_size - 1 do
+          for kj = 0 to kernel_size - 1 do
+            let hi = oi * stride + ki in
+            let wi = oj * stride + kj in
+            sum_val := !sum_val +. get_inp ic hi wi
+          done
+        done;
+        out_vals.((ic * oh + oi) * ow + oj) <- !sum_val /. k_count
+      done
+    done
+  done;
+  from_float_list ~device:input.device ~dtype:input.dtype [c; oh; ow]
+    (Array.to_list out_vals)
