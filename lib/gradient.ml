@@ -64,6 +64,8 @@ let grad_for_op (ctx : Uop.t) (ret : Uop.t) : Uop.t option list =
     [Some (Uop.const ctx.dtype 0.0)]
   | Ops.CONTIGUOUS ->
     [Some ctx]
+  | Ops.DETACH ->
+    [None]
   | Ops.RESHAPE ->
     (* gradient of reshape is reshape back to source shape *)
     let src_shape = match ret.arg with
@@ -87,7 +89,20 @@ let grad_for_op (ctx : Uop.t) (ret : Uop.t) : Uop.t option list =
        Expanded dims are those where src had size 1 but output has size > 1. *)
     let out_shape = match ret.arg with Uop.Shape s -> s | _ -> [] in
     let src = List.hd ret.src in
-    let src_shape = match src.arg with Uop.Shape s -> s | _ -> [] in
+    (* Try multiple ways to determine the source shape *)
+    let src_shape = match src.arg with
+      | Uop.Shape s -> s
+      | Uop.Axis_arg (axes, _, src_of_reduce) when src_of_reduce <> [] ->
+        (* REDUCE_AXIS: output shape is src_shape with reduced axes set to 1 *)
+        List.mapi (fun i d -> if List.mem i axes then 1 else d) src_of_reduce
+      | _ ->
+        (* Fallback: infer src_shape as out_shape with expanded dims set to 1.
+           Expanded dims are those > 1 in out_shape that were 1 in src.
+           Since we don't know which are expanded, use the EXPAND convention:
+           the source must have had exactly the same number of dims as the output,
+           so reconstruct by checking which dims could have been 1. *)
+        []
+    in
     if src_shape <> [] && out_shape <> [] then begin
       (* Find dims that were expanded: src[i]=1 but out[i]>1 *)
       let expanded_axes = List.filter_map (fun i ->

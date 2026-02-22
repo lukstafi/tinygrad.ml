@@ -116,6 +116,16 @@ let where_ cond t f =
 let const_like (t : t) (v : float) =
   full ~device:t.device ~dtype:t.dtype t.shape v
 
+(** Natural exponential: exp(x) = exp2(x / ln2) *)
+let exp (t : t) =
+  let inv_ln2 = const_like t (1.0 /. Float.log 2.0) in
+  exp2_ (mul t inv_ln2)
+
+(** Natural logarithm: log(x) = log2(x) * ln2 *)
+let log (t : t) =
+  let ln2 = const_like t (Float.log 2.0) in
+  mul (log2_ t) ln2
+
 (** Cast to a new dtype *)
 let cast dtype (t : t) =
   let uop = Uop.cast dtype t.uop in
@@ -178,6 +188,34 @@ let mean ?(axes=[]) (t : t) =
   let n = List.fold_left (fun acc i -> acc * List.nth t.shape i) 1 axes in
   let n_inv = const_like s (1.0 /. Float.of_int n) in
   mul s n_inv
+
+(** Detach: stops gradient flow through this tensor.
+    The value passes through unchanged, but backward treats it as a leaf. *)
+let detach (t : t) =
+  let uop = Uop.detach t.uop in
+  { t with uop; lazy_uop = None }
+
+(** Softmax along a single axis (numerically stable).
+    softmax(x, axis) = exp(x - max(x, axis, keepdim)) / sum(exp(...), axis, keepdim)
+    Matches tinygrad's _softmax decomposition. *)
+let softmax ?(axis= -1) (t : t) =
+  let axis = if axis < 0 then List.length t.shape + axis else axis in
+  let m = expand (detach (max_ ~axes:[axis] t)) t.shape in
+  let shifted = sub t m in
+  let e = exp shifted in
+  let s = expand (sum ~axes:[axis] e) t.shape in
+  div e s
+
+(** Log-softmax along a single axis (numerically stable).
+    log_softmax(x, axis) = (x - max(x, axis)) - log(sum(exp(x - max(x, axis)), axis))
+    More numerically stable than log(softmax(x)). *)
+let log_softmax ?(axis= -1) (t : t) =
+  let axis = if axis < 0 then List.length t.shape + axis else axis in
+  let m = expand (detach (max_ ~axes:[axis] t)) t.shape in
+  let shifted = sub t m in
+  let e = exp shifted in
+  let s = expand (sum ~axes:[axis] e) t.shape in
+  sub shifted (log s)
 
 (** Matrix multiply: a[N, K] @ b[K, M] = c[N, M].
     Both inputs must be exactly 2-D.
