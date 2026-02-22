@@ -122,6 +122,13 @@ module Group = struct
   let is_movement op = mem op movement
   let is_commutative op = mem op commutative
   let is_comparison op = mem op comparison
+
+  (** Single-source view/wrapper ops: movement ops + CAST + CONTIGUOUS.
+      These ops have exactly one input and don't change the computation semantics
+      in a way that affects broadcast shape inference. Used by scheduler to walk
+      through wrapper chains when looking for RESHAPE nodes. *)
+  let view_wrapper = [RESHAPE; EXPAND; PERMUTE; PAD; SHRINK; FLIP; CAST; CONTIGUOUS]
+  let is_view_wrapper op = mem op view_wrapper
 end
 
 (** Identity element for reduction ops *)

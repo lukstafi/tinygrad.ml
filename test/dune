@@ -9,5 +9,3 @@
 (test
  (name test_e2e)
  (libraries tinygrad_ml str))
-
-
