@@ -104,20 +104,52 @@ let randn_like (t : t) = randn ~device:t.device ~dtype:t.dtype t.shape
 (** Kaiming uniform initialization: U(-bound, bound) where bound = sqrt(6/fan_in).
     Common for weight initialization in neural networks. *)
 let kaiming_uniform ?(device="CPU") ?(dtype=Dtype.float32) ~fan_in shape =
+  if fan_in <= 0 then invalid_arg (Printf.sprintf "Tensor.kaiming_uniform: fan_in must be > 0, got %d" fan_in);
   let bound = Stdlib.sqrt (6.0 /. Float.of_int fan_in) in
   let n = Helpers.prod shape in
   let data = List.init n (fun _ -> Random.float (2.0 *. bound) -. bound) in
   from_float_list ~device ~dtype shape data
 
-(** Elementwise binary operations *)
+(** Compute broadcast shape: pad with 1s on left, then max per dim *)
+let broadcast_shape s1 s2 =
+  let n = max (List.length s1) (List.length s2) in
+  let pad s = List.init (n - List.length s) (fun _ -> 1) @ s in
+  let s1 = pad s1 and s2 = pad s2 in
+  List.map2 (fun a b ->
+    if a = b then a
+    else if a = 1 then b
+    else if b = 1 then a
+    else failwith (Printf.sprintf "broadcast: incompatible dims %d vs %d" a b)
+  ) s1 s2
+
+(** Broadcast a tensor to a target shape (pad with 1s on left + expand).
+    Uses UOp-level operations to avoid forward-reference to reshape/expand. *)
+let broadcast_to (t : t) target_shape =
+  let n = List.length target_shape in
+  let m = List.length t.shape in
+  if t.shape = target_shape then t
+  else
+    let padded_shape = List.init (n - m) (fun _ -> 1) @ t.shape in
+    let t' = if padded_shape <> t.shape then
+      let uop = Uop.reshape t.uop padded_shape in
+      { t with uop; shape = padded_shape; lazy_uop = None }
+    else t in
+    if padded_shape = target_shape then t'
+    else
+      let uop = Uop.expand t'.uop target_shape in
+      { t' with uop; shape = target_shape; lazy_uop = None }
+
+(** Elementwise binary operations with automatic broadcasting *)
 let binop op (a : t) (b : t) =
-  assert (a.shape = b.shape);
+  let out_shape = broadcast_shape a.shape b.shape in
+  let a' = broadcast_to a out_shape in
+  let b' = broadcast_to b out_shape in
   let result_dtype = match op with
     | Ops.CMPLT | Ops.CMPNE | Ops.CMPEQ -> Dtype.bool
     | _ -> a.dtype
   in
-  let uop = Uop.alu op a.dtype [a.uop; b.uop] in
-  { a with uop; dtype = result_dtype; lazy_uop = None }
+  let uop = Uop.alu op a.dtype [a'.uop; b'.uop] in
+  { a' with uop; dtype = result_dtype; lazy_uop = None; shape = out_shape }
 
 (** Elementwise unary operations *)
 let unop op (a : t) =
@@ -143,9 +175,12 @@ let ne a b = binop Ops.CMPNE a b
 let eq a b = binop Ops.CMPEQ a b
 
 let where_ cond t f =
-  assert (cond.shape = t.shape && t.shape = f.shape);
-  let uop = Uop.where_ cond.uop t.uop f.uop in
-  { t with uop; lazy_uop = None }
+  let out_shape = broadcast_shape cond.shape (broadcast_shape t.shape f.shape) in
+  let cond' = broadcast_to cond out_shape in
+  let t' = broadcast_to t out_shape in
+  let f' = broadcast_to f out_shape in
+  let uop = Uop.where_ cond'.uop t'.uop f'.uop in
+  { t' with uop; lazy_uop = None; shape = out_shape }
 
 (** ge/le/gt derived from lt: a>=b is !(a<b), i.e. where(a<b, 0, 1) *)
 let ge a b =
@@ -382,6 +417,11 @@ let cross_entropy ?(axis= -1) (logits : t) (targets : t) =
                            (mul ls targets)) in
   mean per_sample
 
+(** Mean squared error loss: mean((pred - target)^2) *)
+let mse_loss (pred : t) (target : t) =
+  let diff = sub pred target in
+  mean (mul diff diff)
+
 (** Layer normalization over the last [n] dimensions.
     layer_norm(x, normalized_shape) = (x - mean) / sqrt(var + eps)
     Optionally scales by [weight] and shifts by [bias]. *)
@@ -488,9 +528,21 @@ let clamp ?(min_val= Float.neg_infinity) ?(max_val= Float.infinity) (t : t) =
     where_ cond mn result
   else result
 
+(** Binary cross-entropy loss: -mean(target*log(pred) + (1-target)*log(1-pred)) *)
+let binary_cross_entropy (pred : t) (target : t) =
+  let eps_val = 1e-7 in
+  let eps = const_like pred eps_val in
+  let one = const_like pred 1.0 in
+  let clamped = clamp ~min_val:eps_val ~max_val:(1.0 -. eps_val) pred in
+  let term1 = mul target (log clamped) in
+  let term2 = mul (sub one target) (log (sub (add one eps) clamped)) in
+  neg_ (mean (add term1 term2))
+
 (** Dropout: randomly zero elements with probability [p] during training.
     Scales remaining values by 1/(1-p) to preserve expected value. *)
 let dropout ?(p=0.5) (t : t) =
+  if p < 0.0 || p > 1.0 then
+    invalid_arg (Printf.sprintf "Tensor.dropout: p must be in [0,1], got %f" p);
   if p <= 0.0 then t
   else if p >= 1.0 then zeros_like t
   else
