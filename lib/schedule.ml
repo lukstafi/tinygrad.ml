@@ -186,6 +186,114 @@ let permute_index ~(perm_shape : int list) ~(axes : int list) (flat_idx : Uop.t)
     !result
   end
 
+(** Transform a flat index through a SHRINK operation.
+    Given flat_idx over [shrunk_shape] (= [hi_i - lo_i for each dim]),
+    bounds [(lo0,hi0); ...], and the original (pre-shrink) [orig_shape],
+    return a flat index into orig_shape.
+    For each coordinate: orig_coord[i] = shrunk_coord[i] + lo_i. *)
+let shrink_index ~(shrunk_shape : int list) ~(bounds : (int * int) list)
+    ~(orig_shape : int list) (flat_idx : Uop.t) : Uop.t =
+  let ndims = List.length shrunk_shape in
+  if ndims = 0 then flat_idx
+  else begin
+    let sh_arr = Array.of_list shrunk_shape in
+    let bounds_arr = Array.of_list bounds in
+    let orig_arr = Array.of_list orig_shape in
+    (* Strides for shrunk shape (to decompose flat_idx) *)
+    let sh_strides = Array.make ndims 1 in
+    for i = ndims - 2 downto 0 do
+      sh_strides.(i) <- sh_strides.(i + 1) * sh_arr.(i + 1)
+    done;
+    (* Strides for original shape (to recompose) *)
+    let orig_strides = Array.make ndims 1 in
+    for i = ndims - 2 downto 0 do
+      orig_strides.(i) <- orig_strides.(i + 1) * orig_arr.(i + 1)
+    done;
+    (* Decompose, add offsets, recompose *)
+    let result = ref (Uop.const_int Dtype.int32 0) in
+    let remaining = ref flat_idx in
+    for d = 0 to ndims - 1 do
+      let coord = if d = ndims - 1 then !remaining
+        else Uop.idiv !remaining (Uop.const_int Dtype.int32 sh_strides.(d)) in
+      if d < ndims - 1 then
+        remaining := Uop.mod_ !remaining (Uop.const_int Dtype.int32 sh_strides.(d));
+      let (lo, _) = bounds_arr.(d) in
+      let orig_coord = if lo = 0 then coord
+        else Uop.add coord (Uop.const_int Dtype.int32 lo) in
+      if orig_strides.(d) = 1 then
+        result := Uop.add !result orig_coord
+      else
+        result := Uop.add !result (Uop.mul orig_coord (Uop.const_int Dtype.int32 orig_strides.(d)))
+    done;
+    !result
+  end
+
+(** Transform a flat index through a PAD operation.
+    Given flat_idx over [padded_shape] and padding [(before0,after0); ...],
+    return (inner_idx, in_bounds_mask) where:
+    - inner_idx is the flat index into the original (pre-pad) shape
+    - in_bounds_mask is a UOp that's 1 when the index is in the valid region, 0 in padding
+    The caller should use: where(mask, load(inner_idx), 0.0) *)
+let pad_index ~(padded_shape : int list) ~(padding : (int * int) list)
+    ~(inner_shape : int list) (flat_idx : Uop.t) : Uop.t * Uop.t =
+  let ndims = List.length padded_shape in
+  if ndims = 0 then (flat_idx, Uop.const Dtype.float32 1.0)
+  else begin
+    let pad_arr = Array.of_list padded_shape in
+    let inner_arr = Array.of_list inner_shape in
+    let padding_arr = Array.of_list padding in
+    (* Strides for padded shape *)
+    let pad_strides = Array.make ndims 1 in
+    for i = ndims - 2 downto 0 do
+      pad_strides.(i) <- pad_strides.(i + 1) * pad_arr.(i + 1)
+    done;
+    (* Strides for inner shape *)
+    let inner_strides = Array.make ndims 1 in
+    for i = ndims - 2 downto 0 do
+      inner_strides.(i) <- inner_strides.(i + 1) * inner_arr.(i + 1)
+    done;
+    (* Decompose padded coords, check bounds, compute inner index *)
+    let inner_idx = ref (Uop.const_int Dtype.int32 0) in
+    let mask = ref (Uop.const Dtype.float32 1.0) in
+    let remaining = ref flat_idx in
+    for d = 0 to ndims - 1 do
+      let coord = if d = ndims - 1 then !remaining
+        else Uop.idiv !remaining (Uop.const_int Dtype.int32 pad_strides.(d)) in
+      if d < ndims - 1 then
+        remaining := Uop.mod_ !remaining (Uop.const_int Dtype.int32 pad_strides.(d));
+      let (before, _after) = padding_arr.(d) in
+      (* inner_coord = coord - before *)
+      let inner_coord = if before = 0 then coord
+        else Uop.sub coord (Uop.const_int Dtype.int32 before) in
+      (* Check: 0 <= inner_coord < inner_dim *)
+      let in_lo = if before = 0 then Uop.const Dtype.float32 1.0
+        else
+          (* coord >= before <=> inner_coord >= 0 *)
+          (* Use: NOT (inner_coord < 0) = NOT (coord < before) *)
+          let cmp = Uop.alu Ops.CMPLT Dtype.float32 [
+            Uop.cast Dtype.float32 coord;
+            Uop.const Dtype.float32 (Float.of_int before)
+          ] in
+          Uop.sub (Uop.const Dtype.float32 1.0) cmp
+      in
+      let in_hi =
+        (* inner_coord < inner_dim *)
+        let cmp = Uop.alu Ops.CMPLT Dtype.float32 [
+          Uop.cast Dtype.float32 inner_coord;
+          Uop.const Dtype.float32 (Float.of_int inner_arr.(d))
+        ] in
+        cmp
+      in
+      mask := Uop.mul !mask (Uop.mul in_lo in_hi);
+      (* Accumulate inner index *)
+      if inner_strides.(d) = 1 then
+        inner_idx := Uop.add !inner_idx inner_coord
+      else
+        inner_idx := Uop.add !inner_idx (Uop.mul inner_coord (Uop.const_int Dtype.int32 inner_strides.(d)))
+    done;
+    (!inner_idx, !mask)
+  end
+
 (** Rebuild an expression, replacing buffer references with PARAM-based loads.
     Movement ops are stripped. When the same buffer is accessed through different
     reshape/expand paths, each path gets its own broadcast index (avoiding the
@@ -309,7 +417,19 @@ let rebuild_expr ~buf_id_to_param ~loop_idx ~output_shape (root : Uop.t) : Uop.t
           let rec find_child_shape (n : Uop.t) = match n.op with
             | Ops.RESHAPE -> (match n.arg with Uop.Shape s -> Some s | _ -> None)
             | Ops.EXPAND -> (match n.arg with Uop.Shape s -> Some s | _ -> None)
-            | Ops.CONTIGUOUS | Ops.CAST | Ops.PAD | Ops.SHRINK | Ops.FLIP
+            | Ops.PAD when n.src <> [] ->
+              (* PAD changes shape: output[i] = input[i] + before_i + after_i *)
+              (match find_child_shape (List.hd n.src), n.arg with
+               | Some inner, Uop.Pad_arg padding ->
+                 Some (List.map2 (fun d (b, a) -> d + b + a) inner padding)
+               | _ -> None)
+            | Ops.SHRINK when n.src <> [] ->
+              (* SHRINK changes shape: output[i] = hi_i - lo_i *)
+              (match n.arg with
+               | Uop.Pad_arg bounds ->
+                 Some (List.map (fun (lo, hi) -> hi - lo) bounds)
+               | _ -> None)
+            | Ops.CONTIGUOUS | Ops.CAST | Ops.FLIP
               when n.src <> [] -> find_child_shape (List.hd n.src)
             | _ -> None
           in
@@ -325,7 +445,60 @@ let rebuild_expr ~buf_id_to_param ~loop_idx ~output_shape (root : Uop.t) : Uop.t
             (* No shape info available — pass through (identity permute or 1-D) *)
             rebuild child ~eff_shape ~cur_idx ~idx_shape
           end
-        | Ops.CONTIGUOUS | Ops.PAD | Ops.SHRINK | Ops.FLIP ->
+        | Ops.SHRINK ->
+          (* SHRINK: extract a sub-region. Transform index by adding lower-bound offsets. *)
+          let bounds = match u.arg with Uop.Pad_arg b -> b | _ -> [] in
+          let child = List.hd u.src in
+          if bounds <> [] then begin
+            let shrunk_shape = List.map (fun (lo, hi) -> hi - lo) bounds in
+            (* Find the child (original, pre-shrink) shape *)
+            let rec find_shape (n : Uop.t) = match n.op with
+              | Ops.RESHAPE -> (match n.arg with Uop.Shape s -> Some s | _ -> None)
+              | Ops.EXPAND -> (match n.arg with Uop.Shape s -> Some s | _ -> None)
+              | Ops.CONTIGUOUS | Ops.CAST | Ops.FLIP
+                when n.src <> [] -> find_shape (List.hd n.src)
+              | _ -> None
+            in
+            match find_shape child with
+            | Some orig_shape when List.length orig_shape = List.length bounds ->
+              let new_idx = shrink_index ~shrunk_shape ~bounds ~orig_shape cur_idx in
+              rebuild child ~eff_shape ~cur_idx:new_idx ~idx_shape:orig_shape
+            | _ ->
+              rebuild child ~eff_shape ~cur_idx ~idx_shape
+          end else
+            rebuild child ~eff_shape ~cur_idx ~idx_shape
+        | Ops.PAD ->
+          (* PAD: add zero-padding. Decompose index, check bounds, mask with 0 for padding. *)
+          let padding = match u.arg with Uop.Pad_arg p -> p | _ -> [] in
+          let child = List.hd u.src in
+          if padding <> [] then begin
+            let inner_shape = match u.arg with
+              | Uop.Pad_arg _ ->
+                (* Inner shape = padded_shape[i] - before_i - after_i for each dim.
+                   But we need the actual inner shape. Find it from the child. *)
+                let rec find_shape (n : Uop.t) = match n.op with
+                  | Ops.RESHAPE -> (match n.arg with Uop.Shape s -> Some s | _ -> None)
+                  | Ops.EXPAND -> (match n.arg with Uop.Shape s -> Some s | _ -> None)
+                  | Ops.CONTIGUOUS | Ops.CAST | Ops.FLIP
+                    when n.src <> [] -> find_shape (List.hd n.src)
+                  | _ -> None
+                in
+                find_shape child
+              | _ -> None
+            in
+            let padded_shape = idx_shape in  (* current idx_shape IS the padded shape *)
+            match inner_shape with
+            | Some inner when List.length inner = List.length padding ->
+              let (inner_idx, mask) = pad_index ~padded_shape ~padding ~inner_shape:inner cur_idx in
+              (* Rebuild child with the inner index *)
+              let child_val = rebuild child ~eff_shape ~cur_idx:inner_idx ~idx_shape:inner in
+              (* Apply mask: where(mask != 0, child_val, 0.0) *)
+              Uop.alu Ops.MUL Dtype.float32 [child_val; mask]
+            | _ ->
+              rebuild child ~eff_shape ~cur_idx ~idx_shape
+          end else
+            rebuild child ~eff_shape ~cur_idx ~idx_shape
+        | Ops.CONTIGUOUS | Ops.FLIP ->
           rebuild (List.hd u.src) ~eff_shape ~cur_idx ~idx_shape
         | Ops.CAST ->
           let new_src = List.map (fun s -> rebuild s ~eff_shape:None ~cur_idx ~idx_shape) u.src in

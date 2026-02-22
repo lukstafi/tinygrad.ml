@@ -191,3 +191,12 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Broadcast indexing coordinate frame fix (codex review feedback)**: Threaded `idx_shape` alongside `cur_idx` through `rebuild`. After a PERMUTE transforms the index, `idx_shape` is updated to the unpermuted (child) shape so that `make_load → broadcast_index` decomposes the index in the correct coordinate frame. Previously, `output_shape` (the kernel's final shape) was always used, which would be wrong after a PERMUTE. Removed `numel` parameter from `rebuild_expr` since it's now computed dynamically from `idx_shape`.
 - **New test**: `test_permute_broadcast` — permute([2,3]→[3,2]) + broadcast([1,2]→[3,2]) verifies correct composition of index transformation and broadcast indexing.
 - Total tests: 96 unit + 325 e2e = 421 all passing.
+
+## Claude round 23 decisions
+
+- **PAD/SHRINK forward execution (codex review feedback)**: Implemented proper index transformations for PAD and SHRINK movement ops in `rebuild_expr`. Previously both were pass-through (no-op), now they correctly transform indices:
+  - **SHRINK**: `shrink_index` decomposes flat index into multi-dim coords in the shrunk shape, adds lower-bound offsets, recomposes into flat index in the original shape. Uses `find_shape` walker to get original child shape.
+  - **PAD**: `pad_index` decomposes flat index into padded-shape coords, checks bounds for each dimension (before padding, after padding), produces `(inner_idx, mask)`. The mask is 0.0 in padding regions, 1.0 in valid regions. The scheduler multiplies the loaded value by the mask to zero out padding.
+- **PAD/SHRINK shape in PERMUTE's find_child_shape**: Updated to compute shapes through PAD (add before+after) and SHRINK (hi-lo), rather than walking through them as identity wrappers. This ensures PERMUTE's index remapping uses the correct post-PAD/post-SHRINK shape.
+- **New tests**: `test_shrink_forward` (1D [4]→[2] and 2D [3,4]→[2,2]) and `test_pad_forward` (1D [3]→[6] and 2D [2,2]→[3,3]) verify element extraction and zero-padding.
+- Total tests: 96 unit + 350 e2e = 446 all passing.
