@@ -910,6 +910,62 @@ let test_permute_broadcast () =
     check_float (Printf.sprintf "perm+bcast[%d]" i) v (List.nth expected i) 1e-6
   ) vals
 
+(* ---- Test 29d: SHRINK forward (sub-region extraction) ---- *)
+let test_shrink_forward () =
+  Printf.printf "\n=== SHRINK (forward) ===\n%!";
+  Schedule.reset ();
+  (* 1D: [10,20,30,40] shrink to [1,3) → [20,30] *)
+  let x = Tensor.from_float_list [4] [10.0; 20.0; 30.0; 40.0] in
+  let xs = Tensor.shrink x [(1, 3)] in
+  let zeros = Tensor.from_float_list [2] [0.0; 0.0] in
+  let r1 = Tensor.add xs zeros in
+  let v1 = Tensor.to_float_list r1 in
+  check "shrink 1d len" (List.length v1 = 2);
+  check_float "shrink[0]" (List.nth v1 0) 20.0 1e-6;
+  check_float "shrink[1]" (List.nth v1 1) 30.0 1e-6;
+  (* 2D: [3;4] shrink rows[1,3) cols[1,3) → [[6,7],[10,11]] *)
+  Schedule.reset ();
+  let z = Tensor.from_float_list [3; 4]
+    [1.0; 2.0; 3.0; 4.0; 5.0; 6.0; 7.0; 8.0; 9.0; 10.0; 11.0; 12.0] in
+  let zs = Tensor.shrink z [(1, 3); (1, 3)] in
+  let zeros4 = Tensor.from_float_list [2; 2] [0.;0.;0.;0.] in
+  let r2 = Tensor.add zs zeros4 in
+  let v2 = Tensor.to_float_list r2 in
+  check "shrink 2d len" (List.length v2 = 4);
+  let expected = [6.0; 7.0; 10.0; 11.0] in
+  List.iteri (fun i v ->
+    check_float (Printf.sprintf "shrink2d[%d]" i) v (List.nth expected i) 1e-6
+  ) v2
+
+(* ---- Test 29e: PAD forward (zero-padding) ---- *)
+let test_pad_forward () =
+  Printf.printf "\n=== PAD (forward) ===\n%!";
+  Schedule.reset ();
+  (* 1D: [1,2,3] pad (1,2) → [0,1,2,3,0,0] *)
+  let y = Tensor.from_float_list [3] [1.0; 2.0; 3.0] in
+  let yp = Tensor.pad y [(1, 2)] in
+  let zeros6 = Tensor.from_float_list [6] [0.;0.;0.;0.;0.;0.] in
+  let r1 = Tensor.add yp zeros6 in
+  let v1 = Tensor.to_float_list r1 in
+  check "pad 1d len" (List.length v1 = 6);
+  let expected1 = [0.0; 1.0; 2.0; 3.0; 0.0; 0.0] in
+  List.iteri (fun i v ->
+    check_float (Printf.sprintf "pad1d[%d]" i) v (List.nth expected1 i) 1e-6
+  ) v1;
+  (* 2D: [2;2] = [[1,2],[3,4]] pad rows(1,0) cols(0,1) → [3;3]:
+     [[0,0,0],[1,2,0],[3,4,0]] *)
+  Schedule.reset ();
+  let w = Tensor.from_float_list [2; 2] [1.0; 2.0; 3.0; 4.0] in
+  let wp = Tensor.pad w [(1, 0); (0, 1)] in
+  let zeros9 = Tensor.from_float_list [3; 3] [0.;0.;0.;0.;0.;0.;0.;0.;0.] in
+  let r2 = Tensor.add wp zeros9 in
+  let v2 = Tensor.to_float_list r2 in
+  check "pad 2d len" (List.length v2 = 9);
+  let expected2 = [0.0; 0.0; 0.0; 1.0; 2.0; 0.0; 3.0; 4.0; 0.0] in
+  List.iteri (fun i v ->
+    check_float (Printf.sprintf "pad2d[%d]" i) v (List.nth expected2 i) 1e-6
+  ) v2
+
 (* ---- Test 30: Where + comparison ops (elementwise max via where) ---- *)
 let test_where_cmp () =
   Printf.printf "\n=== Where + Comparison ===\n%!";
@@ -1473,6 +1529,8 @@ let () =
   run_test "gradient_permute" test_gradient_permute;
   run_test "permute_forward" test_permute_forward;
   run_test "permute_broadcast" test_permute_broadcast;
+  run_test "shrink_forward" test_shrink_forward;
+  run_test "pad_forward" test_pad_forward;
   run_test "where_cmp" test_where_cmp;
   run_test "cast_forward" test_cast_forward;
   run_test "gradient_expand" test_gradient_expand;
