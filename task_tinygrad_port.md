@@ -424,3 +424,12 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Tensor.stack**: Stack tensors along a new axis (inserts dimension then concatenates). `cat` already existed; `stack` builds on it via reshape+cat.
 - **Advanced training demo**: 15-step training loop combining gradient clipping (`clip_grad_norm ~max_norm:5.0`), LR scheduling (`lr_step_decay ~gamma:0.5`), and SGD. Converges to `w=3.27, b=1.21` for `y=3x+2` target.
 - **Test count**: 940 passing tests.
+
+## Claude round 49 decisions
+
+- **Codex review fix (round 47)**: LR scheduler parameter validation — `lr_step_decay` rejects `step_size <= 0`, `lr_cosine_annealing` rejects `t_max <= 0` with `Invalid_argument`.
+- **Codex review fix (round 47)**: Save/load now handles scalar tensors (empty shape `[]`). `load_params` treats empty `shape_str` as `[]` instead of crashing on `int_of_string ""`.
+- **Nn.flatten_layer**: Layer wrapper that reshapes to `[prefix...; flat_dim]` with configurable `start_dim` (default 1 to preserve batch dimension). No trainable parameters.
+- **Nn.dropout_layer**: Layer wrapper around `Tensor.dropout` with configurable `p` and `training` flag. Identity pass-through when `training=false`.
+- **Nn.multi_head_attention**: Multi-head attention with `n_heads` parallel attention heads. Splits Q/K/V via shrink along feature dimension, applies per-head scaled dot-product attention with intermediate realization, concatenates heads, applies output projection. Validates `d_model % n_heads = 0`.
+- **Test count**: 977 passing tests.

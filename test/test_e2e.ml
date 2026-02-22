@@ -3251,6 +3251,128 @@ let test_model_save_load () =
   (* Clean up *)
   Sys.remove tmpfile
 
+(* ---- Test 86b: LR scheduler validation ---- *)
+let test_lr_scheduler_validation () =
+  Printf.printf "\n=== LR Scheduler Validation ===\n%!";
+  let sched = Nn.lr_scheduler_init 0.1 in
+  (* step_size=0 should fail *)
+  let caught_step = try ignore (Nn.lr_step_decay ~step_size:0 ~gamma:0.1 sched); false
+    with Invalid_argument _ -> true in
+  check "step_size=0 rejected" caught_step;
+  (* negative step_size should fail *)
+  let caught_neg = try ignore (Nn.lr_step_decay ~step_size:(-1) ~gamma:0.1 sched); false
+    with Invalid_argument _ -> true in
+  check "step_size=-1 rejected" caught_neg;
+  (* t_max=0 should fail *)
+  let caught_tmax = try ignore (Nn.lr_cosine_annealing ~t_max:0 sched); false
+    with Invalid_argument _ -> true in
+  check "t_max=0 rejected" caught_tmax;
+  (* negative t_max should fail *)
+  let caught_tmax_neg = try ignore (Nn.lr_cosine_annealing ~t_max:(-5) sched); false
+    with Invalid_argument _ -> true in
+  check "t_max=-5 rejected" caught_tmax_neg;
+  (* valid calls still work *)
+  let s1 = Nn.lr_step_decay ~step_size:2 ~gamma:0.5 sched in
+  check "valid step_decay works" (s1.step_count = 1);
+  let s2 = Nn.lr_cosine_annealing ~t_max:10 sched in
+  check "valid cosine works" (s2.step_count = 1)
+
+(* ---- Test 86c: Scalar save/load ---- *)
+let test_scalar_save_load () =
+  Printf.printf "\n=== Scalar Save/Load ===\n%!";
+  let open Tensor in
+  Schedule.reset ();
+  let scalar = from_float_list [] [42.0] in
+  let vec = from_float_list [3] [1.0; 2.0; 3.0] in
+  let tmpfile = Filename.temp_file "tinygrad_scalar_" ".params" in
+  Nn.save_params tmpfile [("s", scalar); ("v", vec)];
+  Schedule.reset ();
+  let loaded = Nn.load_params tmpfile in
+  check "scalar load 2 params" (List.length loaded = 2);
+  let (n1, t1) = List.hd loaded in
+  check "scalar name=s" (n1 = "s");
+  check "scalar shape=[]" (t1.shape = []);
+  let sv = to_float_list t1 in
+  check "scalar val≈42" (Float.abs (List.nth sv 0 -. 42.0) < 1e-6);
+  Schedule.reset ();
+  let loaded2 = Nn.load_params tmpfile in
+  let (n2, t2) = List.nth loaded2 1 in
+  check "vec name=v" (n2 = "v");
+  check "vec shape=[3]" (t2.shape = [3]);
+  let vv = to_float_list t2 in
+  check "vec[2]≈3" (Float.abs (List.nth vv 2 -. 3.0) < 1e-6);
+  Sys.remove tmpfile
+
+(* ---- Test 86d: Flatten layer ---- *)
+let test_nn_flatten () =
+  Printf.printf "\n=== Nn Flatten Layer ===\n%!";
+  Schedule.reset ();
+  (* 2D input [2;6] → flatten start_dim=1 → [2;6] (no change) *)
+  let x = Tensor.from_float_list [2; 6] [1.;2.;3.;4.;5.;6.;7.;8.;9.;10.;11.;12.] in
+  let flat = Nn.flatten_layer ~start_dim:1 "flat" in
+  let y = flat.forward x in
+  check "flat 2d shape" (y.shape = [2; 6]);
+  (* 3D-like flatten: [2;3] → flatten start_dim=0 → [6] *)
+  Schedule.reset ();
+  let x2 = Tensor.from_float_list [2; 3] [1.;2.;3.;4.;5.;6.] in
+  let flat0 = Nn.flatten_layer ~start_dim:0 "flat0" in
+  let y2 = flat0.forward x2 in
+  check "flat start_dim=0 shape" (y2.shape = [6]);
+  let v = Tensor.to_float_list y2 in
+  check_float "flat0[0]" (List.nth v 0) 1.0 1e-6;
+  check_float "flat0[5]" (List.nth v 5) 6.0 1e-6;
+  (* params are empty *)
+  check "flat no params" (flat.params () = [])
+
+(* ---- Test 86e: Dropout layer ---- *)
+let test_nn_dropout () =
+  Printf.printf "\n=== Nn Dropout Layer ===\n%!";
+  Schedule.reset ();
+  let x = Tensor.from_float_list [10] [1.;2.;3.;4.;5.;6.;7.;8.;9.;10.] in
+  (* training=false should pass through unchanged *)
+  let drop_eval = Nn.dropout_layer ~p:0.5 ~training:false "drop_eval" in
+  let y_eval = drop_eval.forward x in
+  let v = Tensor.to_float_list y_eval in
+  check_float "dropout eval[0]" (List.nth v 0) 1.0 1e-6;
+  check_float "dropout eval[9]" (List.nth v 9) 10.0 1e-6;
+  (* training=true should produce some zeros (probabilistic, check sum < original) *)
+  Schedule.reset ();
+  let x2 = Tensor.from_float_list [100] (List.init 100 (fun i -> Float.of_int (i + 1))) in
+  let drop_train = Nn.dropout_layer ~p:0.5 ~training:true "drop_train" in
+  let y_train = drop_train.forward x2 in
+  let v2 = Tensor.to_float_list y_train in
+  let n_zeros = List.length (List.filter (fun x -> Float.abs x < 1e-9) v2) in
+  (* With p=0.5 on 100 elements, expect roughly 50 zeros — at least 10 *)
+  check "dropout zeros exist" (n_zeros >= 10);
+  check "dropout no params" (drop_train.params () = [])
+
+(* ---- Test 86f: Multi-head attention ---- *)
+let test_nn_multi_head_attention () =
+  Printf.printf "\n=== Nn Multi-Head Attention ===\n%!";
+  (* d_model=4 not divisible by n_heads=3 should fail *)
+  let caught = try ignore (Nn.multi_head_attention ~d_model:4 ~n_heads:3 ()); false
+    with Invalid_argument _ -> true in
+  check "mha d_model%n_heads rejected" caught;
+  (* Valid: d_model=4, n_heads=2, head_dim=2 *)
+  Schedule.reset ();
+  let mha = Nn.multi_head_attention ~d_model:4 ~n_heads:2 () in
+  check "mha d_model" (mha.mha_d_model = 4);
+  check "mha n_heads" (mha.mha_n_heads = 2);
+  check "mha head_dim" (mha.mha_head_dim = 2);
+  (* Forward pass: seq=2, d_model=4 *)
+  let x = Tensor.from_float_list [2; 4] [0.1;0.2;0.3;0.4; 0.5;0.6;0.7;0.8] in
+  let y = Nn.multi_head_attention_forward mha x in
+  check "mha output shape" (y.shape = [2; 4]);
+  let v = Tensor.to_float_list y in
+  check "mha output len=8" (List.length v = 8);
+  (* Check values are finite *)
+  List.iteri (fun i vi ->
+    check (Printf.sprintf "mha out[%d] finite" i) (Float.is_finite vi)
+  ) v;
+  (* Check params: 4 linear layers, each [4;4] = 16 params → 4 weight tensors *)
+  let params = Nn.multi_head_attention_params mha in
+  check "mha 4 params" (List.length params = 4)
+
 (* ---- Test 86: CUDA backend registration ---- *)
 let test_cuda_backend () =
   Printf.printf "\n=== CUDA Backend ===\n%!";
@@ -3654,6 +3776,11 @@ let () =
   run_test "grad_clipping" test_grad_clipping;
   run_test "lr_schedulers" test_lr_schedulers;
   run_test "model_save_load" test_model_save_load;
+  run_test "lr_scheduler_validation" test_lr_scheduler_validation;
+  run_test "scalar_save_load" test_scalar_save_load;
+  run_test "nn_flatten" test_nn_flatten;
+  run_test "nn_dropout" test_nn_dropout;
+  run_test "nn_multi_head_attention" test_nn_multi_head_attention;
   run_test "cuda_backend" test_cuda_backend;
   run_test "backend_availability" test_backend_availability;
   Printf.printf "\n============================\n%!";
