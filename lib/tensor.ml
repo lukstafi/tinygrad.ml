@@ -28,6 +28,7 @@ let fresh_buf_id () =
   let id = !next_buf_id in
   incr next_buf_id;
   id
+let () = Schedule.register_reset_hook (fun () -> next_buf_id := 0)
 
 (** Map from realized BUFFER UOp ID → original computation graph UOp.
     Used by backward to splice computation graphs back in when differentiating
@@ -119,7 +120,7 @@ let broadcast_shape s1 s2 =
     if a = b then a
     else if a = 1 then b
     else if b = 1 then a
-    else failwith (Printf.sprintf "broadcast: incompatible dims %d vs %d" a b)
+    else invalid_arg (Printf.sprintf "Tensor.broadcast: incompatible dims %d vs %d" a b)
   ) s1 s2
 
 (** Broadcast a tensor to a target shape (pad with 1s on left + expand).
@@ -419,6 +420,10 @@ let cross_entropy ?(axis= -1) (logits : t) (targets : t) =
 
 (** Mean squared error loss: mean((pred - target)^2) *)
 let mse_loss (pred : t) (target : t) =
+  if pred.shape <> target.shape then
+    invalid_arg (Printf.sprintf "Tensor.mse_loss: shape mismatch pred=%s target=%s"
+      (String.concat "x" (List.map string_of_int pred.shape))
+      (String.concat "x" (List.map string_of_int target.shape)));
   let diff = sub pred target in
   mean (mul diff diff)
 
@@ -530,6 +535,10 @@ let clamp ?(min_val= Float.neg_infinity) ?(max_val= Float.infinity) (t : t) =
 
 (** Binary cross-entropy loss: -mean(target*log(pred) + (1-target)*log(1-pred)) *)
 let binary_cross_entropy (pred : t) (target : t) =
+  if pred.shape <> target.shape then
+    invalid_arg (Printf.sprintf "Tensor.binary_cross_entropy: shape mismatch pred=%s target=%s"
+      (String.concat "x" (List.map string_of_int pred.shape))
+      (String.concat "x" (List.map string_of_int target.shape)));
   let eps_val = 1e-7 in
   let eps = const_like pred eps_val in
   let one = const_like pred 1.0 in

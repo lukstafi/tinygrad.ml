@@ -352,3 +352,13 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Nn sequential backward test**: Verified gradients flow through a 2-layer MLP (Linear→ReLU→Linear) via `backward`. All gradients finite, at least some non-zero.
 - **Known limitation**: Multi-step optimizer tests hit systemic UOp ID growth issue (IDs > 28000 after many `Schedule.reset()` cycles cause `/*unknown_*/` in rendered C code). Tests limited to single-step verification.
 - **Test count**: 780 passing tests.
+
+## Claude round 41 decisions
+
+- **Codex review fixes (round 39)**:
+  - `broadcast_shape` now raises `Invalid_argument` instead of `Failure` for consistency with rest of API.
+  - `mse_loss` and `binary_cross_entropy` now enforce strict shape equality (no implicit broadcasting). Added shape validation with `Invalid_argument` on mismatch.
+- **UOp ID reset**: Added `Uop.reset()` (clears hash-consing cache + resets ID counter). Called from `Schedule.reset()`. Also reset `Tensor.next_buf_id` via reset hook. This prevents unbounded ID growth across training steps.
+- **Multi-step training loop**: 20-step SGD training of linear model `y = 2*x + 1`. The pattern: extract float values → `Schedule.reset()` → re-create tensors → forward/backward → extract gradients. Successfully learns w≈2, b≈1. This validates the full training pipeline end-to-end.
+- **Loss shape validation test**: Verifies `mse_loss`, `binary_cross_entropy`, and `broadcast_shape` all raise `Invalid_argument` on incompatible shapes.
+- **Test count**: 787 passing tests.
