@@ -286,3 +286,17 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Metal GPU matmul backward**: Added `test_metal_matmul_backward` — verifies dw and dx through matmul on Metal GPU device (dw=[1,0,2,0], dx=[0.1,0.1,0,0]), ensuring the `eff_shape` propagation fix works correctly on GPU.
 - **Metal GPU softmax + CE pipeline**: Added `test_metal_softmax_ce` — verifies softmax row sums ≈ 1.0, CE value ≈ 0.4076, and CE gradient sum ≈ 0.0 on Metal GPU.
 - **Test count**: 572 passing tests.
+
+## Claude round 35 decisions
+
+- **Codex review fixes (round 33)**:
+  - ALU cache write-path now mirrors the read-path condition: ALU nodes rebuilt under `eff_shape` context are not cached, preventing incorrect reuse across mixed path contexts.
+  - Removed duplicate `contiguous` definition (was at line 268 and 359); kept only the second.
+  - `one_hot` now defaults `device` to `indices.device` instead of hardcoded `"CPU"`.
+- **New activations**: Added `sigmoid` (1/(1+exp(-x))), `tanh_` (2*sigmoid(2x)-1), both built from existing primitives with automatic backward support.
+- **New math ops**: Added `abs_` (where-based), `sign` (three-way where), `clamp` (min/max bounds via where).
+- **New comparisons**: Added `ge`, `le`, `gt` derived from `lt` + `where_` (ge(a,b) = !lt(a,b)).
+- **Variance/std**: Added `var` (with Bessel's correction, configurable) and `std` (sqrt of var), supporting per-axis reduction.
+- **Concatenation**: Added `cat` — concatenates tensors along an axis via pad+add. Supports arbitrary axis and multiple tensors.
+- **Sigmoid backward test**: Verified sigmoid gradient = sigmoid(x)*(1-sigmoid(x)) for three test points.
+- **Test count**: 628 passing tests.

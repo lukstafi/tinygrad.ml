@@ -576,8 +576,12 @@ let rebuild_expr ~buf_id_to_param ~loop_idx ~output_shape (root : Uop.t) : Uop.t
         | Ops.CONST -> u
         | _ -> u
       in
-      (* Cache only nodes whose result does NOT depend on the incoming eff_shape. *)
-      if not (is_path_dependent u.op) then
+      (* Cache only nodes whose result does NOT depend on the incoming eff_shape.
+         ALU nodes rebuilt under eff_shape context must not be cached, since the
+         same ALU node reached from a different path (eff_shape=None) would get
+         the wrong result. *)
+      if not (is_path_dependent u.op)
+         && not (eff_shape <> None && Ops.Group.is_alu u.op) then
         Hashtbl.replace cache u.id result;
       result
   in
