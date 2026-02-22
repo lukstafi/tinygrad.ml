@@ -418,7 +418,9 @@ let cross_entropy ?(axis= -1) (logits : t) (targets : t) =
                            (mul ls targets)) in
   mean per_sample
 
-(** Mean squared error loss: mean((pred - target)^2) *)
+(** Mean squared error loss: mean((pred - target)^2).
+    Note: requires exact shape match between pred and target (no implicit broadcasting).
+    This is intentional — accidental broadcasting in losses can mask shape bugs. *)
 let mse_loss (pred : t) (target : t) =
   if pred.shape <> target.shape then
     invalid_arg (Printf.sprintf "Tensor.mse_loss: shape mismatch pred=%s target=%s"
@@ -533,7 +535,151 @@ let clamp ?(min_val= Float.neg_infinity) ?(max_val= Float.infinity) (t : t) =
     where_ cond mn result
   else result
 
-(** Binary cross-entropy loss: -mean(target*log(pred) + (1-target)*log(1-pred)) *)
+(** GeLU activation: x * 0.5 * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+    Gaussian Error Linear Unit, used in GPT/BERT-style transformers. *)
+let gelu (t : t) =
+  let half = const_like t 0.5 in
+  let one = const_like t 1.0 in
+  let coeff = const_like t 0.044715 in
+  let sqrt_2_pi = const_like t 0.7978845608 in  (* sqrt(2/pi) *)
+  let x3 = mul t (mul t t) in
+  let inner = mul sqrt_2_pi (add t (mul coeff x3)) in
+  mul (mul half t) (add one (tanh_ inner))
+
+(** SiLU/Swish activation: x * sigmoid(x) *)
+let silu (t : t) = mul t (sigmoid t)
+
+(** ELU activation: elu(x, alpha) = x if x >= 0, alpha*(exp(x)-1) otherwise *)
+let elu ?(alpha=1.0) (t : t) =
+  let zero = zeros ~device:t.device ~dtype:t.dtype t.shape in
+  let one = const_like t 1.0 in
+  let a = const_like t alpha in
+  let pos = lt zero t in  (* x > 0 *)
+  let neg_part = mul a (sub (exp t) one) in
+  where_ pos t neg_part
+
+(** Softplus activation: softplus(x) = log(1 + exp(x)) *)
+let softplus ?(beta=1.0) (t : t) =
+  let b = const_like t beta in
+  let one = const_like t 1.0 in
+  div (log (add one (exp (mul b t)))) b
+
+(** Mish activation: x * tanh(softplus(x)) *)
+let mish (t : t) =
+  mul t (tanh_ (softplus t))
+
+(** Element-wise power: base ** exponent.
+    Implemented as exp2(exponent * log2(abs(base))), valid for positive base. *)
+let pow_ (base : t) (exponent : t) =
+  let out_shape = broadcast_shape base.shape exponent.shape in
+  let base' = broadcast_to base out_shape in
+  let exponent' = broadcast_to exponent out_shape in
+  exp (mul exponent' (log (abs_ base')))
+
+(** Scalar power: x ** p *)
+let pow_scalar (t : t) (p : float) =
+  let pv = const_like t p in
+  pow_ t pv
+
+(** Element-wise minimum *)
+let minimum (a : t) (b : t) =
+  let out_shape = broadcast_shape a.shape b.shape in
+  let a' = broadcast_to a out_shape in
+  let b' = broadcast_to b out_shape in
+  let cond = lt a' b' in  (* a < b *)
+  where_ cond a' b'
+
+(** Element-wise maximum *)
+let maximum (a : t) (b : t) =
+  let out_shape = broadcast_shape a.shape b.shape in
+  let a' = broadcast_to a out_shape in
+  let b' = broadcast_to b out_shape in
+  let cond = lt b' a' in  (* b < a, i.e. a > b *)
+  where_ cond a' b'
+
+(** Linspace: [n] evenly spaced values from [start] to [stop] (inclusive) *)
+let linspace ?(device="CPU") ?(dtype=Dtype.float32) ~start ~stop (n : int) : t =
+  if n < 1 then invalid_arg "Tensor.linspace: n must be >= 1";
+  if n = 1 then from_float_list ~device ~dtype [1] [start]
+  else
+    let step = (stop -. start) /. Float.of_int (n - 1) in
+    let data = List.init n (fun i -> start +. step *. Float.of_int i) in
+    from_float_list ~device ~dtype [n] data
+
+(** Identity matrix: eye(n) returns [n; n] float tensor *)
+let eye ?(device="CPU") ?(dtype=Dtype.float32) (n : int) : t =
+  let data = List.init (n * n) (fun i -> if i / n = i mod n then 1.0 else 0.0) in
+  from_float_list ~device ~dtype [n; n] data
+
+(** Upper triangular: zeros below the k-th diagonal *)
+let triu ?(k=0) (t : t) =
+  let ndim = List.length t.shape in
+  if ndim < 2 then invalid_arg "Tensor.triu: requires at least 2 dimensions";
+  let rows = List.nth t.shape (ndim - 2) in
+  let cols = List.nth t.shape (ndim - 1) in
+  let mask_data = List.init (rows * cols) (fun idx ->
+    let r = idx / cols and c = idx mod cols in
+    if c >= r + k then 1.0 else 0.0
+  ) in
+  let batch = List.filteri (fun i _ -> i < ndim - 2) t.shape in
+  let batch_size = Helpers.prod batch in
+  let full_data = List.concat (List.init batch_size (fun _ -> mask_data)) in
+  let mask = from_float_list ~device:t.device ~dtype:t.dtype t.shape full_data in
+  mul t mask
+
+(** Lower triangular: zeros above the k-th diagonal *)
+let tril ?(k=0) (t : t) =
+  let ndim = List.length t.shape in
+  if ndim < 2 then invalid_arg "Tensor.tril: requires at least 2 dimensions";
+  let rows = List.nth t.shape (ndim - 2) in
+  let cols = List.nth t.shape (ndim - 1) in
+  let mask_data = List.init (rows * cols) (fun idx ->
+    let r = idx / cols and c = idx mod cols in
+    if c <= r + k then 1.0 else 0.0
+  ) in
+  let batch = List.filteri (fun i _ -> i < ndim - 2) t.shape in
+  let batch_size = Helpers.prod batch in
+  let full_data = List.concat (List.init batch_size (fun _ -> mask_data)) in
+  let mask = from_float_list ~device:t.device ~dtype:t.dtype t.shape full_data in
+  mul t mask
+
+(** Split a tensor into chunks along an axis *)
+let split ?(axis=0) (t : t) (sizes : int list) : t list =
+  let ndim = List.length t.shape in
+  let axis = if axis < 0 then ndim + axis else axis in
+  let dim_size = List.nth t.shape axis in
+  let total = List.fold_left Stdlib.( + ) 0 sizes in
+  if total <> dim_size then
+    invalid_arg (Printf.sprintf "Tensor.split: sizes sum %d != dim %d" total dim_size);
+  let _ = List.fold_left (fun offset size ->
+    let bounds = List.mapi (fun i s ->
+      if i = axis then (offset, offset + size) else (0, s)
+    ) t.shape in
+    ignore (shrink t bounds : t);
+    offset + size
+  ) 0 sizes in
+  (* Build chunks via shrink *)
+  let _, chunks = List.fold_left (fun (offset, acc) size ->
+    let bounds = List.mapi (fun i s ->
+      if i = axis then (offset, offset + size) else (0, s)
+    ) t.shape in
+    (offset + size, shrink t bounds :: acc)
+  ) (0, []) sizes in
+  List.rev chunks
+
+(** Chunk: split into n roughly-equal-sized chunks *)
+let chunk ?(axis=0) (t : t) (n : int) : t list =
+  let ndim = List.length t.shape in
+  let axis = if axis < 0 then ndim + axis else axis in
+  let dim_size = List.nth t.shape axis in
+  let base = dim_size / n in
+  let remainder = dim_size mod n in
+  let sizes = List.init n (fun i -> if i < remainder then base + 1 else base) in
+  split ~axis t sizes
+
+(** Binary cross-entropy loss: -mean(target*log(pred) + (1-target)*log(1-pred)).
+    Note: requires exact shape match between pred and target (no implicit broadcasting).
+    This is intentional — accidental broadcasting in losses can mask shape bugs. *)
 let binary_cross_entropy (pred : t) (target : t) =
   if pred.shape <> target.shape then
     invalid_arg (Printf.sprintf "Tensor.binary_cross_entropy: shape mismatch pred=%s target=%s"

@@ -2700,7 +2700,161 @@ let test_loss_validation () =
   (try ignore (add c d); check "broadcast Invalid_argument" false
    with Invalid_argument _ -> check "broadcast Invalid_argument" true)
 
-(* ---- Test 76: CUDA backend registration ---- *)
+(* ---- Test 76: Modern activations (gelu, silu, elu, softplus, mish) ---- *)
+let test_activations_modern () =
+  Printf.printf "\n=== Modern Activations ===\n%!";
+  let open Tensor in
+  (* GeLU: gelu(0) ≈ 0, gelu(1) ≈ 0.841 *)
+  Schedule.reset ();
+  let x = from_float_list [4] [-2.0; -1.0; 0.0; 1.0] in
+  let gv = to_float_list (gelu x) in
+  check "gelu[0]<0" (List.nth gv 0 < 0.0);
+  check "gelu[2]≈0" (Float.abs (List.nth gv 2) < 1e-5);
+  check "gelu[3]≈0.841" (Float.abs (List.nth gv 3 -. 0.841) < 0.01);
+  (* SiLU: silu(0) = 0, silu(1) ≈ 0.731 *)
+  Schedule.reset ();
+  let x = from_float_list [4] [-2.0; -1.0; 0.0; 1.0] in
+  let sv = to_float_list (silu x) in
+  check "silu[2]=0" (Float.abs (List.nth sv 2) < 1e-5);
+  check "silu[3]≈0.731" (Float.abs (List.nth sv 3 -. 0.7311) < 0.01);
+  (* ELU: elu(1) = 1, elu(-1) ≈ -0.632 *)
+  Schedule.reset ();
+  let x = from_float_list [4] [-2.0; -1.0; 0.0; 1.0] in
+  let ev = to_float_list (elu x) in
+  check "elu[3]=1" (Float.abs (List.nth ev 3 -. 1.0) < 1e-5);
+  check "elu[1]≈-0.632" (Float.abs (List.nth ev 1 -. (-0.6321)) < 0.01);
+  (* Softplus: softplus(0) ≈ ln(2) ≈ 0.693 *)
+  Schedule.reset ();
+  let x = from_float_list [4] [-2.0; -1.0; 0.0; 1.0] in
+  let spv = to_float_list (softplus x) in
+  check "softplus[2]≈0.693" (Float.abs (List.nth spv 2 -. 0.6931) < 0.01);
+  check "softplus[3]>1" (List.nth spv 3 > 1.0);
+  (* Mish: mish(0) = 0 * tanh(softplus(0)) = 0 *)
+  Schedule.reset ();
+  let x = from_float_list [4] [-2.0; -1.0; 0.0; 1.0] in
+  let mv = to_float_list (mish x) in
+  check "mish[2]≈0" (Float.abs (List.nth mv 2) < 1e-5);
+  check "mish[3]≈0.865" (Float.abs (List.nth mv 3 -. 0.8651) < 0.01)
+
+(* ---- Test 77: pow, minimum, maximum ---- *)
+let test_element_ops () =
+  Printf.printf "\n=== Element-wise Ops (pow/min/max) ===\n%!";
+  let open Tensor in
+  (* pow: 2^3 = 8, 3^2 = 9 *)
+  Schedule.reset ();
+  let a = from_float_list [2] [2.0; 3.0] in
+  let b = from_float_list [2] [3.0; 2.0] in
+  let pv = to_float_list (pow_ a b) in
+  check "pow 2^3≈8" (Float.abs (List.nth pv 0 -. 8.0) < 0.01);
+  check "pow 3^2≈9" (Float.abs (List.nth pv 1 -. 9.0) < 0.01);
+  (* pow_scalar: x^0.5 = sqrt(x) *)
+  Schedule.reset ();
+  let x = from_float_list [3] [4.0; 9.0; 16.0] in
+  let sv = to_float_list (pow_scalar x 0.5) in
+  check "pow_scalar √4≈2" (Float.abs (List.nth sv 0 -. 2.0) < 0.01);
+  check "pow_scalar √9≈3" (Float.abs (List.nth sv 1 -. 3.0) < 0.01);
+  (* minimum *)
+  Schedule.reset ();
+  let c = from_float_list [3] [1.0; 5.0; 3.0] in
+  let d = from_float_list [3] [2.0; 4.0; 6.0] in
+  let minv = to_float_list (minimum c d) in
+  check "min[0]=1" (Float.abs (List.nth minv 0 -. 1.0) < 1e-5);
+  check "min[1]=4" (Float.abs (List.nth minv 1 -. 4.0) < 1e-5);
+  check "min[2]=3" (Float.abs (List.nth minv 2 -. 3.0) < 1e-5);
+  (* maximum *)
+  Schedule.reset ();
+  let c = from_float_list [3] [1.0; 5.0; 3.0] in
+  let d = from_float_list [3] [2.0; 4.0; 6.0] in
+  let maxv = to_float_list (maximum c d) in
+  check "max[0]=2" (Float.abs (List.nth maxv 0 -. 2.0) < 1e-5);
+  check "max[1]=5" (Float.abs (List.nth maxv 1 -. 5.0) < 1e-5);
+  check "max[2]=6" (Float.abs (List.nth maxv 2 -. 6.0) < 1e-5)
+
+(* ---- Test 78: linspace, eye, triu, tril ---- *)
+let test_creation_advanced () =
+  Schedule.reset ();
+  Printf.printf "\n=== Creation (linspace/eye/triu/tril) ===\n%!";
+  let open Tensor in
+  (* linspace *)
+  let ls = to_float_list (linspace ~start:0.0 ~stop:1.0 5) in
+  check "linspace len" (List.length ls = 5);
+  check "linspace[0]=0" (Float.abs (List.nth ls 0) < 1e-5);
+  check "linspace[4]=1" (Float.abs (List.nth ls 4 -. 1.0) < 1e-5);
+  check "linspace[2]=0.25" (Float.abs (List.nth ls 2 -. 0.5) < 1e-5);
+  (* eye *)
+  Schedule.reset ();
+  let ev = to_float_list (eye 3) in
+  check "eye len" (List.length ev = 9);
+  check "eye[0,0]=1" (Float.abs (List.nth ev 0 -. 1.0) < 1e-5);
+  check "eye[0,1]=0" (Float.abs (List.nth ev 1) < 1e-5);
+  check "eye[1,1]=1" (Float.abs (List.nth ev 4 -. 1.0) < 1e-5);
+  check "eye[2,2]=1" (Float.abs (List.nth ev 8 -. 1.0) < 1e-5);
+  (* triu: upper triangular *)
+  Schedule.reset ();
+  let m = from_float_list [3; 3] [1.0;2.0;3.0; 4.0;5.0;6.0; 7.0;8.0;9.0] in
+  let uv = to_float_list (triu m) in
+  check "triu[0,0]=1" (Float.abs (List.nth uv 0 -. 1.0) < 1e-5);
+  check "triu[0,2]=3" (Float.abs (List.nth uv 2 -. 3.0) < 1e-5);
+  check "triu[1,0]=0" (Float.abs (List.nth uv 3) < 1e-5);  (* below diagonal *)
+  check "triu[1,1]=5" (Float.abs (List.nth uv 4 -. 5.0) < 1e-5);
+  check "triu[2,0]=0" (Float.abs (List.nth uv 6) < 1e-5);
+  check "triu[2,1]=0" (Float.abs (List.nth uv 7) < 1e-5);
+  (* tril: lower triangular *)
+  Schedule.reset ();
+  let m = from_float_list [3; 3] [1.0;2.0;3.0; 4.0;5.0;6.0; 7.0;8.0;9.0] in
+  let lv = to_float_list (tril m) in
+  check "tril[0,0]=1" (Float.abs (List.nth lv 0 -. 1.0) < 1e-5);
+  check "tril[0,1]=0" (Float.abs (List.nth lv 1) < 1e-5);  (* above diagonal *)
+  check "tril[1,0]=4" (Float.abs (List.nth lv 3 -. 4.0) < 1e-5);
+  check "tril[1,1]=5" (Float.abs (List.nth lv 4 -. 5.0) < 1e-5);
+  check "tril[2,2]=9" (Float.abs (List.nth lv 8 -. 9.0) < 1e-5)
+
+(* ---- Test 79: split and chunk ---- *)
+let test_split_chunk () =
+  Printf.printf "\n=== Split and Chunk ===\n%!";
+  let open Tensor in
+  (* split into [2, 4] *)
+  Schedule.reset ();
+  let x = from_float_list [6] [1.0; 2.0; 3.0; 4.0; 5.0; 6.0] in
+  let parts = split x [2; 4] in
+  check "split count" (List.length parts = 2);
+  let p0 = to_float_list (List.nth parts 0) in
+  let p1 = to_float_list (List.nth parts 1) in
+  check "split[0] len" (List.length p0 = 2);
+  check "split[1] len" (List.length p1 = 4);
+  check "split[0][0]" (Float.abs (List.nth p0 0 -. 1.0) < 1e-5);
+  check "split[0][1]" (Float.abs (List.nth p0 1 -. 2.0) < 1e-5);
+  check "split[1][0]" (Float.abs (List.nth p1 0 -. 3.0) < 1e-5);
+  check "split[1][3]" (Float.abs (List.nth p1 3 -. 6.0) < 1e-5);
+  (* chunk into 3 equal parts *)
+  Schedule.reset ();
+  let x = from_float_list [6] [1.0; 2.0; 3.0; 4.0; 5.0; 6.0] in
+  let chunks = chunk x 3 in
+  check "chunk count" (List.length chunks = 3);
+  let c0 = to_float_list (List.nth chunks 0) in
+  let c1 = to_float_list (List.nth chunks 1) in
+  let c2 = to_float_list (List.nth chunks 2) in
+  check "chunk[0] len" (List.length c0 = 2);
+  check "chunk[0][0]" (Float.abs (List.nth c0 0 -. 1.0) < 1e-5);
+  check "chunk[1][0]" (Float.abs (List.nth c1 0 -. 3.0) < 1e-5);
+  check "chunk[2][0]" (Float.abs (List.nth c2 0 -. 5.0) < 1e-5)
+
+(* ---- Test 80: GeLU backward ---- *)
+let test_gelu_backward () =
+  Schedule.reset ();
+  Printf.printf "\n=== GeLU Backward ===\n%!";
+  let open Tensor in
+  let x = from_float_list [3] [0.0; 1.0; -1.0] in
+  let loss = sum (gelu x) in
+  let grads = backward loss [x] in
+  let (_, grad) = List.hd grads in
+  let gv = to_float_list grad in
+  (* gelu'(0) ≈ 0.5, gelu'(1) ≈ 1.08, gelu'(-1) ≈ -0.08 *)
+  check "gelu_grad[0]≈0.5" (Float.abs (List.nth gv 0 -. 0.5) < 0.05);
+  check "gelu_grad[1] finite" (Float.is_finite (List.nth gv 1));
+  check "gelu_grad[2] finite" (Float.is_finite (List.nth gv 2))
+
+(* ---- Test 81: CUDA backend registration ---- *)
 let test_cuda_backend () =
   Printf.printf "\n=== CUDA Backend ===\n%!";
   (* Verify CUDA backend is recognized and returns a module *)
@@ -3073,6 +3227,11 @@ let () =
   run_test "nn_backward" test_nn_backward;
   run_test "training_loop" test_training_loop;
   run_test "loss_validation" test_loss_validation;
+  run_test "activations_modern" test_activations_modern;
+  run_test "element_ops" test_element_ops;
+  run_test "creation_advanced" test_creation_advanced;
+  run_test "split_chunk" test_split_chunk;
+  run_test "gelu_backward" test_gelu_backward;
   run_test "cuda_backend" test_cuda_backend;
   Printf.printf "\n============================\n%!";
   Printf.printf "Results: %d passed, %d failed\n%!" !pass_count !fail_count;
