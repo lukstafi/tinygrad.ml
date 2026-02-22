@@ -372,3 +372,14 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
   - `Device.is_available` function checks at runtime whether a backend package was installed.
   - `device.ml` delegates to `Metal_device`/`Cuda_device` modules (selected by dune) instead of directly calling backend modules.
 - **Test count**: 787 passing tests (unchanged).
+
+## Claude round 43 decisions
+
+- **Codex review fix (round 41)**: Documented that `mse_loss` and `binary_cross_entropy` intentionally require exact shape match (no broadcasting), even though elementwise ops auto-broadcast.
+- **Modern activations**: Added `gelu` (Gaussian Error Linear Unit), `silu`/swish, `elu`, `softplus`, `mish` — all composable from existing primitives.
+- **Element-wise ops**: `pow_`/`pow_scalar` (via exp/log), `minimum`, `maximum` (via lt/where_).
+- **Creation helpers**: `linspace` (evenly spaced values), `eye` (identity matrix), `triu`/`tril` (upper/lower triangular via mask multiply).
+- **Splitting ops**: `split` (by sizes) and `chunk` (into equal parts) via `shrink`.
+- **GeLU backward test**: Verified gradient flow through gelu activation.
+- **Important pattern**: Tests that call `Schedule.reset()` between subtests must recreate tensors after reset — stale tensor references become invalid after buffer data is cleared.
+- **Test count**: 843 passing tests.
