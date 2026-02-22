@@ -582,10 +582,24 @@ let pow_ (base : t) (exponent : t) =
   let base' = broadcast_to base out_shape in
   let exponent' = broadcast_to exponent out_shape in
   let magnitude = exp (mul exponent' (log (abs_ base'))) in
-  (* Preserve sign: if base < 0, negate result *)
+  (* For negative bases with integer exponents: sign = (-1)^exp.
+     Detect odd integer exponents: trunc(exp) == exp AND trunc(exp/2)*2 != trunc(exp).
+     For non-integer exponents with negative bases, return magnitude (positive). *)
   let zero = zeros ~device:base'.device ~dtype:base'.dtype out_shape in
   let neg_base = lt base' zero in
-  where_ neg_base (neg_ magnitude) magnitude
+  let two = const_like exponent' 2.0 in
+  let exp_trunc = trunc_ exponent' in
+  let is_integer = eq exp_trunc exponent' in
+  let half_trunc = trunc_ (div exponent' two) in
+  let double_half = mul half_trunc two in
+  let is_odd = ne double_half exp_trunc in
+  (* Only negate when base < 0 AND exponent is an odd integer *)
+  let should_negate = where_ neg_base (where_ is_integer (where_ is_odd
+    (full ~device:base'.device ~dtype:Dtype.bool out_shape 1.0)
+    (full ~device:base'.device ~dtype:Dtype.bool out_shape 0.0))
+    (full ~device:base'.device ~dtype:Dtype.bool out_shape 0.0))
+    (full ~device:base'.device ~dtype:Dtype.bool out_shape 0.0) in
+  where_ should_negate (neg_ magnitude) magnitude
 
 (** Scalar power: x ** p *)
 let pow_scalar (t : t) (p : float) =
