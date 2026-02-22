@@ -416,3 +416,11 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **LR schedulers**: `lr_step_decay ~step_size ~gamma` (step decay), `lr_exponential_decay ~gamma` (exponential), `lr_cosine_annealing ~t_max ?eta_min` (cosine annealing). All operate on `lr_scheduler` state record.
 - **Model save/load**: `Nn.save_params filename params` serializes named tensors to text file (name|shape|values). `Nn.load_params filename` deserializes back. `Nn.save_sequential` saves all parameters from a sequential model with layer-qualified names. Float32 precision preserved through `%.17g` format.
 - **Test count**: 916 passing tests.
+
+## Claude round 48 decisions
+
+- **Codex review fix (round 46)**: Embedding index validation now rejects non-integer float indices (e.g., `1.5`) with `Invalid_argument`, not just out-of-range integers. `pow_` parity already fixed in R47.
+- **Nn.LayerNorm layer**: Trainable layer wrapper around `Tensor.layer_norm` with learnable weight/bias. Normalizes over last N dimensions. Includes `of_layer_norm` for sequential model composition.
+- **Tensor.stack**: Stack tensors along a new axis (inserts dimension then concatenates). `cat` already existed; `stack` builds on it via reshape+cat.
+- **Advanced training demo**: 15-step training loop combining gradient clipping (`clip_grad_norm ~max_norm:5.0`), LR scheduling (`lr_step_decay ~gamma:0.5`), and SGD. Converges to `w=3.27, b=1.21` for `y=3x+2` target.
+- **Test count**: 940 passing tests.

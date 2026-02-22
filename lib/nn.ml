@@ -125,6 +125,60 @@ let of_batch_norm name (bn : batch_norm) : layer =
     forward = batch_norm_forward bn;
     params = (fun () -> batch_norm_params bn) }
 
+(** Layer normalization.
+    Normalizes over the last [normalized_shape] dimensions.
+    y = (x - mean) / sqrt(var + eps) * weight + bias *)
+type layer_norm = {
+  ln_weight: Tensor.t;       (** Scale (gamma) *)
+  ln_bias: Tensor.t;         (** Shift (beta) *)
+  normalized_shape: int list; (** Shape of the dimensions being normalized *)
+  ln_eps: float;
+}
+
+(** Create a LayerNorm layer *)
+let layer_norm ?(device="CPU") ?(dtype=Dtype.float32) ?(eps=1e-5) (normalized_shape : int list) =
+  let size = List.fold_left ( * ) 1 normalized_shape in
+  { ln_weight = Tensor.from_float_list ~device ~dtype [size] (List.init size (fun _ -> 1.0));
+    ln_bias = Tensor.from_float_list ~device ~dtype [size] (List.init size (fun _ -> 0.0));
+    normalized_shape;
+    ln_eps = eps }
+
+(** Forward pass for layer normalization.
+    Normalizes over the last N dimensions matching normalized_shape.
+    Input x: [...; *normalized_shape], output same shape. *)
+let layer_norm_forward (ln : layer_norm) (x : Tensor.t) : Tensor.t =
+  let ndim = List.length x.shape in
+  let norm_ndim = List.length ln.normalized_shape in
+  if ndim < norm_ndim then
+    invalid_arg "LayerNorm: input has fewer dims than normalized_shape";
+  (* Reduce over the last norm_ndim dimensions *)
+  let reduce_axes = List.init norm_ndim (fun i -> ndim - norm_ndim + i) in
+  let m = Tensor.mean ~axes:reduce_axes x in
+  let m_exp = Tensor.expand m x.shape in
+  let diff = Tensor.sub x m_exp in
+  let var = Tensor.mean ~axes:reduce_axes (Tensor.mul diff diff) in
+  let var_exp = Tensor.expand var x.shape in
+  let eps_t = Tensor.const_like var_exp ln.ln_eps in
+  let normed = Tensor.div diff (Tensor.sqrt_ (Tensor.add var_exp eps_t)) in
+  (* Reshape weight/bias to broadcast: [1, ..., 1, *normalized_shape] *)
+  let bc_shape = List.init ndim (fun i ->
+    if i < ndim - norm_ndim then 1
+    else List.nth ln.normalized_shape (i - (ndim - norm_ndim))
+  ) in
+  let w = Tensor.expand (Tensor.reshape ln.ln_weight bc_shape) x.shape in
+  let b = Tensor.expand (Tensor.reshape ln.ln_bias bc_shape) x.shape in
+  Tensor.add (Tensor.mul normed w) b
+
+(** Get trainable parameters from a layer_norm layer *)
+let layer_norm_params (ln : layer_norm) : Tensor.t list =
+  [ln.ln_weight; ln.ln_bias]
+
+(** Wrap a layer_norm layer as a generic layer *)
+let of_layer_norm name (ln : layer_norm) : layer =
+  { name;
+    forward = layer_norm_forward ln;
+    params = (fun () -> layer_norm_params ln) }
+
 (** Embedding layer: maps integer indices to dense vectors.
     weight shape: [num_embeddings; embedding_dim] *)
 type embedding = {
@@ -143,9 +197,12 @@ let embedding ?(device="CPU") ?(dtype=Dtype.float32) ~num_embeddings ~embedding_
     Validates that all indices are in [0, num_embeddings).
     Out-of-range indices would silently produce zero rows in the one_hot encoding. *)
 let embedding_forward (emb : embedding) (indices : Tensor.t) : Tensor.t =
-  (* Validate indices are in range by eagerly checking values *)
+  (* Validate indices: must be integers in range [0, num_embeddings) *)
   let idx_vals = Tensor.to_float_list indices in
   List.iteri (fun i v ->
+    if Float.of_int (Float.to_int v) <> v then
+      invalid_arg (Printf.sprintf
+        "Embedding: non-integer index %g at position %d" v i);
     let idx = Float.to_int v in
     if idx < 0 || idx >= emb.num_embeddings then
       invalid_arg (Printf.sprintf
