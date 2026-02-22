@@ -1461,6 +1461,71 @@ let test_metal_training () =
   check "metal training loss < 0.001" (!final_loss < 0.001);
   check_float "metal trained w ≈ 2.0" w_final 2.0 0.01
 
+(* ---- Test: Metal movement ops ---- *)
+let test_metal_movement () =
+  Printf.printf "\n=== Metal Movement Ops ===\n%!";
+  (* PERMUTE on Metal *)
+  Schedule.reset ();
+  let a = Tensor.from_float_list ~device:"METAL" [2; 3] [1.;2.;3.;4.;5.;6.] in
+  let ap = Tensor.permute a [1; 0] in
+  let z32 = Tensor.from_float_list ~device:"METAL" [3; 2] [0.;0.;0.;0.;0.;0.] in
+  let rp = Tensor.add ap z32 in
+  let vp = Tensor.to_float_list rp in
+  check "metal permute len" (List.length vp = 6);
+  check_float "metal perm[0]" (List.nth vp 0) 1.0 1e-5;
+  check_float "metal perm[1]" (List.nth vp 1) 4.0 1e-5;
+  check_float "metal perm[2]" (List.nth vp 2) 2.0 1e-5;
+  check_float "metal perm[3]" (List.nth vp 3) 5.0 1e-5;
+  (* FLIP on Metal *)
+  Schedule.reset ();
+  let b = Tensor.from_float_list ~device:"METAL" [2; 3] [1.;2.;3.;4.;5.;6.] in
+  let bf = Tensor.flip b [1] in
+  let z23 = Tensor.from_float_list ~device:"METAL" [2; 3] [0.;0.;0.;0.;0.;0.] in
+  let rf = Tensor.add bf z23 in
+  let vf = Tensor.to_float_list rf in
+  check "metal flip len" (List.length vf = 6);
+  check_float "metal flip[0]" (List.nth vf 0) 3.0 1e-5;
+  check_float "metal flip[1]" (List.nth vf 1) 2.0 1e-5;
+  check_float "metal flip[2]" (List.nth vf 2) 1.0 1e-5;
+  check_float "metal flip[3]" (List.nth vf 3) 6.0 1e-5;
+  (* PAD on Metal *)
+  Schedule.reset ();
+  let c = Tensor.from_float_list ~device:"METAL" [3] [1.;2.;3.] in
+  let cp = Tensor.pad c [(1, 2)] in
+  let z6 = Tensor.from_float_list ~device:"METAL" [6] [0.;0.;0.;0.;0.;0.] in
+  let rpad = Tensor.add cp z6 in
+  let vpc = Tensor.to_float_list rpad in
+  check "metal pad len" (List.length vpc = 6);
+  let exp_pad = [0.;1.;2.;3.;0.;0.] in
+  List.iteri (fun i v ->
+    check_float (Printf.sprintf "metal pad[%d]" i) v (List.nth exp_pad i) 1e-5
+  ) vpc;
+  (* SHRINK on Metal *)
+  Schedule.reset ();
+  let d = Tensor.from_float_list ~device:"METAL" [2; 3] [1.;2.;3.;4.;5.;6.] in
+  let ds = Tensor.shrink d [(0,2); (1,3)] in
+  let z22 = Tensor.from_float_list ~device:"METAL" [2; 2] [0.;0.;0.;0.] in
+  let rs = Tensor.add ds z22 in
+  let vs = Tensor.to_float_list rs in
+  check "metal shrink len" (List.length vs = 4);
+  check_float "metal shrink[0]" (List.nth vs 0) 2.0 1e-5;
+  check_float "metal shrink[1]" (List.nth vs 1) 3.0 1e-5;
+  check_float "metal shrink[2]" (List.nth vs 2) 5.0 1e-5;
+  check_float "metal shrink[3]" (List.nth vs 3) 6.0 1e-5;
+  (* Composed chain on Metal: permute → flip *)
+  Schedule.reset ();
+  let e = Tensor.from_float_list ~device:"METAL" [2; 3] [1.;2.;3.;4.;5.;6.] in
+  let ep = Tensor.permute e [1; 0] in
+  let epf = Tensor.flip ep [0] in
+  let z32m = Tensor.from_float_list ~device:"METAL" [3; 2] [0.;0.;0.;0.;0.;0.] in
+  let rc = Tensor.add epf z32m in
+  let vc = Tensor.to_float_list rc in
+  check "metal perm_flip len" (List.length vc = 6);
+  let exp_c = [3.;6.;2.;5.;1.;4.] in
+  List.iteri (fun i v ->
+    check_float (Printf.sprintf "metal pf[%d]" i) v (List.nth exp_c i) 1e-5
+  ) vc
+
 (* ---- Test 45: CUDA backend registration ---- *)
 let test_cuda_backend () =
   Printf.printf "\n=== CUDA Backend ===\n%!";
@@ -1784,6 +1849,7 @@ let () =
   run_test "metal_matmul" test_metal_matmul;
   run_test "metal_backward" test_metal_backward;
   run_test "metal_training" test_metal_training;
+  run_test "metal_movement" test_metal_movement;
   run_test "pad_permute" test_pad_permute;
   run_test "shrink_permute" test_shrink_permute;
   run_test "permute_pad" test_permute_pad;
