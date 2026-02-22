@@ -200,3 +200,12 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **PAD/SHRINK shape in PERMUTE's find_child_shape**: Updated to compute shapes through PAD (add before+after) and SHRINK (hi-lo), rather than walking through them as identity wrappers. This ensures PERMUTE's index remapping uses the correct post-PAD/post-SHRINK shape.
 - **New tests**: `test_shrink_forward` (1D [4]→[2] and 2D [3,4]→[2,2]) and `test_pad_forward` (1D [3]→[6] and 2D [2,2]→[3,3]) verify element extraction and zero-padding.
 - Total tests: 96 unit + 350 e2e = 446 all passing.
+
+## Claude round 24 decisions
+
+- **Shared `infer_shape` walker (codex review feedback)**: Extracted a single `infer_shape` function that walks UOp graphs to infer logical shapes through all shape-changing wrappers: RESHAPE, EXPAND, PERMUTE, PAD, SHRINK, CONTIGUOUS, CAST, FLIP. Previously, PERMUTE had `find_child_shape`, SHRINK and PAD each had inline `find_shape` — but those inline walkers only handled RESHAPE/EXPAND/CONTIGUOUS/CAST/FLIP, missing the other movement ops. This meant `pad(permute(x))` or `shrink(permute(x))` silently fell back to identity (no index transform).
+- **PERMUTE handler**: Now uses `infer_shape child` instead of inline `find_child_shape`.
+- **SHRINK handler**: Now uses `infer_shape child` instead of inline `find_shape`.
+- **PAD handler**: Now uses `infer_shape child` instead of inline `find_shape`.
+- **New tests**: `test_pad_permute` ([2;3] → permute → pad → [4;3]) and `test_shrink_permute` ([2;3] → permute → shrink → [2;2]) verify that composed movement op chains produce correct element ordering.
+- Total tests: 96 unit + 368 e2e = 464 all passing.
