@@ -209,12 +209,17 @@ let rebuild_expr ~buf_id_to_param ~loop_idx ~output_shape ~numel (root : Uop.t) 
           rebuild (List.hd u.src) ~eff_shape:new_eff
         | Ops.EXPAND ->
           (* The EXPAND's child shape (with 1s for broadcast dims) determines
-             the buffer's effective shape. Get it from the child RESHAPE if present. *)
-          let child = List.hd u.src in
-          let child_shape = match child.op with
-            | Ops.RESHAPE -> (match child.arg with Uop.Shape s -> Some s | _ -> None)
+             the buffer's effective shape. Walk through simple wrappers
+             (CONTIGUOUS, CAST, PERMUTE, etc.) to find the nearest RESHAPE. *)
+          let rec find_reshape (n : Uop.t) =
+            match n.op with
+            | Ops.RESHAPE -> (match n.arg with Uop.Shape s -> Some s | _ -> None)
+            | Ops.CONTIGUOUS | Ops.PERMUTE | Ops.PAD | Ops.SHRINK | Ops.FLIP | Ops.CAST ->
+              find_reshape (List.hd n.src)
             | _ -> None
           in
+          let child = List.hd u.src in
+          let child_shape = find_reshape child in
           let new_eff = match child_shape with
             | Some s -> Some s  (* use the reshape shape before expand *)
             | None -> eff_shape

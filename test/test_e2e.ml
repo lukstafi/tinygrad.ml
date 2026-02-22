@@ -1273,6 +1273,93 @@ let test_realize_reuse_backward () =
   check_float "reuse dx[2]" (List.nth dx_vals 2) 3.0 1e-6;
   check_float "reuse dx[3]" (List.nth dx_vals 3) 3.0 1e-6
 
+(* ---- Test: Metal reduction ---- *)
+let test_metal_reduction () =
+  Printf.printf "\n=== Metal Reduction ===\n%!";
+  Schedule.reset ();
+  let a = Tensor.from_float_list ~device:"METAL" [4] [1.0; 2.0; 3.0; 4.0] in
+  let s = Tensor.sum a in
+  let result = Tensor.to_float_list s in
+  check "metal sum length" (List.length result = 1);
+  check_float "metal sum" (List.hd result) 10.0 1e-5;
+  Schedule.reset ();
+  let b = Tensor.from_float_list ~device:"METAL" [2; 3] [1.0; 2.0; 3.0; 4.0; 5.0; 6.0] in
+  let m = Tensor.mean b in
+  let result_m = Tensor.to_float_list m in
+  check_float "metal mean" (List.hd result_m) 3.5 1e-5;
+  Schedule.reset ();
+  let c = Tensor.from_float_list ~device:"METAL" [2; 3] [1.0; 2.0; 3.0; 4.0; 5.0; 6.0] in
+  let mx = Tensor.max_ c in
+  let result_mx = Tensor.to_float_list mx in
+  check_float "metal max" (List.hd result_mx) 6.0 1e-5
+
+(* ---- Test: Metal matmul ---- *)
+let test_metal_matmul () =
+  Printf.printf "\n=== Metal Matmul ===\n%!";
+  Schedule.reset ();
+  (* [2x2] @ [2x2] = [2x2] *)
+  let a = Tensor.from_float_list ~device:"METAL" [2; 2] [1.0; 2.0; 3.0; 4.0] in
+  let b = Tensor.from_float_list ~device:"METAL" [2; 2] [5.0; 6.0; 7.0; 8.0] in
+  let c = Tensor.matmul a b in
+  let result = Tensor.to_float_list c in
+  (* [1*5+2*7, 1*6+2*8; 3*5+4*7, 3*6+4*8] = [19, 22; 43, 50] *)
+  check "metal matmul length" (List.length result = 4);
+  check_float "metal matmul[0,0]" (List.nth result 0) 19.0 1e-4;
+  check_float "metal matmul[0,1]" (List.nth result 1) 22.0 1e-4;
+  check_float "metal matmul[1,0]" (List.nth result 2) 43.0 1e-4;
+  check_float "metal matmul[1,1]" (List.nth result 3) 50.0 1e-4
+
+(* ---- Test: Metal backward ---- *)
+let test_metal_backward () =
+  Printf.printf "\n=== Metal Backward ===\n%!";
+  Schedule.reset ();
+  let x = Tensor.from_float_list ~device:"METAL" [3] [1.0; 2.0; 3.0] in
+  let y = Tensor.mul x x in  (* y = x^2 *)
+  let loss = Tensor.sum y in  (* loss = sum(x^2) = 14 *)
+  let loss_val = List.hd (Tensor.to_float_list loss) in
+  check_float "metal loss = 14" loss_val 14.0 1e-4;
+  let grads = Tensor.backward loss [x] in
+  let (_, dx) = List.hd grads in
+  let dx_vals = Tensor.to_float_list dx in
+  (* d/dx sum(x^2) = 2x *)
+  check_float "metal dx[0] = 2" (List.nth dx_vals 0) 2.0 1e-4;
+  check_float "metal dx[1] = 4" (List.nth dx_vals 1) 4.0 1e-4;
+  check_float "metal dx[2] = 6" (List.nth dx_vals 2) 6.0 1e-4
+
+(* ---- Test: Metal MLP training ---- *)
+let test_metal_training () =
+  Printf.printf "\n=== Metal Linear Training ===\n%!";
+  (* Train y = 2*x via matmul + MSE + SGD on Metal GPU.
+     Exercises the full forward/backward/update pipeline on GPU.
+     We use linear regression instead of XOR MLP because the chaotic XOR
+     loss surface amplifies float32 rounding differences between CPU/Metal,
+     causing divergence. Linear regression converges identically on both. *)
+  Schedule.reset ();
+  let x_data = [1.0; 2.0; 3.0; 4.0] in
+  let y_data = [2.0; 4.0; 6.0; 8.0] in
+  let lr = 0.01 in
+  let w_val = ref [0.5] in
+  let final_loss = ref 1.0 in
+  for _step = 1 to 100 do
+    Schedule.reset ();
+    let x = Tensor.from_float_list ~device:"METAL" [4; 1] x_data in
+    let target = Tensor.from_float_list ~device:"METAL" [4; 1] y_data in
+    let w = Tensor.from_float_list ~device:"METAL" [1; 1] !w_val in
+    let pred = Tensor.matmul x w in
+    let diff = Tensor.sub pred target in
+    let loss = Tensor.mean (Tensor.mul diff diff) in
+    let loss_val = List.hd (Tensor.to_float_list loss) in
+    final_loss := loss_val;
+    let grads = Tensor.backward loss [w] in
+    let (_, dw) = List.nth grads 0 in
+    let dw_v = Tensor.to_float_list dw in
+    w_val := List.map2 (fun wi dwi -> wi -. lr *. dwi) !w_val dw_v;
+  done;
+  let w_final = List.hd !w_val in
+  Printf.printf "    final_loss = %.8f, w = %.6f\n%!" !final_loss w_final;
+  check "metal training loss < 0.001" (!final_loss < 0.001);
+  check_float "metal trained w ≈ 2.0" w_final 2.0 0.01
+
 (* ---- Test 45: CUDA backend registration ---- *)
 let test_cuda_backend () =
   Printf.printf "\n=== CUDA Backend ===\n%!";
@@ -1354,6 +1441,10 @@ let () =
   run_test "backward_after_realize" test_backward_after_realize;
   run_test "same_buffer_aliasing" test_same_buffer_aliasing;
   run_test "realize_reuse_backward" test_realize_reuse_backward;
+  run_test "metal_reduction" test_metal_reduction;
+  run_test "metal_matmul" test_metal_matmul;
+  run_test "metal_backward" test_metal_backward;
+  run_test "metal_training" test_metal_training;
   run_test "cuda_backend" test_cuda_backend;
   Printf.printf "\n============================\n%!";
   Printf.printf "Results: %d passed, %d failed\n%!" !pass_count !fail_count;
