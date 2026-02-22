@@ -1,7 +1,16 @@
 let check_close ~msg a b =
-  let eps = max 1e-6 (1e-6 *. Float.abs a) in
-  if Float.abs (a -. b) > eps then
-    failwith (Printf.sprintf "%s: expected %.8f, got %.8f" msg a b)
+  let is_finite x =
+    match classify_float x with
+    | FP_normal | FP_subnormal | FP_zero -> true
+    | FP_infinite | FP_nan -> false
+  in
+  if not (is_finite a && is_finite b) then begin
+    if a <> b then failwith (Printf.sprintf "%s: expected %.8f, got %.8f" msg a b)
+  end else begin
+    let eps = max 1e-6 (1e-6 *. Float.abs a) in
+    if Float.abs (a -. b) > eps then
+      failwith (Printf.sprintf "%s: expected %.8f, got %.8f" msg a b)
+  end
 
 let check_array ~msg expected got =
   if Array.length expected <> Array.length got then
@@ -205,6 +214,26 @@ let test_where_branch_selection_cpu () =
   check_close ~msg:"where select 1" 30.0 out.(1);
   check_close ~msg:"where select 2" 4.0 out.(2);
   check_close ~msg:"where select 3" 50.0 out.(3)
+
+let test_where_backward_cpu () =
+  let cond = Tinygrad_ml.Tensor.from_array [| 1.0; 0.0; 1.0; 0.0 |] in
+  let t = Tinygrad_ml.Tensor.from_array [| 10.0; 20.0; 30.0; 40.0 |] in
+  let f = Tinygrad_ml.Tensor.from_array [| 1.0; 2.0; 3.0; 4.0 |] in
+  let upstream = Tinygrad_ml.Tensor.from_array [| 2.0; 3.0; 5.0; 7.0 |] in
+  let y = Tinygrad_ml.Tensor.where_ cond t f in
+  let grads = Tinygrad_ml.Tensor.backward ~grad:upstream ~wrt:[ cond; t; f ] y in
+  let _, dcond = List.nth grads 0 in
+  let _, dt = List.nth grads 1 in
+  let _, df = List.nth grads 2 in
+  check_array ~msg:"d/dcond where(cond,t,f)"
+    [| 0.0; 0.0; 0.0; 0.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c dcond);
+  check_array ~msg:"d/dt where(cond,t,f)"
+    [| 2.0; 0.0; 5.0; 0.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c dt);
+  check_array ~msg:"d/df where(cond,t,f)"
+    [| 0.0; 3.0; 0.0; 7.0 |]
+    (Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c df)
 
 let test_cast_cpu () =
   let x = Tinygrad_ml.Tensor.from_array [| -1.9; -0.1; 0.0; 2.7 |] in
@@ -514,6 +543,7 @@ let () =
   test_matmul_cpu ();
   test_where_cmp_relu_cpu ();
   test_where_branch_selection_cpu ();
+  test_where_backward_cpu ();
   test_cast_cpu ();
   test_noncontiguous_axis_reductions_cpu ();
   test_reshape_preserves_realize_cache_cpu ();

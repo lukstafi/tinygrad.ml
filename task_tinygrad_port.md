@@ -237,3 +237,16 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - Added CPU regression coverage for cast forward/backward semantics:
   - Forward checks for `I32`, `Bool`, and `F32`.
   - Backward checks that only `cast(F32)` propagates gradient.
+
+## Codex round 22 decisions
+
+- Hardened numeric test assertions across CPU/CUDA/Metal tests:
+  - Updated `check_close` to treat non-finite mismatches (`NaN`, `inf`) as failures, so branch-selection regressions cannot silently pass.
+- Added explicit `where` backward routing test on CPU:
+  - Verifies with custom upstream gradient that:
+    - `d/dcond where(cond,t,f) = 0`,
+    - `d/dt where(cond,t,f) = upstream` on true-mask positions,
+    - `d/df where(cond,t,f) = upstream` on false-mask positions.
+- Added Metal-vs-CPU parity coverage for new ops:
+  - `where` with `NaN` in non-selected branches (ensures ternary select semantics),
+  - `cast` parity for `I32`, `Bool`, and `F32`.

@@ -1,7 +1,16 @@
 let check_close ~msg a b =
-  let eps = max 1e-6 (1e-6 *. Float.abs a) in
-  if Float.abs (a -. b) > eps then
-    failwith (Printf.sprintf "%s: expected %.8f, got %.8f" msg a b)
+  let is_finite x =
+    match classify_float x with
+    | FP_normal | FP_subnormal | FP_zero -> true
+    | FP_infinite | FP_nan -> false
+  in
+  if not (is_finite a && is_finite b) then begin
+    if a <> b then failwith (Printf.sprintf "%s: expected %.8f, got %.8f" msg a b)
+  end else begin
+    let eps = max 1e-6 (1e-6 *. Float.abs a) in
+    if Float.abs (a -. b) > eps then
+      failwith (Printf.sprintf "%s: expected %.8f, got %.8f" msg a b)
+  end
 
 let check_array ~msg expected got =
   if Array.length expected <> Array.length got then
@@ -109,6 +118,31 @@ let test_axis_reductions_metal_vs_cpu () =
   in
   check_array ~msg:"metal noncontig sum_axis matches cpu" cpu_noncontig metal_noncontig
 
+let test_where_cast_metal_vs_cpu () =
+  let cond = Tinygrad_ml.Tensor.from_array [| 1.0; 0.0; 1.0; 0.0 |] in
+  let t = Tinygrad_ml.Tensor.from_array [| 2.0; Float.nan; 4.0; Float.nan |] in
+  let f = Tinygrad_ml.Tensor.from_array [| Float.nan; 30.0; Float.nan; 50.0 |] in
+  let where_expr = Tinygrad_ml.Tensor.where_ cond t f in
+  let cpu_where = Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c where_expr in
+  let metal_where = Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Metal where_expr in
+  check_array ~msg:"metal where matches cpu" cpu_where metal_where;
+  check_array ~msg:"metal where branch selection"
+    [| 2.0; 30.0; 4.0; 50.0 |]
+    metal_where;
+  let x = Tinygrad_ml.Tensor.from_array [| -1.9; -0.1; 0.0; 2.7 |] in
+  let cast_i32 = Tinygrad_ml.Tensor.cast ~dtype:Tinygrad_ml.Dtype.I32 x in
+  let cast_bool = Tinygrad_ml.Tensor.cast ~dtype:Tinygrad_ml.Dtype.Bool x in
+  let cast_f32 = Tinygrad_ml.Tensor.cast ~dtype:Tinygrad_ml.Dtype.F32 x in
+  let cpu_i32 = Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c cast_i32 in
+  let metal_i32 = Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Metal cast_i32 in
+  let cpu_bool = Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c cast_bool in
+  let metal_bool = Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Metal cast_bool in
+  let cpu_f32 = Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Cpu_c cast_f32 in
+  let metal_f32 = Tinygrad_ml.Tensor.to_array ~device:Tinygrad_ml.Runtime.Metal cast_f32 in
+  check_array ~msg:"metal cast i32 matches cpu" cpu_i32 metal_i32;
+  check_array ~msg:"metal cast bool matches cpu" cpu_bool metal_bool;
+  check_array ~msg:"metal cast f32 matches cpu" cpu_f32 metal_f32
+
 let run_or_skip () =
   match Tinygrad_ml.Metal_backend.available () with
   | Error msg ->
@@ -122,6 +156,7 @@ let run_or_skip () =
       test_reductions_metal ();
       test_fused_reductions_metal_vs_cpu ();
       test_axis_reductions_metal_vs_cpu ();
+      test_where_cast_metal_vs_cpu ();
       Printf.printf "test_metal: ok\n%!"
 
 let () = run_or_skip ()
