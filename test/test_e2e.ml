@@ -887,6 +887,29 @@ let test_permute_forward () =
     check_float (Printf.sprintf "permute fwd[%d]" i) v (List.nth expected i) 1e-6
   ) vals
 
+(* ---- Test 29c: Permute + broadcast composition ---- *)
+let test_permute_broadcast () =
+  Printf.printf "\n=== Permute + Broadcast ===\n%!";
+  Schedule.reset ();
+  (* x is [2;3] = [[1,2,3],[4,5,6]].
+     permute([1;0]) → [3;2] = [[1,4],[2,5],[3,6]].
+     bias is [1;2] = [[10,20]] (broadcast along axis 0).
+     result = permute(x) + bias = [[11,24],[12,25],[13,26]].
+     Flat: [11,24,12,25,13,26]. *)
+  let x = Tensor.from_float_list [2; 3] [1.0; 2.0; 3.0; 4.0; 5.0; 6.0] in
+  let xp = Tensor.permute x [1; 0] in
+  let bias = Tensor.from_float_list [1; 2] [10.0; 20.0] in
+  let bcast = Tensor.expand bias [3; 2] in
+  let result = Tensor.add xp bcast in
+  let vals = Tensor.to_float_list result in
+  Printf.printf "  permute+bcast result: [%s]\n%!"
+    (String.concat ", " (List.map string_of_float vals));
+  check "permute+bcast length" (List.length vals = 6);
+  let expected = [11.0; 24.0; 12.0; 25.0; 13.0; 26.0] in
+  List.iteri (fun i v ->
+    check_float (Printf.sprintf "perm+bcast[%d]" i) v (List.nth expected i) 1e-6
+  ) vals
+
 (* ---- Test 30: Where + comparison ops (elementwise max via where) ---- *)
 let test_where_cmp () =
   Printf.printf "\n=== Where + Comparison ===\n%!";
@@ -1449,6 +1472,7 @@ let () =
   run_test "gradient_log2" test_gradient_log2;
   run_test "gradient_permute" test_gradient_permute;
   run_test "permute_forward" test_permute_forward;
+  run_test "permute_broadcast" test_permute_broadcast;
   run_test "where_cmp" test_where_cmp;
   run_test "cast_forward" test_cast_forward;
   run_test "gradient_expand" test_gradient_expand;
