@@ -434,6 +434,49 @@ let of_conv2d name (c : conv2d) : layer =
     forward = conv2d_forward c;
     params = (fun () -> conv2d_params c) }
 
+(** 1D convolution layer. *)
+type conv1d = {
+  c1_weight: Tensor.t;
+  c1_bias: Tensor.t option;
+  c1_stride: int;
+  c1_padding: int;
+  c1_out_channels: int;
+  c1_in_channels: int;
+  c1_kernel_size: int;
+}
+
+let conv1d ?(device="CPU") ?(dtype=Dtype.float32) ?(bias=true)
+    ?(stride=1) ?(padding=0) ~in_channels ~out_channels ~kernel_size () =
+  let fan_in = in_channels * kernel_size in
+  let w = Tensor.kaiming_uniform ~device ~dtype [out_channels; in_channels; kernel_size] ~fan_in in
+  let b = if bias then
+    Some (Tensor.zeros ~device ~dtype [out_channels])
+  else None in
+  { c1_weight = w; c1_bias = b; c1_stride = stride;
+    c1_padding = padding; c1_out_channels = out_channels;
+    c1_in_channels = in_channels; c1_kernel_size = kernel_size }
+
+let conv1d_forward (c : conv1d) (x : Tensor.t) : Tensor.t =
+  let out = Tensor.conv1d ~stride:c.c1_stride ~padding:c.c1_padding x c.c1_weight in
+  match c.c1_bias with
+  | None -> out
+  | Some b ->
+    (* bias: [out_channels] → [out_channels, 1] → broadcast *)
+    let ol = List.nth out.shape 1 in
+    let b2 = Tensor.reshape b [c.c1_out_channels; 1] in
+    let b_exp = Tensor.expand b2 [c.c1_out_channels; ol] in
+    Tensor.add out b_exp
+
+let conv1d_params (c : conv1d) : Tensor.t list =
+  match c.c1_bias with
+  | None -> [c.c1_weight]
+  | Some b -> [c.c1_weight; b]
+
+let of_conv1d name (c : conv1d) : layer =
+  { name;
+    forward = conv1d_forward c;
+    params = (fun () -> conv1d_params c) }
+
 (** Adam optimizer state *)
 type adam_state = {
   m: float array;   (** First moment estimate *)
@@ -1023,10 +1066,13 @@ let accuracy (logits : Tensor.t) (targets : Tensor.t) : float =
   ) 0 pv tv in
   Float.of_int correct /. Float.of_int batch
 
-(** Count total number of trainable parameters in a list of tensors. *)
+(** Count total number of trainable parameters in a list of tensors.
+    Counts parameter entries, not unique tensor identities — shared/tied
+    weights will be counted multiple times if they appear more than once. *)
 let parameter_count (params : Tensor.t list) : int =
   List.fold_left (fun acc (t : Tensor.t) -> acc + Helpers.prod t.shape) 0 params
 
-(** Count total parameters in a sequential model. *)
+(** Count total parameters in a sequential model.
+    Same semantics as {!parameter_count}: shared weights counted per occurrence. *)
 let sequential_parameter_count (layers : layer list) : int =
   parameter_count (sequential_params layers)

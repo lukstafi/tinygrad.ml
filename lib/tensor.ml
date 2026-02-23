@@ -850,6 +850,30 @@ let cosine_similarity ?(eps=1e-8) (a : t) (b : t) : t =
   let out_shape = List.filteri (fun i _ -> i <> last_ax) result.shape in
   reshape result out_shape
 
+(** KL divergence loss: KL(target || pred).
+    pred: logits (will be converted via log_softmax internally).
+    target: probability distribution (non-negative, sums to 1 along last axis).
+    Returns mean of target * (log(target) - log_softmax(pred)). *)
+let kl_div_loss (pred : t) (target : t) =
+  if pred.shape <> target.shape then
+    invalid_arg "kl_div_loss: shapes must match";
+  let eps_t = const_like target 1e-8 in
+  let safe_target = add target eps_t in
+  let log_pred = log_softmax pred in
+  mean (mul target (sub (log safe_target) log_pred))
+
+(** L2-normalize along the given axis. Returns x / (||x||_2 + eps). *)
+let normalize ?(axis=(-1)) ?(eps=1e-12) (t : t) : t =
+  let ndim = List.length t.shape in
+  let ax = if axis < 0 then ndim + axis else axis in
+  if ax < 0 || ax >= ndim then
+    invalid_arg (Printf.sprintf "normalize: axis %d out of range for %d-D tensor" axis ndim);
+  let sq = mul t t in
+  let norm_sq = sum ~axes:[ax] sq in
+  let eps_t = const_like norm_sq eps in
+  let norm = sqrt_ (add norm_sq eps_t) in
+  div t norm
+
 (** Scaled dot-product attention: softmax(Q @ K^T / sqrt(d_k)) @ V.
     Q: [seq_q; d_k], K: [seq_k; d_k], V: [seq_k; d_v].
     Optional mask: [seq_q; seq_k] with -inf for masked positions.
@@ -1121,6 +1145,60 @@ let _conv2d_impl ?(stride=1) ?(padding=0) (input : t) (weight : t) : t =
     (Array.to_list out_vals)
 
 let () = conv2d_ref := _conv2d_impl
+
+(* 1D convolution via host-side computation (forward/inference only).
+   input [C_in, L] → weight [C_out, C_in, K] → [C_out, OL].
+   Gradients do not flow through this operation. *)
+let conv1d ?(stride=1) ?(padding=0) (input : t) (weight : t) : t =
+  let ( + ) = Stdlib.( + ) and ( - ) = Stdlib.( - )
+  and ( * ) = Stdlib.( * ) and ( / ) = Stdlib.( / ) in
+  if stride <= 0 then
+    invalid_arg (Printf.sprintf "conv1d: stride must be > 0, got %d" stride);
+  if padding < 0 then
+    invalid_arg (Printf.sprintf "conv1d: padding must be >= 0, got %d" padding);
+  if List.length input.shape <> 2 then
+    invalid_arg (Printf.sprintf "conv1d: input must be 2-D [C,L], got [%s]"
+      (String.concat "," (List.map string_of_int input.shape)));
+  if List.length weight.shape <> 3 then
+    invalid_arg (Printf.sprintf "conv1d: weight must be 3-D [Cout,Cin,K], got [%s]"
+      (String.concat "," (List.map string_of_int weight.shape)));
+  let c_in = List.nth input.shape 0 in
+  let il = List.nth input.shape 1 in
+  let c_out = List.nth weight.shape 0 in
+  let c_in_w = List.nth weight.shape 1 in
+  let kl = List.nth weight.shape 2 in
+  if c_in <> c_in_w then
+    invalid_arg (Printf.sprintf "conv1d: input channels %d != weight channels %d" c_in c_in_w);
+  let ol = (il + 2 * padding - kl) / stride + 1 in
+  if ol <= 0 then
+    invalid_arg "conv1d: output length <= 0, check stride/padding/kernel";
+  let input_r = !realize_ref input in
+  let weight_r = !realize_ref weight in
+  let inp_vals = Array.of_list (to_float_list input_r) in
+  let w_vals = Array.of_list (to_float_list weight_r) in
+  let get_inp ic i =
+    let i' = i - padding in
+    if i' < 0 || i' >= il then 0.0
+    else inp_vals.(ic * il + i')
+  in
+  let get_w oc ic ki =
+    w_vals.((oc * c_in + ic) * kl + ki)
+  in
+  let out_vals = Array.make (c_out * ol) 0.0 in
+  for oc = 0 to c_out - 1 do
+    for oi = 0 to ol - 1 do
+      let s = ref 0.0 in
+      for ic = 0 to c_in - 1 do
+        for ki = 0 to kl - 1 do
+          let ii = oi * stride + ki in
+          s := !s +. (get_inp ic ii) *. (get_w oc ic ki)
+        done
+      done;
+      out_vals.(oc * ol + oi) <- !s
+    done
+  done;
+  from_float_list ~device:input.device ~dtype:input.dtype [c_out; ol]
+    (Array.to_list out_vals)
 
 (* 2D max pooling via host-side computation (forward/inference only).
    input [C, H, W] → [C, OH, OW]. Gradients do not flow through this operation. *)
