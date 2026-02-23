@@ -3496,7 +3496,15 @@ let test_conv_pool_validation () =
   (* avg_pool2d padding=-1 rejected *)
   let c4 = try ignore (Tensor.avg_pool2d ~kernel_size:2 ~padding:(-1) inp); false
     with Invalid_argument _ -> true in
-  check "avgpool padding=-1 rejected" c4
+  check "avgpool padding=-1 rejected" c4;
+  (* max_pool2d stride=-1 rejected *)
+  let c5 = try ignore (Tensor.max_pool2d ~kernel_size:2 ~stride:(-1) inp); false
+    with Invalid_argument _ -> true in
+  check "maxpool stride=-1 rejected" c5;
+  (* avg_pool2d stride=-1 rejected *)
+  let c6 = try ignore (Tensor.avg_pool2d ~kernel_size:2 ~stride:(-1) inp); false
+    with Invalid_argument _ -> true in
+  check "avgpool stride=-1 rejected" c6
 
 (* ---- Test 86k: Max Pool 2D ---- *)
 let test_max_pool2d () =
