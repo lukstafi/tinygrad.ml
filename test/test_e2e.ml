@@ -4990,6 +4990,8 @@ let test_te_smoke () =
   List.iter (fun ((p : Tensor.t), (g : Tensor.t)) ->
     check "te ffn grad shape" (p.shape = g.shape)
   ) grads;
+  (* Note: to_float_list on TE grads fails due to MHA backward complexity;
+     non-zero gradient checks are covered by test_ffn_backward instead *)
   Printf.printf "  TE backward through FFN: %d grads\n%!" (List.length grads)
 
 (* ---- Test 110: eye ---- *)
@@ -5029,7 +5031,70 @@ let test_linspace () =
   let l1v = Tensor.to_float_list l1 in
   check "linspace 1pt" ((List.hd l1v) = 3.0)
 
-(* ---- Test 112: Tensor.where broadcast ---- *)
+(* ---- Test 112: outer product ---- *)
+let test_outer () =
+  Printf.printf "\n=== Outer ===\n%!";
+  Schedule.reset ();
+  let a = Tensor.from_float_list [3] [1.0; 2.0; 3.0] in
+  let b = Tensor.from_float_list [2] [4.0; 5.0] in
+  let o = Tensor.outer a b in
+  check "outer shape" (o.shape = [3; 2]);
+  let ov = Tensor.to_float_list o in
+  check_float "outer[0,0]" (List.nth ov 0) 4.0 0.01;
+  check_float "outer[0,1]" (List.nth ov 1) 5.0 0.01;
+  check_float "outer[1,0]" (List.nth ov 2) 8.0 0.01;
+  check_float "outer[2,1]" (List.nth ov 5) 15.0 0.01
+
+(* ---- Test 113: meshgrid ---- *)
+let test_meshgrid () =
+  Printf.printf "\n=== Meshgrid ===\n%!";
+  Schedule.reset ();
+  let x = Tensor.from_float_list [3] [1.0; 2.0; 3.0] in
+  let y = Tensor.from_float_list [2] [4.0; 5.0] in
+  let grids = Tensor.meshgrid [x; y] in
+  check "meshgrid count" (List.length grids = 2);
+  let gx = List.nth grids 0 in
+  let gy = List.nth grids 1 in
+  check "meshgrid x shape" (gx.shape = [3; 2]);
+  check "meshgrid y shape" (gy.shape = [3; 2]);
+  let gxv = Tensor.to_float_list gx in
+  let gyv = Tensor.to_float_list gy in
+  (* gx: [[1,1],[2,2],[3,3]] *)
+  check_float "gx[0,0]" (List.nth gxv 0) 1.0 0.01;
+  check_float "gx[0,1]" (List.nth gxv 1) 1.0 0.01;
+  check_float "gx[1,0]" (List.nth gxv 2) 2.0 0.01;
+  (* gy: [[4,5],[4,5],[4,5]] *)
+  check_float "gy[0,0]" (List.nth gyv 0) 4.0 0.01;
+  check_float "gy[0,1]" (List.nth gyv 1) 5.0 0.01;
+  check_float "gy[2,0]" (List.nth gyv 4) 4.0 0.01
+
+(* ---- Test 114: scatter ---- *)
+let test_scatter () =
+  Printf.printf "\n=== Scatter ===\n%!";
+  Schedule.reset ();
+  (* 1D scatter *)
+  let t = Tensor.from_float_list [5] [0.0; 0.0; 0.0; 0.0; 0.0] in
+  let idx = Tensor.from_float_list [3] [1.0; 3.0; 4.0] in
+  let src = Tensor.from_float_list [3] [10.0; 30.0; 40.0] in
+  let s = Tensor.scatter t idx src in
+  let sv = Tensor.to_float_list s in
+  check "scatter 1d shape" (s.shape = [5]);
+  check_float "scatter[0]" (List.nth sv 0) 0.0 0.01;
+  check_float "scatter[1]" (List.nth sv 1) 10.0 0.01;
+  check_float "scatter[3]" (List.nth sv 3) 30.0 0.01;
+  check_float "scatter[4]" (List.nth sv 4) 40.0 0.01;
+  (* 2D scatter along axis=1 *)
+  Schedule.reset ();
+  let t2 = Tensor.from_float_list [2; 3] [0.0; 0.0; 0.0; 0.0; 0.0; 0.0] in
+  let idx2 = Tensor.from_float_list [2; 1] [2.0; 0.0] in
+  let src2 = Tensor.from_float_list [2; 1] [99.0; 88.0] in
+  let s2 = Tensor.scatter ~axis:1 t2 idx2 src2 in
+  let s2v = Tensor.to_float_list s2 in
+  check "scatter 2d shape" (s2.shape = [2; 3]);
+  check_float "scatter 2d[0,2]" (List.nth s2v 2) 99.0 0.01;
+  check_float "scatter 2d[1,0]" (List.nth s2v 3) 88.0 0.01
+
+(* ---- Test 115: Tensor.where broadcast ---- *)
 let test_where_broadcast () =
   Printf.printf "\n=== Where Broadcast ===\n%!";
   Schedule.reset ();
@@ -5518,6 +5583,9 @@ let () =
   run_test "te_smoke" test_te_smoke;
   run_test "eye" test_eye;
   run_test "linspace" test_linspace;
+  run_test "outer" test_outer;
+  run_test "meshgrid" test_meshgrid;
+  run_test "scatter" test_scatter;
   run_test "where_broadcast" test_where_broadcast;
   run_test "cuda_backend" test_cuda_backend;
   run_test "backend_availability" test_backend_availability;
