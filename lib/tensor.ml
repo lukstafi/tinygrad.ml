@@ -1554,7 +1554,13 @@ let gather ?(axis=0) (src : t) (index : t) : t =
       coords.(d) <- !remaining / idx_strides.(d);
       remaining := !remaining - coords.(d) * idx_strides.(d)
     done;
-    let idx_val = Float.to_int idx_vals.(flat) in
+    let idx_f = idx_vals.(flat) in
+    let idx_val = Float.to_int idx_f in
+    if Float.abs (idx_f -. Float.of_int idx_val) > 1e-6 then
+      invalid_arg (Printf.sprintf "gather: index %.4f is not an integer" idx_f);
+    let axis_dim = List.nth src.shape ax in
+    if idx_val < 0 || idx_val >= axis_dim then
+      invalid_arg (Printf.sprintf "gather: index %d out of range [0, %d)" idx_val axis_dim);
     let src_flat = ref 0 in
     for d = 0 to ndim - 1 do
       let c = if d = ax then idx_val else coords.(d) in
@@ -1563,3 +1569,43 @@ let gather ?(axis=0) (src : t) (index : t) : t =
     out_vals.(flat) <- src_vals.(!src_flat)
   done;
   from_float_list ~device:src.device ~dtype:src.dtype index.shape (Array.to_list out_vals)
+
+(** Repeat tensor along each dimension. repeats is a list of repeat counts
+    per dimension (must have same length as tensor dimensions).
+    Example: repeat [2; 3] on shape [2; 4] → shape [4; 12]. *)
+let repeat (t : t) (repeats : int list) : t =
+  let ( + ) = Stdlib.( + ) and ( - ) = Stdlib.( - )
+  and ( * ) = Stdlib.( * ) and ( / ) = Stdlib.( / ) in
+  let ndim = List.length t.shape in
+  if List.length repeats <> ndim then
+    invalid_arg (Printf.sprintf "repeat: repeats length %d != tensor dims %d"
+      (List.length repeats) ndim);
+  List.iter (fun r ->
+    if r <= 0 then invalid_arg (Printf.sprintf "repeat: repeat count must be > 0, got %d" r)
+  ) repeats;
+  let t_r = !realize_ref t in
+  let src_vals = Array.of_list (to_float_list t_r) in
+  let out_shape = List.map2 (fun d r -> d * r) t.shape repeats in
+  let out_size = Helpers.prod out_shape in
+  let out_vals = Array.make out_size 0.0 in
+  (* Compute strides for source and output *)
+  let src_strides = Array.make ndim 1 in
+  for i = ndim - 2 downto 0 do
+    src_strides.(i) <- src_strides.(i + 1) * List.nth t.shape (i + 1)
+  done;
+  let out_strides = Array.make ndim 1 in
+  for i = ndim - 2 downto 0 do
+    out_strides.(i) <- out_strides.(i + 1) * List.nth out_shape (i + 1)
+  done;
+  for flat = 0 to out_size - 1 do
+    let remaining = ref flat in
+    let src_flat = ref 0 in
+    for d = 0 to ndim - 1 do
+      let coord = !remaining / out_strides.(d) in
+      remaining := !remaining - coord * out_strides.(d);
+      let src_coord = coord mod List.nth t.shape d in
+      src_flat := !src_flat + src_coord * src_strides.(d)
+    done;
+    out_vals.(flat) <- src_vals.(!src_flat)
+  done;
+  from_float_list ~device:t.device ~dtype:t.dtype out_shape (Array.to_list out_vals)
