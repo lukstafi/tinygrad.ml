@@ -5094,7 +5094,72 @@ let test_scatter () =
   check_float "scatter 2d[0,2]" (List.nth s2v 2) 99.0 0.01;
   check_float "scatter 2d[1,0]" (List.nth s2v 3) 88.0 0.01
 
-(* ---- Test 115: Tensor.where broadcast ---- *)
+(* ---- Test 115: scatter validation ---- *)
+let test_scatter_validation () =
+  Printf.printf "\n=== Scatter Validation ===\n%!";
+  Schedule.reset ();
+  (* Invalid axis *)
+  let ok1 = try
+    let t = Tensor.from_float_list [3] [0.0; 0.0; 0.0] in
+    let idx = Tensor.from_float_list [1] [0.0] in
+    let src = Tensor.from_float_list [1] [1.0] in
+    ignore (Tensor.scatter ~axis:5 t idx src); false
+  with Invalid_argument _ -> true in
+  check "scatter rejects bad axis" ok1;
+  (* Fractional index *)
+  Schedule.reset ();
+  let ok2 = try
+    let t = Tensor.from_float_list [3] [0.0; 0.0; 0.0] in
+    let idx = Tensor.from_float_list [1] [1.5] in
+    let src = Tensor.from_float_list [1] [1.0] in
+    ignore (Tensor.scatter t idx src); false
+  with Invalid_argument _ -> true in
+  check "scatter rejects fractional index" ok2;
+  (* Out-of-range index *)
+  Schedule.reset ();
+  let ok3 = try
+    let t = Tensor.from_float_list [3] [0.0; 0.0; 0.0] in
+    let idx = Tensor.from_float_list [1] [10.0] in
+    let src = Tensor.from_float_list [1] [1.0] in
+    ignore (Tensor.scatter t idx src); false
+  with Invalid_argument _ -> true in
+  check "scatter rejects oob index" ok3;
+  (* Rank mismatch *)
+  Schedule.reset ();
+  let ok4 = try
+    let t = Tensor.from_float_list [2; 3] [0.0; 0.0; 0.0; 0.0; 0.0; 0.0] in
+    let idx = Tensor.from_float_list [2] [0.0; 1.0] in
+    let src = Tensor.from_float_list [2] [1.0; 2.0] in
+    ignore (Tensor.scatter t idx src); false
+  with Invalid_argument _ -> true in
+  check "scatter rejects rank mismatch" ok4;
+  Printf.printf "  scatter validation OK\n%!"
+
+(* ---- Test 116: cdist ---- *)
+let test_cdist () =
+  Printf.printf "\n=== Cdist ===\n%!";
+  Schedule.reset ();
+  (* a = [[0,0], [1,0], [0,1]], b = [[1,1]] *)
+  let a = Tensor.from_float_list [3; 2] [0.0; 0.0; 1.0; 0.0; 0.0; 1.0] in
+  let b = Tensor.from_float_list [1; 2] [1.0; 1.0] in
+  let d = Tensor.cdist a b in
+  let dv = Tensor.to_float_list d in
+  check "cdist shape" (d.shape = [3; 1]);
+  check_float "cdist[0,0]" (List.nth dv 0) (sqrt 2.0) 0.01;  (* ||[0,0]-[1,1]|| *)
+  check_float "cdist[1,0]" (List.nth dv 1) 1.0 0.01;          (* ||[1,0]-[1,1]|| *)
+  check_float "cdist[2,0]" (List.nth dv 2) 1.0 0.01;          (* ||[0,1]-[1,1]|| *)
+  (* Self-distance: diagonal should be 0 *)
+  Schedule.reset ();
+  let a2 = Tensor.from_float_list [2; 2] [1.0; 2.0; 3.0; 4.0] in
+  let d2 = Tensor.cdist a2 a2 in
+  let d2v = Tensor.to_float_list d2 in
+  check "cdist self shape" (d2.shape = [2; 2]);
+  check_float "cdist self[0,0]" (List.nth d2v 0) 0.0 0.01;
+  check_float "cdist self[1,1]" (List.nth d2v 3) 0.0 0.01
+
+(* causal_mask test already defined above at Test 84 *)
+
+(* ---- Test 117: Tensor.where broadcast ---- *)
 let test_where_broadcast () =
   Printf.printf "\n=== Where Broadcast ===\n%!";
   Schedule.reset ();
@@ -5586,6 +5651,8 @@ let () =
   run_test "outer" test_outer;
   run_test "meshgrid" test_meshgrid;
   run_test "scatter" test_scatter;
+  run_test "scatter_validation" test_scatter_validation;
+  run_test "cdist" test_cdist;
   run_test "where_broadcast" test_where_broadcast;
   run_test "cuda_backend" test_cuda_backend;
   run_test "backend_availability" test_backend_availability;
