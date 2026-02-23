@@ -470,27 +470,57 @@ let layer_norm ?(eps=1e-5) ?weight ?bias (t : t) ~normalized_shape =
     Implemented via reshape + expand + elementwise mul + sum reduction,
     matching tinygrad's approach of decomposing matmul into primitive ops. *)
 let matmul (a : t) (b : t) =
-  if List.length a.shape <> 2 || List.length b.shape <> 2 then
-    failwith (Printf.sprintf "matmul: both tensors must be exactly 2-D, got [%s] and [%s]"
+  let a_ndim = List.length a.shape in
+  let b_ndim = List.length b.shape in
+  if a_ndim < 2 || b_ndim < 2 then
+    failwith (Printf.sprintf "matmul: both tensors must be at least 2-D, got [%s] and [%s]"
       (String.concat "," (List.map string_of_int a.shape))
       (String.concat "," (List.map string_of_int b.shape)));
-  let n = List.nth a.shape 0 in
-  let k_a = List.nth a.shape 1 in
-  let k_b = List.nth b.shape 0 in
-  let m = List.nth b.shape 1 in
+  let k_a = List.nth a.shape (a_ndim - 1) in
+  let k_b = List.nth b.shape (b_ndim - 2) in
   if k_a <> k_b then
     failwith (Printf.sprintf "matmul: inner dimensions don't match (%d vs %d)" k_a k_b);
   let k = k_a in
-  (* a: [N, K] → [N, K, 1] → expand [N, K, M] *)
-  let a3 = reshape a [n; k; 1] in
-  let a_exp = expand a3 [n; k; m] in
-  (* b: [K, M] → [1, K, M] → expand [N, K, M] *)
-  let b3 = reshape b [1; k; m] in
-  let b_exp = expand b3 [n; k; m] in
-  (* Elementwise multiply, then reduce over K (axis=1) *)
-  let prod = mul a_exp b_exp in
-  let summed = sum ~axes:[1] prod in  (* [N, 1, M] *)
-  reshape summed [n; m]  (* [N, M] *)
+  let n = List.nth a.shape (a_ndim - 2) in
+  let m = List.nth b.shape (b_ndim - 1) in
+  (* Extract batch dims: everything except last 2 dims *)
+  let a_batch = List.filteri (fun i _ -> i < a_ndim - 2) a.shape in
+  let b_batch = List.filteri (fun i _ -> i < b_ndim - 2) b.shape in
+  (* For 2D case: simple, no batch dims *)
+  if a_batch = [] && b_batch = [] then begin
+    let a3 = reshape a [n; k; 1] in
+    let a_exp = expand a3 [n; k; m] in
+    let b3 = reshape b [1; k; m] in
+    let b_exp = expand b3 [n; k; m] in
+    let prod = mul a_exp b_exp in
+    let summed = sum ~axes:[1] prod in
+    reshape summed [n; m]
+  end else begin
+    (* Batched matmul: broadcast batch dims, then do inner product *)
+    let max_batch_len = max (List.length a_batch) (List.length b_batch) in
+    let pad_front lst target =
+      let pad = target - List.length lst in
+      List.init pad (fun _ -> 1) @ lst
+    in
+    let ab = pad_front a_batch max_batch_len in
+    let bb = pad_front b_batch max_batch_len in
+    let batch_shape = List.map2 (fun a b ->
+      if a = b then a
+      else if a = 1 then b
+      else if b = 1 then a
+      else failwith (Printf.sprintf "matmul: batch dims not broadcastable (%d vs %d)" a b)
+    ) ab bb in
+    (* a: [...batch, N, K] → [...batch, N, K, 1] → expand [...batch, N, K, M] *)
+    let a_r = reshape a (ab @ [n; k; 1]) in
+    let a_exp = expand a_r (batch_shape @ [n; k; m]) in
+    (* b: [...batch, K, M] → [...batch, 1, K, M] → expand [...batch, N, K, M] *)
+    let b_r = reshape b (bb @ [1; k; m]) in
+    let b_exp = expand b_r (batch_shape @ [n; k; m]) in
+    let prod = mul a_exp b_exp in
+    let k_axis = max_batch_len + 1 in
+    let summed = sum ~axes:[k_axis] prod in
+    reshape summed (batch_shape @ [n; m])
+  end
 
 (** 2D convolution — forward reference filled in after to_float_list is defined.
     Input [C_in, H, W] * weight [C_out, C_in, KH, KW] → [C_out, OH, OW]. *)
@@ -578,6 +608,12 @@ let softplus ?(beta=1.0) (t : t) =
 (** Mish activation: x * tanh(softplus(x)) *)
 let mish (t : t) =
   mul t (tanh_ (softplus t))
+
+let leaky_relu ?(neg_slope=0.01) (t : t) =
+  let zero = zeros ~device:t.device ~dtype:t.dtype t.shape in
+  let slope = const_like t neg_slope in
+  let pos = lt zero t in
+  where_ pos t (mul slope t)
 
 (** Element-wise power: base ** exponent.
     Uses exp(exponent * log(abs(base))) with sign correction: preserves the sign

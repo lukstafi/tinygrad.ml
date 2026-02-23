@@ -442,6 +442,33 @@ let adam_step ?(lr=0.001) ?(beta1=0.9) ?(beta2=0.999) ?(eps=1e-8)
     (Array.to_list new_pv) in
   (new_t, { m; v; t_step = t })
 
+(** AdamW optimizer step: Adam with decoupled weight decay.
+    weight_decay is applied directly to the parameter (not through gradient). *)
+let adamw_step ?(lr=0.001) ?(beta1=0.9) ?(beta2=0.999) ?(eps=1e-8) ?(weight_decay=0.01)
+    (param : Tensor.t) (grad : Tensor.t) (state : adam_state) : Tensor.t * adam_state =
+  let pv = Array.of_list (Tensor.to_float_list param) in
+  let gv = Array.of_list (Tensor.to_float_list grad) in
+  let n = Array.length pv in
+  let t = state.t_step + 1 in
+  let m = Array.copy state.m in
+  let v = Array.copy state.v in
+  for i = 0 to n - 1 do
+    m.(i) <- beta1 *. m.(i) +. (1.0 -. beta1) *. gv.(i);
+    v.(i) <- beta2 *. v.(i) +. (1.0 -. beta2) *. gv.(i) *. gv.(i);
+  done;
+  let bc1 = 1.0 -. (beta1 ** Float.of_int t) in
+  let bc2 = 1.0 -. (beta2 ** Float.of_int t) in
+  let new_pv = Array.init n (fun i ->
+    let m_hat = m.(i) /. bc1 in
+    let v_hat = v.(i) /. bc2 in
+    (* Decoupled weight decay: applied to parameter directly *)
+    let p_decayed = pv.(i) *. (1.0 -. lr *. weight_decay) in
+    p_decayed -. lr *. m_hat /. (Stdlib.sqrt v_hat +. eps)
+  ) in
+  let new_t = Tensor.from_float_list ~device:param.device ~dtype:param.dtype param.shape
+    (Array.to_list new_pv) in
+  (new_t, { m; v; t_step = t })
+
 (* ---- Gradient Clipping ---- *)
 
 (** Clip gradient values element-wise to [-clip_value, clip_value].

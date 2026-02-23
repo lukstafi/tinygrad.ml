@@ -467,3 +467,11 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Pool ops documented as inference-only**: Both pool ops now have comments noting gradients don't flow through (host-side computation severs autograd graph).
 - **Performance optimization**: Pool ops now use `Array.of_list` for O(1) indexed access instead of `List.nth` which is O(n) per access.
 - **Test count**: 1065 passing tests.
+
+## Claude round 54 decisions
+
+- **Codex review fix (round 52)**: Conv2d/pool inference-only documentation already in tensor.ml; no pool layer wrappers in nn.ml to annotate.
+- **Tensor.leaky_relu**: Leaky ReLU activation with configurable `neg_slope` (default 0.01). Uses `where_` on comparison with zero.
+- **Nn.adamw_step**: AdamW optimizer with decoupled weight decay. Weight decay applied directly to parameters (`p * (1 - lr * wd)`) before the Adam update, following Loshchilov & Hutter (2019).
+- **Batched matmul**: Extended `Tensor.matmul` to support 3D+ tensors. Batch dimensions are broadcast-compatible. Implementation: reshape to `[...batch, N, K, 1]` and `[...batch, 1, K, M]`, expand, multiply, sum over K axis.
+- **Test count**: 1088 passing tests.
