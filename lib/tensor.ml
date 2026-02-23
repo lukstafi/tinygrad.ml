@@ -1654,3 +1654,72 @@ let roll ?(axis=0) ~shift (t : t) : t =
     out_vals.(flat) <- src_vals.(!src_flat)
   done;
   from_float_list ~device:t.device ~dtype:t.dtype t.shape (Array.to_list out_vals)
+
+(** Cumulative sum along an axis (host-side, forward only).
+    Gradients do NOT flow through this operation. *)
+let cumsum ?(axis=0) (t : t) : t =
+  let ( + ) = Stdlib.( + ) and ( - ) = Stdlib.( - )
+  and ( * ) = Stdlib.( * ) and ( / ) = Stdlib.( / ) in
+  let ndim = List.length t.shape in
+  let ax = if axis < 0 then ndim + axis else axis in
+  if ax < 0 || ax >= ndim then
+    invalid_arg (Printf.sprintf "cumsum: axis %d out of range for %d-D tensor" axis ndim);
+  let t_r = !realize_ref t in
+  let vals = Array.of_list (to_float_list t_r) in
+  let total = Helpers.prod t.shape in
+  let strides = Array.make ndim 1 in
+  for i = ndim - 2 downto 0 do
+    strides.(i) <- strides.(i + 1) * List.nth t.shape (i + 1)
+  done;
+  let axis_dim = List.nth t.shape ax in
+  let axis_stride = strides.(ax) in
+  let out = Array.copy vals in
+  (* Iterate over all elements; if not the first along axis, add previous *)
+  for flat = 0 to total - 1 do
+    let coord_ax = (flat / axis_stride) mod axis_dim in
+    if coord_ax > 0 then
+      out.(flat) <- out.(flat - axis_stride) +. vals.(flat)
+  done;
+  from_float_list ~device:t.device ~dtype:t.dtype t.shape (Array.to_list out)
+
+(** Finite differences along an axis (host-side, forward only).
+    output[i] = input[i+1] - input[i] along the axis.
+    Output axis dimension is one less than input.
+    Gradients do NOT flow through this operation. *)
+let diff ?(axis=0) (t : t) : t =
+  let ( + ) = Stdlib.( + ) and ( - ) = Stdlib.( - )
+  and ( * ) = Stdlib.( * ) and ( / ) = Stdlib.( / ) in
+  let ndim = List.length t.shape in
+  let ax = if axis < 0 then ndim + axis else axis in
+  if ax < 0 || ax >= ndim then
+    invalid_arg (Printf.sprintf "diff: axis %d out of range for %d-D tensor" axis ndim);
+  let axis_dim = List.nth t.shape ax in
+  if axis_dim < 2 then
+    invalid_arg "diff: axis dimension must be >= 2";
+  let t_r = !realize_ref t in
+  let vals = Array.of_list (to_float_list t_r) in
+  let out_shape = List.mapi (fun i d -> if i = ax then d - 1 else d) t.shape in
+  let out_size = Helpers.prod out_shape in
+  let out_vals = Array.make out_size 0.0 in
+  let src_strides = Array.make ndim 1 in
+  for i = ndim - 2 downto 0 do
+    src_strides.(i) <- src_strides.(i + 1) * List.nth t.shape (i + 1)
+  done;
+  let out_strides = Array.make ndim 1 in
+  for i = ndim - 2 downto 0 do
+    out_strides.(i) <- out_strides.(i + 1) * List.nth out_shape (i + 1)
+  done;
+  for flat = 0 to out_size - 1 do
+    let remaining = ref flat in
+    let src_flat_curr = ref 0 in
+    let src_flat_next = ref 0 in
+    for d = 0 to ndim - 1 do
+      let coord = !remaining / out_strides.(d) in
+      remaining := !remaining - coord * out_strides.(d);
+      src_flat_curr := !src_flat_curr + coord * src_strides.(d);
+      let next_coord = if d = ax then coord + 1 else coord in
+      src_flat_next := !src_flat_next + next_coord * src_strides.(d)
+    done;
+    out_vals.(flat) <- vals.(!src_flat_next) -. vals.(!src_flat_curr)
+  done;
+  from_float_list ~device:t.device ~dtype:t.dtype out_shape (Array.to_list out_vals)

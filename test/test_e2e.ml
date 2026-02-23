@@ -4737,6 +4737,90 @@ let test_transformer_encoder_layer () =
     with Invalid_argument _ -> true in
   check "te bad d_model" bad_dim
 
+(* ---- Test 100: Cumsum ---- *)
+let test_cumsum () =
+  Printf.printf "\n=== Cumsum ===\n%!";
+  Schedule.reset ();
+  (* 1D cumsum *)
+  let t = Tensor.from_float_list [5] [1.0; 2.0; 3.0; 4.0; 5.0] in
+  let cs = Tensor.cumsum t in
+  let csv = Tensor.to_float_list cs in
+  Printf.printf "  cumsum: [%s]\n%!" (String.concat "; " (List.map (Printf.sprintf "%.0f") csv));
+  check "cumsum shape" (cs.shape = [5]);
+  check_float "cumsum[0]" (List.nth csv 0) 1.0 0.01;
+  check_float "cumsum[1]" (List.nth csv 1) 3.0 0.01;
+  check_float "cumsum[2]" (List.nth csv 2) 6.0 0.01;
+  check_float "cumsum[3]" (List.nth csv 3) 10.0 0.01;
+  check_float "cumsum[4]" (List.nth csv 4) 15.0 0.01;
+  (* 2D cumsum along axis=1 *)
+  Schedule.reset ();
+  let t2 = Tensor.from_float_list [2; 3] [1.0; 2.0; 3.0; 4.0; 5.0; 6.0] in
+  let cs2 = Tensor.cumsum ~axis:1 t2 in
+  let csv2 = Tensor.to_float_list cs2 in
+  check "cumsum 2d shape" (cs2.shape = [2; 3]);
+  check_float "cumsum 2d[0]" (List.nth csv2 0) 1.0 0.01;
+  check_float "cumsum 2d[1]" (List.nth csv2 1) 3.0 0.01;
+  check_float "cumsum 2d[2]" (List.nth csv2 2) 6.0 0.01;
+  check_float "cumsum 2d[3]" (List.nth csv2 3) 4.0 0.01;
+  check_float "cumsum 2d[4]" (List.nth csv2 4) 9.0 0.01;
+  check_float "cumsum 2d[5]" (List.nth csv2 5) 15.0 0.01;
+  (* Bad axis *)
+  let bad = try ignore (Tensor.cumsum ~axis:5 t); false
+    with Invalid_argument _ -> true in
+  check "cumsum bad axis" bad
+
+(* ---- Test 101: Diff ---- *)
+let test_diff () =
+  Printf.printf "\n=== Diff ===\n%!";
+  Schedule.reset ();
+  let t = Tensor.from_float_list [5] [1.0; 3.0; 6.0; 10.0; 15.0] in
+  let d = Tensor.diff t in
+  let dv = Tensor.to_float_list d in
+  Printf.printf "  diff: [%s]\n%!" (String.concat "; " (List.map (Printf.sprintf "%.0f") dv));
+  check "diff shape" (d.shape = [4]);
+  check_float "diff[0]" (List.nth dv 0) 2.0 0.01;
+  check_float "diff[1]" (List.nth dv 1) 3.0 0.01;
+  check_float "diff[2]" (List.nth dv 2) 4.0 0.01;
+  check_float "diff[3]" (List.nth dv 3) 5.0 0.01;
+  (* 2D diff along axis=1 *)
+  Schedule.reset ();
+  let t2 = Tensor.from_float_list [2; 4] [1.0; 3.0; 6.0; 10.0; 2.0; 5.0; 5.0; 8.0] in
+  let d2 = Tensor.diff ~axis:1 t2 in
+  check "diff 2d shape" (d2.shape = [2; 3]);
+  let dv2 = Tensor.to_float_list d2 in
+  check_float "diff 2d[0]" (List.nth dv2 0) 2.0 0.01;
+  check_float "diff 2d[3]" (List.nth dv2 3) 3.0 0.01;
+  (* Bad: axis dim < 2 *)
+  Schedule.reset ();
+  let bad = try ignore (Tensor.diff (Tensor.from_float_list [1] [5.0])); false
+    with Invalid_argument _ -> true in
+  check "diff bad dim" bad
+
+(* ---- Test 102: Positional encoding ---- *)
+let test_positional_encoding () =
+  Printf.printf "\n=== Positional Encoding ===\n%!";
+  Schedule.reset ();
+  let pe = Nn.positional_encoding ~max_len:10 ~d_model:8 () in
+  check "pe shape" (pe.shape = [10; 8]);
+  let pv = Tensor.to_float_list pe in
+  (* PE(0, 0) = sin(0) = 0 *)
+  check_float "pe[0,0]" (List.nth pv 0) 0.0 0.001;
+  (* PE(0, 1) = cos(0) = 1 *)
+  check_float "pe[0,1]" (List.nth pv 1) 1.0 0.001;
+  (* PE(1, 0) = sin(1) *)
+  check_float "pe[1,0]" (List.nth pv 8) (Stdlib.Float.sin 1.0) 0.001;
+  (* All values should be in [-1, 1] *)
+  let in_range = List.for_all (fun v -> v >= -1.001 && v <= 1.001) pv in
+  check "pe values in [-1,1]" in_range;
+  (* Odd d_model *)
+  Schedule.reset ();
+  let pe_odd = Nn.positional_encoding ~max_len:5 ~d_model:7 () in
+  check "pe odd shape" (pe_odd.shape = [5; 7]);
+  (* Bad params *)
+  let bad = try ignore (Nn.positional_encoding ~max_len:0 ~d_model:8 ()); false
+    with Invalid_argument _ -> true in
+  check "pe bad max_len" bad
+
 (* ---- Test 86: CUDA backend registration ---- *)
 let test_cuda_backend () =
   Printf.printf "\n=== CUDA Backend ===\n%!";
@@ -5187,6 +5271,9 @@ let () =
   run_test "masked_fill" test_masked_fill;
   run_test "roll" test_roll;
   run_test "transformer_encoder_layer" test_transformer_encoder_layer;
+  run_test "cumsum" test_cumsum;
+  run_test "diff" test_diff;
+  run_test "positional_encoding" test_positional_encoding;
   run_test "cuda_backend" test_cuda_backend;
   run_test "backend_availability" test_backend_availability;
   Printf.printf "\n============================\n%!";

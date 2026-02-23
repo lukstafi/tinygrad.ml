@@ -577,3 +577,11 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Tensor.roll**: Circular shift along an axis (host-side, forward only). Supports positive/negative shifts and arbitrary axis. Uses modular indexing.
 - **Nn.transformer_encoder_layer**: Pre-norm transformer encoder layer combining self-attention (MHA) + feedforward network (FFN) with residual connections and layer normalization. Parameters: d_model, num_heads, dim_feedforward (default 4*d_model). Validates d_model divisibility, shape constraints.
 - **Test count**: 1365 passing tests.
+
+## Claude round 68 decisions
+
+- **Codex review fix (round 66 MEDIUM)**: Documented transformer_encoder_layer_forward gradient expectations — FFN weights and LN params get gradients, MHA attention weights are forward/inference-only (host-side matmul in scaled_dot_product_attention).
+- **Tensor.cumsum**: Cumulative sum along an axis (host-side, forward only). Uses flat iteration with stride-based axis coordinate detection.
+- **Tensor.diff**: Finite differences along an axis (host-side, forward only). Output axis dimension is one less than input. output[i] = input[i+1] - input[i].
+- **Nn.positional_encoding**: Sinusoidal positional encoding for transformers. PE(pos,2i) = sin(pos/10000^(2i/d)), PE(pos,2i+1) = cos(...). Returns [max_len, d_model] tensor. Handles odd d_model. No trainable parameters.
+- **Test count**: 1395 passing tests.
