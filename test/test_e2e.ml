@@ -3631,6 +3631,79 @@ let test_cnn_inference () =
   Printf.printf "  logits: [%s]\n%!"
     (String.concat ", " (List.map (Printf.sprintf "%.4f") v))
 
+(* ---- Test 86p: Leaky ReLU ---- *)
+let test_leaky_relu () =
+  Printf.printf "\n=== Leaky ReLU ===\n%!";
+  Schedule.reset ();
+  let x = Tensor.from_float_list [4] [-2.0; -1.0; 0.0; 3.0] in
+  (* Default neg_slope = 0.01 *)
+  let out = Tensor.leaky_relu x in
+  let v = Tensor.to_float_list out in
+  check_float "leaky_relu[-2]" (List.nth v 0) (-0.02) 1e-4;
+  check_float "leaky_relu[-1]" (List.nth v 1) (-0.01) 1e-4;
+  check_float "leaky_relu[0]" (List.nth v 2) 0.0 1e-4;
+  check_float "leaky_relu[3]" (List.nth v 3) 3.0 1e-4;
+  (* Custom neg_slope *)
+  Schedule.reset ();
+  let x2 = Tensor.from_float_list [3] [-4.0; 0.0; 2.0] in
+  let out2 = Tensor.leaky_relu ~neg_slope:0.1 x2 in
+  let v2 = Tensor.to_float_list out2 in
+  check_float "leaky_relu_0.1[-4]" (List.nth v2 0) (-0.4) 1e-4;
+  check_float "leaky_relu_0.1[2]" (List.nth v2 2) 2.0 1e-4
+
+(* ---- Test 86q: Batch Matmul ---- *)
+let test_batch_matmul () =
+  Printf.printf "\n=== Batch Matmul ===\n%!";
+  Schedule.reset ();
+  (* 3D: [2, 2, 3] @ [2, 3, 2] → [2, 2, 2] *)
+  let a = Tensor.from_float_list [2; 2; 3]
+    [1.;2.;3.; 4.;5.;6.;  (* batch 0 *)
+     7.;8.;9.; 10.;11.;12.] in  (* batch 1 *)
+  let b = Tensor.from_float_list [2; 3; 2]
+    [1.;0.; 0.;1.; 1.;0.;  (* batch 0 *)
+     0.;1.; 1.;0.; 0.;1.] in  (* batch 1 *)
+  let out = Tensor.matmul a b in
+  check "bmm shape" (out.shape = [2; 2; 2]);
+  let v = Tensor.to_float_list out in
+  (* batch 0: [[1,2,3],[4,5,6]] @ [[1,0],[0,1],[1,0]] = [[4,2],[10,5]] *)
+  check_float "bmm[0,0,0]" (List.nth v 0) 4.0 1e-4;
+  check_float "bmm[0,0,1]" (List.nth v 1) 2.0 1e-4;
+  check_float "bmm[0,1,0]" (List.nth v 2) 10.0 1e-4;
+  check_float "bmm[0,1,1]" (List.nth v 3) 5.0 1e-4;
+  (* batch 1: [[7,8,9],[10,11,12]] @ [[0,1],[1,0],[0,1]] = [[8,16],[11,22]] *)
+  check_float "bmm[1,0,0]" (List.nth v 4) 8.0 1e-4;
+  check_float "bmm[1,0,1]" (List.nth v 5) 16.0 1e-4;
+  check_float "bmm[1,1,0]" (List.nth v 6) 11.0 1e-4;
+  check_float "bmm[1,1,1]" (List.nth v 7) 22.0 1e-4;
+  (* 2D still works *)
+  Schedule.reset ();
+  let a2 = Tensor.from_float_list [2; 3] [1.;2.;3.; 4.;5.;6.] in
+  let b2 = Tensor.from_float_list [3; 2] [1.;0.; 0.;1.; 1.;0.] in
+  let out2 = Tensor.matmul a2 b2 in
+  check "2d matmul shape" (out2.shape = [2; 2]);
+  let v2 = Tensor.to_float_list out2 in
+  check_float "2d mm[0,0]" (List.nth v2 0) 4.0 1e-4;
+  check_float "2d mm[0,1]" (List.nth v2 1) 2.0 1e-4
+
+(* ---- Test 86r: AdamW Optimizer ---- *)
+let test_adamw () =
+  Printf.printf "\n=== AdamW Optimizer ===\n%!";
+  Schedule.reset ();
+  let x = Tensor.from_float_list [3] [5.0; 10.0; 15.0] in
+  let grad = Tensor.from_float_list [3] [1.0; 1.0; 1.0] in
+  let state = Nn.adam_init 3 in
+  let (x1, s1) = Nn.adamw_step ~lr:0.01 ~weight_decay:0.1 x grad state in
+  let v1 = Tensor.to_float_list x1 in
+  (* Weight decay shrinks params: x * (1 - lr * wd) = x * 0.999 *)
+  check "adamw step=1" (s1.t_step = 1);
+  check "adamw moved x[0]" (List.nth v1 0 < 5.0);
+  check "adamw moved x[1]" (List.nth v1 1 < 10.0);
+  check "adamw moved x[2]" (List.nth v1 2 < 15.0);
+  (* Larger params should decay more *)
+  let delta0 = 5.0 -. List.nth v1 0 in
+  let delta2 = 15.0 -. List.nth v1 2 in
+  check "adamw larger decay for larger param" (delta2 > delta0)
+
 (* ---- Test 86: CUDA backend registration ---- *)
 let test_cuda_backend () =
   Printf.printf "\n=== CUDA Backend ===\n%!";
@@ -4049,6 +4122,9 @@ let () =
   run_test "cnn_pipeline" test_cnn_pipeline;
   run_test "global_avg_pool" test_global_avg_pool;
   run_test "cnn_inference" test_cnn_inference;
+  run_test "leaky_relu" test_leaky_relu;
+  run_test "batch_matmul" test_batch_matmul;
+  run_test "adamw" test_adamw;
   run_test "cuda_backend" test_cuda_backend;
   run_test "backend_availability" test_backend_availability;
   Printf.printf "\n============================\n%!";
