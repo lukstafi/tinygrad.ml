@@ -2291,3 +2291,73 @@ let inv (t : t) : t =
     done;
     from_float_list ~device:t.device ~dtype:t.dtype [n; n] (Array.to_list result)
   | _ -> invalid_arg "inv: expected square 2D tensor"
+
+(** Solve linear system Ax = b via Gaussian elimination with partial pivoting.
+    A: [n, n], b: [n] → x: [n].
+    Host-side operation; does not participate in autograd. *)
+let solve (a : t) (b : t) : t =
+  let ( * ) = Stdlib.( * ) in
+  let ( + ) = Stdlib.( + ) in
+  let ( - ) = Stdlib.( - ) in
+  ignore (( + ), ( - ));
+  match a.shape, b.shape with
+  | [n; m], [k] when n = m && n = k ->
+    let av = Array.of_list (to_float_list a) in
+    let bv = Array.of_list (to_float_list b) in
+    (* Augmented matrix [A | b] *)
+    let aug = Array.init n (fun i ->
+      Array.init (n + 1) (fun j ->
+        if j < n then av.(i * n + j) else bv.(i))
+    ) in
+    (* Forward elimination with partial pivoting *)
+    for col = 0 to n - 1 do
+      let max_row = ref col in
+      let max_val = ref (Float.abs aug.(col).(col)) in
+      for row = col + 1 to n - 1 do
+        let v = Float.abs aug.(row).(col) in
+        if v > !max_val then begin max_val := v; max_row := row end
+      done;
+      if Float.abs aug.(!max_row).(col) < 1e-15 then
+        invalid_arg "solve: singular matrix";
+      if !max_row <> col then begin
+        let tmp = aug.(col) in aug.(col) <- aug.(!max_row); aug.(!max_row) <- tmp
+      end;
+      let pivot = aug.(col).(col) in
+      for row = col + 1 to n - 1 do
+        let factor = aug.(row).(col) /. pivot in
+        for j = col to n do
+          aug.(row).(j) <- aug.(row).(j) -. factor *. aug.(col).(j)
+        done
+      done
+    done;
+    (* Back substitution *)
+    let x = Array.make n 0.0 in
+    for i = n - 1 downto 0 do
+      let s = ref aug.(i).(n) in
+      for j = i + 1 to n - 1 do
+        s := !s -. aug.(i).(j) *. x.(j)
+      done;
+      x.(i) <- !s /. aug.(i).(i)
+    done;
+    from_float_list ~device:a.device ~dtype:a.dtype [n] (Array.to_list x)
+  | _ -> invalid_arg "solve: expected square matrix A [n,n] and vector b [n]"
+
+(** Vector norm (or Frobenius norm for matrices).
+    ord: 1.0 for L1, 2.0 for L2 (default), infinity for L-inf.
+    Flattens input, returns scalar [1].
+    Host-side operation; does not participate in autograd. *)
+let vector_norm ?(ord=2.0) (t : t) : t =
+  let vals = to_float_list t in
+  let result =
+    if Float.is_infinite ord then
+      List.fold_left (fun acc v -> Float.max acc (Float.abs v)) 0.0 vals
+    else if ord = 1.0 then
+      List.fold_left (fun acc v -> acc +. Float.abs v) 0.0 vals
+    else if ord = 2.0 then
+      sqrt (List.fold_left (fun acc v -> acc +. v *. v) 0.0 vals)
+    else
+      let p = ord in
+      let s = List.fold_left (fun acc v -> acc +. (Float.abs v ** p)) 0.0 vals in
+      s ** (1.0 /. p)
+  in
+  from_float_list ~device:t.device ~dtype:t.dtype [1] [result]
