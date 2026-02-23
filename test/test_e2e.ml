@@ -4821,6 +4821,99 @@ let test_positional_encoding () =
     with Invalid_argument _ -> true in
   check "pe bad max_len" bad
 
+(* ---- Test 103: Cumsum/diff negative axis ---- *)
+let test_cumsum_diff_neg_axis () =
+  Printf.printf "\n=== Cumsum/Diff Negative Axis ===\n%!";
+  Schedule.reset ();
+  (* 2D cumsum with axis=-1 should equal axis=1 *)
+  let t = Tensor.from_float_list [2; 3] [1.0; 2.0; 3.0; 4.0; 5.0; 6.0] in
+  let cs_neg = Tensor.cumsum ~axis:(-1) t in
+  let csv = Tensor.to_float_list cs_neg in
+  check "cumsum neg axis shape" (cs_neg.shape = [2; 3]);
+  check_float "cumsum neg[0]" (List.nth csv 0) 1.0 0.01;
+  check_float "cumsum neg[1]" (List.nth csv 1) 3.0 0.01;
+  check_float "cumsum neg[2]" (List.nth csv 2) 6.0 0.01;
+  check_float "cumsum neg[3]" (List.nth csv 3) 4.0 0.01;
+  (* 2D diff with axis=-1 *)
+  Schedule.reset ();
+  let t2 = Tensor.from_float_list [2; 3] [1.0; 3.0; 6.0; 2.0; 5.0; 9.0] in
+  let d_neg = Tensor.diff ~axis:(-1) t2 in
+  check "diff neg axis shape" (d_neg.shape = [2; 2]);
+  let dv = Tensor.to_float_list d_neg in
+  check_float "diff neg[0]" (List.nth dv 0) 2.0 0.01;
+  check_float "diff neg[1]" (List.nth dv 1) 3.0 0.01;
+  check_float "diff neg[2]" (List.nth dv 2) 3.0 0.01;
+  check_float "diff neg[3]" (List.nth dv 3) 4.0 0.01
+
+(* ---- Test 104: Transformer encoder backward (FFN params) ---- *)
+let test_te_backward () =
+  Printf.printf "\n=== TE Backward (FFN) ===\n%!";
+  Schedule.reset ();
+  Random.init 77;
+  (* Build a small transformer encoder *)
+  let te = Nn.transformer_encoder_layer ~d_model:4 ~num_heads:2 () in
+  let x = Tensor.from_float_list [2; 4] [0.1; 0.2; 0.3; 0.4; 0.5; 0.6; 0.7; 0.8] in
+  let out = Nn.transformer_encoder_layer_forward te x in
+  let loss = Tensor.mean out in
+  (* Get FFN params (ff1 weight, ff1 bias, ff2 weight, ff2 bias) *)
+  let ff_params = Nn.linear_params te.te_ff1 @ Nn.linear_params te.te_ff2 in
+  let grads = Tensor.backward loss ff_params in
+  Printf.printf "  Got %d FFN gradients\n%!" (List.length grads);
+  check "te ffn grad count" (List.length grads = List.length ff_params);
+  (* All grad shapes should match param shapes *)
+  List.iter (fun ((p : Tensor.t), (g : Tensor.t)) ->
+    check "te ffn grad shape" (p.shape = g.shape)
+  ) grads
+
+(* ---- Test 105: Sort ---- *)
+let test_sort () =
+  Printf.printf "\n=== Sort ===\n%!";
+  Schedule.reset ();
+  let t = Tensor.from_float_list [5] [3.0; 1.0; 4.0; 1.0; 5.0] in
+  let (sv, si) = Tensor.topk ~k:5 t in
+  let svv = Tensor.to_float_list sv in
+  Printf.printf "  topk-sort desc: [%s]\n%!" (String.concat "; " (List.map (Printf.sprintf "%.0f") svv));
+  check "sort desc[0]" (List.nth svv 0 = 5.0);
+  check "sort desc[4]" (List.nth svv 4 = 1.0);
+  let siv = Tensor.to_float_list si in
+  check "sort idx[0]" (List.nth siv 0 = 4.0);  (* 5.0 was at index 4 *)
+  Printf.printf "  Topk-sort indices: [%s]\n%!" (String.concat "; " (List.map (Printf.sprintf "%.0f") siv));
+  (* 2D topk along axis=1 *)
+  Schedule.reset ();
+  let t2 = Tensor.from_float_list [2; 3] [3.0; 1.0; 2.0; 6.0; 4.0; 5.0] in
+  let (sv2, _) = Tensor.topk ~axis:1 ~k:2 t2 in
+  check "sort 2d shape" (sv2.shape = [2; 2]);
+  let svv2 = Tensor.to_float_list sv2 in
+  check_float "sort 2d[0,0]" (List.nth svv2 0) 3.0 0.01;
+  check_float "sort 2d[1,0]" (List.nth svv2 2) 6.0 0.01
+
+(* ---- Test 106: Tensor.where broadcast ---- *)
+let test_where_broadcast () =
+  Printf.printf "\n=== Where Broadcast ===\n%!";
+  Schedule.reset ();
+  (* Scalar condition broadcast *)
+  let cond = Tensor.from_float_list [3] [1.0; 0.0; 1.0] in
+  let a = Tensor.from_float_list [3] [10.0; 20.0; 30.0] in
+  let b = Tensor.from_float_list [3] [100.0; 200.0; 300.0] in
+  let mask = Tensor.gt cond (Tensor.const_like cond 0.5) in
+  let result = Tensor.where_ mask a b in
+  let rv = Tensor.to_float_list result in
+  Printf.printf "  where: [%s]\n%!" (String.concat "; " (List.map (Printf.sprintf "%.0f") rv));
+  check_float "where[0]" (List.nth rv 0) 10.0 0.01;
+  check_float "where[1]" (List.nth rv 1) 200.0 0.01;
+  check_float "where[2]" (List.nth rv 2) 30.0 0.01;
+  (* 2D condition with broadcast *)
+  Schedule.reset ();
+  let t2 = Tensor.from_float_list [2; 3] [1.0; -2.0; 3.0; -4.0; 5.0; -6.0] in
+  let zero = Tensor.zeros_like t2 in
+  let positive = Tensor.gt t2 zero in
+  let clamped = Tensor.where_ positive t2 zero in
+  let cv = Tensor.to_float_list clamped in
+  check_float "where2d[0]" (List.nth cv 0) 1.0 0.01;
+  check_float "where2d[1]" (List.nth cv 1) 0.0 0.01;
+  check_float "where2d[2]" (List.nth cv 2) 3.0 0.01;
+  check_float "where2d[3]" (List.nth cv 3) 0.0 0.01
+
 (* ---- Test 86: CUDA backend registration ---- *)
 let test_cuda_backend () =
   Printf.printf "\n=== CUDA Backend ===\n%!";
@@ -5274,6 +5367,10 @@ let () =
   run_test "cumsum" test_cumsum;
   run_test "diff" test_diff;
   run_test "positional_encoding" test_positional_encoding;
+  run_test "cumsum_diff_neg_axis" test_cumsum_diff_neg_axis;
+  run_test "te_backward" test_te_backward;
+  run_test "sort" test_sort;
+  run_test "where_broadcast" test_where_broadcast;
   run_test "cuda_backend" test_cuda_backend;
   run_test "backend_availability" test_backend_availability;
   Printf.printf "\n============================\n%!";
