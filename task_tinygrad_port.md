@@ -569,3 +569,11 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Tensor.avg_pool1d**: 1D average pooling via host-side computation with same validation pattern as max_pool1d.
 - **Gather-based embedding test**: Demonstrates gather as alternative embedding lookup method, verifying results against known weight matrix.
 - **Test count**: 1342 passing tests.
+
+## Claude round 67 decisions
+
+- **Codex review fix (round 65 MEDIUM)**: Added explicit "gradients do NOT flow" doc notes to `gather` and `repeat`, matching other host-side ops.
+- **Tensor.masked_fill**: Replace elements where mask is true with fill_value. Autograd-compatible (uses where_). Convenient wrapper for `where_(mask, fill, t)`.
+- **Tensor.roll**: Circular shift along an axis (host-side, forward only). Supports positive/negative shifts and arbitrary axis. Uses modular indexing.
+- **Nn.transformer_encoder_layer**: Pre-norm transformer encoder layer combining self-attention (MHA) + feedforward network (FFN) with residual connections and layer normalization. Parameters: d_model, num_heads, dim_feedforward (default 4*d_model). Validates d_model divisibility, shape constraints.
+- **Test count**: 1365 passing tests.
