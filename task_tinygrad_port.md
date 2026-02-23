@@ -481,3 +481,10 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Codex review fix (round 53)**: Updated `matmul` docstring to reflect 2D+ batched behavior. Added broadcast batch matmul test (`[1,2,3] @ [2,3,2] → [2,2,2]`) and non-broadcastable error test. Added deterministic AdamW numeric test with known expected outputs.
 - **BatchNorm training mode**: Extended `batch_norm` with mutable `training` flag. Training mode computes batch mean/var over all dims except channel dim 1, normalizes with batch stats, and updates `running_mean`/`running_var` via exponential moving average with `momentum`. Added `batch_norm_eval`/`batch_norm_train` toggle functions.
 - **Test count**: 1103 passing tests.
+
+## Claude round 56 decisions
+
+- **Codex review fix (round 54 HIGH)**: Fixed BatchNorm training to keep `batch_mean`/`batch_var` tensors in the autograd graph. Previously, these were extracted to host arrays via `to_float_list` and rebuilt as fresh tensors, breaking gradient flow. Now the original computed tensors are returned directly for normalization; host extraction is only used for running stat EMA updates.
+- **Codex review fix (round 54 MEDIUM)**: Added channel-size validation guard in `batch_norm_forward`: checks `x.shape[1] = num_features` and raises `Invalid_argument` on mismatch.
+- **BatchNorm backward test**: Added `test_bn_training_backward` that verifies gradients flow through BN in training mode — weight grads near 0 (symmetric normalized distribution sums to 0), bias grads equal to batch size (3.0 per channel for `sum` loss).
+- **Test count**: 1110 passing tests.

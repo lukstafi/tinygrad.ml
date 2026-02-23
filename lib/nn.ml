@@ -101,6 +101,9 @@ let batch_norm ?(device="CPU") ?(dtype=Dtype.float32) ?(eps=1e-5) ?(momentum=0.1
 let batch_norm_forward (bn : batch_norm) (x : Tensor.t) : Tensor.t =
   let ndim = List.length x.shape in
   if ndim < 2 then invalid_arg "BatchNorm: input must have at least 2 dimensions";
+  let c = List.nth x.shape 1 in
+  if c <> bn.num_features then
+    invalid_arg (Printf.sprintf "BatchNorm: expected %d channels, got %d" bn.num_features c);
   let bc_shape = List.init ndim (fun i -> if i = 1 then bn.num_features else 1) in
   let mean_t, var_t =
     if bn.training then begin
@@ -110,7 +113,7 @@ let batch_norm_forward (bn : batch_norm) (x : Tensor.t) : Tensor.t =
       let batch_mean = Tensor.mean ~axes:reduce_axes x in
       let diff = Tensor.sub x (Tensor.expand (Tensor.reshape batch_mean bc_shape) x.shape) in
       let batch_var = Tensor.mean ~axes:reduce_axes (Tensor.mul diff diff) in
-      (* Extract values and update running stats *)
+      (* Extract values for running stats update only (host-side EMA) *)
       let mean_vals = Array.of_list (Tensor.to_float_list batch_mean) in
       let var_vals = Array.of_list (Tensor.to_float_list batch_var) in
       for i = 0 to bn.num_features - 1 do
@@ -119,12 +122,8 @@ let batch_norm_forward (bn : batch_norm) (x : Tensor.t) : Tensor.t =
         bn.running_var.(i) <- (1.0 -. bn.momentum) *. bn.running_var.(i)
           +. bn.momentum *. var_vals.(i);
       done;
-      (* Use batch stats for normalization *)
-      let m = Tensor.from_float_list ~device:x.device ~dtype:x.dtype
-        [bn.num_features] (Array.to_list mean_vals) in
-      let v = Tensor.from_float_list ~device:x.device ~dtype:x.dtype
-        [bn.num_features] (Array.to_list var_vals) in
-      (m, v)
+      (* Return original tensors to keep them in autograd graph *)
+      (batch_mean, batch_var)
     end else begin
       (* Eval mode: use running statistics *)
       let m = Tensor.from_float_list ~device:x.device ~dtype:x.dtype
