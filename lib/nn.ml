@@ -584,8 +584,8 @@ let lr_linear_warmup ~warmup_steps (sched : lr_scheduler) : lr_scheduler =
   { base_lr = sched.base_lr; current_lr = lr; step_count = step }
 
 (** Warmup + cosine annealing: linear warmup for warmup_steps,
-    then cosine decay from base_lr to 0 over remaining steps.
-    total_steps includes the warmup phase. *)
+    then cosine decay from base_lr to eta_min over remaining steps.
+    total_steps includes the warmup phase. Steps past total_steps stay at eta_min. *)
 let lr_warmup_cosine ~warmup_steps ~total_steps ?(eta_min=0.0) (sched : lr_scheduler) : lr_scheduler =
   if warmup_steps <= 0 then invalid_arg "lr_warmup_cosine: warmup_steps must be > 0";
   if total_steps <= warmup_steps then invalid_arg "lr_warmup_cosine: total_steps must be > warmup_steps";
@@ -593,6 +593,8 @@ let lr_warmup_cosine ~warmup_steps ~total_steps ?(eta_min=0.0) (sched : lr_sched
   let lr =
     if step <= warmup_steps then
       sched.base_lr *. (Float.of_int step /. Float.of_int warmup_steps)
+    else if step >= total_steps then
+      eta_min
     else
       let decay_steps = total_steps - warmup_steps in
       let decay_step = step - warmup_steps in
