@@ -1723,3 +1723,37 @@ let diff ?(axis=0) (t : t) : t =
     out_vals.(flat) <- vals.(!src_flat_next) -. vals.(!src_flat_curr)
   done;
   from_float_list ~device:t.device ~dtype:t.dtype out_shape (Array.to_list out_vals)
+
+(** Extract diagonal of a 2D tensor, or create a 2D diagonal matrix from a 1D tensor.
+    Host-side operation; does not participate in autograd. *)
+let diag (t : t) : t =
+  let ( * ) = Stdlib.( * ) in
+  let ( + ) = Stdlib.( + ) in
+  let ( - ) = Stdlib.( - ) in
+  let vals = Array.of_list (to_float_list t) in
+  match t.shape with
+  | [n; m] ->
+    let d = min n m in
+    let out = Array.make d 0.0 in
+    for i = 0 to d - 1 do
+      out.(i) <- vals.(i * m + i)
+    done;
+    from_float_list ~device:t.device ~dtype:t.dtype [d] (Array.to_list out)
+  | [n] ->
+    let out = Array.make (n * n) 0.0 in
+    for i = 0 to n - 1 do
+      out.(i * n + i) <- vals.(i)
+    done;
+    from_float_list ~device:t.device ~dtype:t.dtype [n; n] (Array.to_list out)
+  | _ -> invalid_arg "diag: expected 1D or 2D tensor"
+
+(** Trace of a 2D tensor (sum of diagonal elements).
+    Host-side operation; does not participate in autograd. *)
+let trace (t : t) : t =
+  match t.shape with
+  | [_; _] ->
+    let d = diag t in
+    sum d
+  | _ -> invalid_arg "trace: expected 2D tensor"
+
+(* tril and triu already defined earlier (graph-based, autograd-compatible) *)

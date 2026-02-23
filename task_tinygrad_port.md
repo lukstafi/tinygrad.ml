@@ -593,3 +593,11 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Sort via topk**: Demonstrated sorting by using `topk ~k:n` (full descending sort with indices). No separate sort API needed since topk generalizes it.
 - **Where broadcast test**: Verified where_ correctly handles condition-based selection including 2D positive-value clamping pattern.
 - **Test count**: 1423 passing tests.
+
+## Claude round 70 decisions
+
+- **Codex review fix (round 68 MEDIUM)**: Rewrote `test_te_backward` as `test_ffn_backward` — a simpler FFN-only (Linear → ReLU → Linear) backward test that checks gradient count, shapes, AND non-zero values (verifying gradient signal flows through the computation graph).
+- **Tensor.diag**: Extract diagonal from 2D tensor or create diagonal matrix from 1D vector. Host-side operation with operator unshadowing (`Stdlib.( * )` etc.).
+- **Tensor.trace**: Sum of diagonal elements of 2D tensor. Implemented via `diag` + `sum` (the sum is autograd-capable, only the diagonal extraction is host-side).
+- **Tensor.tril/triu tests**: Added tests for the existing graph-based (autograd-compatible) tril/triu with default k and k=1 offset. Avoided adding duplicate host-side implementations.
+- **Test count**: 1446 passing tests.
