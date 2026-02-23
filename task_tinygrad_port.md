@@ -673,3 +673,11 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - Added `Tensor.block_diag`: constructs block diagonal matrix from list of 2D tensors. Host-side.
 - Added `Tensor.cross`: cross product of two 3-element vectors. Host-side.
 - **Test count**: 1607 passing tests (5/5 stable).
+
+## Claude round 80 decisions
+
+- Added block_diag/cross/vander negative-path validation tests: rejects empty list and non-2D for block_diag; rejects non-3-vector and 2D for cross; rejects negative n for vander. Addresses codex review LOW feedback.
+- Added `vander` validation: `~n < 0` now raises `Invalid_argument`.
+- Added `Tensor.det`: determinant via LU decomposition with partial pivoting. Supports any square matrix. Host-side.
+- Added `Tensor.inv`: matrix inverse via Gauss-Jordan elimination with partial pivoting. Raises on singular matrices. Host-side.
+- **Test count**: 1625 passing tests (5/5 stable).

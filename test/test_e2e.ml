@@ -5569,6 +5569,91 @@ let test_cross () =
   check_float "cross2[2]" (List.nth c2v 2) (-3.0) 0.01;
   Printf.printf "  Cross product OK\n%!"
 
+(* ---- Test 135: block_diag/cross/vander validation ---- *)
+let test_block_diag_cross_validation () =
+  Printf.printf "\n=== Block Diag/Cross/Vander Validation ===\n%!";
+  (* block_diag rejects empty list *)
+  (try
+    ignore (Tensor.block_diag []);
+    check "block_diag rejects empty" false
+  with Invalid_argument _ -> check "block_diag rejects empty" true);
+  (* block_diag rejects non-2D *)
+  (try
+    let t = Tensor.from_float_list [3] [1.0; 2.0; 3.0] in
+    ignore (Tensor.block_diag [t]);
+    check "block_diag rejects 1D" false
+  with Invalid_argument _ -> check "block_diag rejects 1D" true);
+  (* cross rejects non-3 vectors *)
+  (try
+    let a = Tensor.from_float_list [2] [1.0; 2.0] in
+    let b = Tensor.from_float_list [2] [3.0; 4.0] in
+    ignore (Tensor.cross a b);
+    check "cross rejects len-2" false
+  with Invalid_argument _ -> check "cross rejects len-2" true);
+  (* cross rejects 2D input *)
+  (try
+    let a = Tensor.from_float_list [1; 3] [1.0; 2.0; 3.0] in
+    let b = Tensor.from_float_list [1; 3] [4.0; 5.0; 6.0] in
+    ignore (Tensor.cross a b);
+    check "cross rejects 2D" false
+  with Invalid_argument _ -> check "cross rejects 2D" true);
+  (* vander rejects negative n *)
+  (try
+    let x = Tensor.from_float_list [3] [1.0; 2.0; 3.0] in
+    ignore (Tensor.vander ~n:(-1) x);
+    check "vander rejects neg n" false
+  with Invalid_argument _ -> check "vander rejects neg n" true);
+  Printf.printf "  Block diag/cross/vander validation OK\n%!"
+
+(* ---- Test 136: Tensor.det (2x2 and 3x3 determinant) ---- *)
+let test_det () =
+  Printf.printf "\n=== Determinant ===\n%!";
+  Schedule.reset ();
+  (* det([[1,2],[3,4]]) = 1*4 - 2*3 = -2 *)
+  let m1 = Tensor.from_float_list [2; 2] [1.0; 2.0; 3.0; 4.0] in
+  let d1 = Tensor.det m1 in
+  let d1v = Tensor.to_float_list d1 in
+  check "det 2x2 shape" (d1.shape = [1]);
+  check_float "det 2x2" (List.hd d1v) (-2.0) 0.01;
+  (* det([[1,2,3],[4,5,6],[7,8,0]]) = 1*(5*0-6*8) - 2*(4*0-6*7) + 3*(4*8-5*7) = 27 *)
+  Schedule.reset ();
+  let m2 = Tensor.from_float_list [3; 3] [1.0; 2.0; 3.0; 4.0; 5.0; 6.0; 7.0; 8.0; 0.0] in
+  let d2 = Tensor.det m2 in
+  let d2v = Tensor.to_float_list d2 in
+  check_float "det 3x3" (List.hd d2v) 27.0 0.01;
+  (* Identity determinant = 1 *)
+  Schedule.reset ();
+  let eye = Tensor.eye 4 in
+  let d3 = Tensor.det eye in
+  let d3v = Tensor.to_float_list d3 in
+  check_float "det eye" (List.hd d3v) 1.0 0.01;
+  Printf.printf "  Determinant OK\n%!"
+
+(* ---- Test 137: Tensor.inv (2x2 and 3x3 matrix inverse) ---- *)
+let test_inv () =
+  Printf.printf "\n=== Matrix Inverse ===\n%!";
+  Schedule.reset ();
+  (* inv([[1,2],[3,4]]) = [[-2,1],[1.5,-0.5]] *)
+  let m = Tensor.from_float_list [2; 2] [1.0; 2.0; 3.0; 4.0] in
+  let mi = Tensor.inv m in
+  check "inv shape" (mi.shape = [2; 2]);
+  let mv = Tensor.to_float_list mi in
+  check_float "inv[0,0]" (List.nth mv 0) (-2.0) 0.01;
+  check_float "inv[0,1]" (List.nth mv 1) 1.0 0.01;
+  check_float "inv[1,0]" (List.nth mv 2) 1.5 0.01;
+  check_float "inv[1,1]" (List.nth mv 3) (-0.5) 0.01;
+  (* Verify A * A^-1 ≈ I *)
+  Schedule.reset ();
+  let m2 = Tensor.from_float_list [2; 2] [1.0; 2.0; 3.0; 4.0] in
+  let mi2 = Tensor.inv m2 in
+  let prod = Tensor.matmul m2 mi2 in
+  let pv = Tensor.to_float_list prod in
+  check_float "A*Ainv[0,0]" (List.nth pv 0) 1.0 0.01;
+  check_float "A*Ainv[0,1]" (List.nth pv 1) 0.0 0.01;
+  check_float "A*Ainv[1,0]" (List.nth pv 2) 0.0 0.01;
+  check_float "A*Ainv[1,1]" (List.nth pv 3) 1.0 0.01;
+  Printf.printf "  Matrix inverse OK\n%!"
+
 (* ---- Test 127: Tensor.where broadcast ---- *)
 let test_where_broadcast () =
   Printf.printf "\n=== Where Broadcast ===\n%!";
@@ -6080,6 +6165,9 @@ let () =
   run_test "kron_vander_validation" test_kron_vander_validation;
   run_test "block_diag" test_block_diag;
   run_test "cross" test_cross;
+  run_test "block_diag_cross_validation" test_block_diag_cross_validation;
+  run_test "det" test_det;
+  run_test "inv" test_inv;
   run_test "where_broadcast" test_where_broadcast;
   run_test "cuda_backend" test_cuda_backend;
   run_test "backend_availability" test_backend_availability;

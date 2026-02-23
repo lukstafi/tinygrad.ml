@@ -2120,6 +2120,7 @@ let vander ?(n=0) (x : t) : t =
   let ( - ) = Stdlib.( - ) in
   match x.shape with
   | [m] ->
+    if n < 0 then invalid_arg "vander: n must be non-negative";
     let cols = if n = 0 then m else n in
     let xv = Array.of_list (to_float_list x) in
     let result = Array.make (m * cols) 0.0 in
@@ -2180,3 +2181,113 @@ let cross (a : t) (b : t) : t =
     let r2 = av.(0) *. bv.(1) -. av.(1) *. bv.(0) in
     from_float_list ~device:a.device ~dtype:a.dtype [3] [r0; r1; r2]
   | _ -> invalid_arg "cross: expected both tensors to be 1D with 3 elements"
+
+(** Determinant of a square matrix via LU decomposition (partial pivoting).
+    Input: [n, n] → output: scalar [1].
+    Host-side operation; does not participate in autograd. *)
+let det (t : t) : t =
+  let ( * ) = Stdlib.( * ) in
+  let ( + ) = Stdlib.( + ) in
+  let ( - ) = Stdlib.( - ) in
+  ignore (( + ), ( - ));
+  match t.shape with
+  | [n; m] when n = m ->
+    let a = Array.of_list (to_float_list t) in
+    (* Copy into mutable matrix *)
+    let mat = Array.init n (fun i -> Array.init n (fun j -> a.(i * n + j))) in
+    let sign = ref 1.0 in
+    (* Gaussian elimination with partial pivoting *)
+    for col = 0 to n - 1 do
+      (* Find pivot *)
+      let max_row = ref col in
+      let max_val = ref (Float.abs mat.(col).(col)) in
+      for row = col + 1 to n - 1 do
+        let v = Float.abs mat.(row).(col) in
+        if v > !max_val then begin
+          max_val := v;
+          max_row := row
+        end
+      done;
+      if !max_row <> col then begin
+        let tmp = mat.(col) in
+        mat.(col) <- mat.(!max_row);
+        mat.(!max_row) <- tmp;
+        sign := Float.neg !sign
+      end;
+      let pivot = mat.(col).(col) in
+      if Float.abs pivot < 1e-15 then begin
+        sign := 0.0  (* singular *)
+      end else begin
+        for row = col + 1 to n - 1 do
+          let factor = mat.(row).(col) /. pivot in
+          for j = col to n - 1 do
+            mat.(row).(j) <- mat.(row).(j) -. factor *. mat.(col).(j)
+          done
+        done
+      end
+    done;
+    let d = ref !sign in
+    for i = 0 to n - 1 do
+      d := !d *. mat.(i).(i)
+    done;
+    from_float_list ~device:t.device ~dtype:t.dtype [1] [!d]
+  | _ -> invalid_arg "det: expected square 2D tensor"
+
+(** Matrix inverse via Gauss-Jordan elimination with partial pivoting.
+    Input: [n, n] → output: [n, n].
+    Host-side operation; does not participate in autograd. *)
+let inv (t : t) : t =
+  let ( * ) = Stdlib.( * ) in
+  let ( + ) = Stdlib.( + ) in
+  let ( - ) = Stdlib.( - ) in
+  ignore (( + ), ( - ));
+  match t.shape with
+  | [n; m] when n = m ->
+    let a = Array.of_list (to_float_list t) in
+    (* Augmented matrix [A | I] *)
+    let aug = Array.init n (fun i ->
+      Array.init (2 * n) (fun j ->
+        if j < n then a.(i * n + j)
+        else if j - n = i then 1.0
+        else 0.0)
+    ) in
+    (* Forward elimination *)
+    for col = 0 to n - 1 do
+      let max_row = ref col in
+      let max_val = ref (Float.abs aug.(col).(col)) in
+      for row = col + 1 to n - 1 do
+        let v = Float.abs aug.(row).(col) in
+        if v > !max_val then begin
+          max_val := v;
+          max_row := row
+        end
+      done;
+      if Float.abs aug.(!max_row).(col) < 1e-15 then
+        invalid_arg "inv: singular matrix";
+      if !max_row <> col then begin
+        let tmp = aug.(col) in
+        aug.(col) <- aug.(!max_row);
+        aug.(!max_row) <- tmp
+      end;
+      let pivot = aug.(col).(col) in
+      for j = 0 to 2 * n - 1 do
+        aug.(col).(j) <- aug.(col).(j) /. pivot
+      done;
+      for row = 0 to n - 1 do
+        if row <> col then begin
+          let factor = aug.(row).(col) in
+          for j = 0 to 2 * n - 1 do
+            aug.(row).(j) <- aug.(row).(j) -. factor *. aug.(col).(j)
+          done
+        end
+      done
+    done;
+    (* Extract inverse from right half *)
+    let result = Array.make (n * n) 0.0 in
+    for i = 0 to n - 1 do
+      for j = 0 to n - 1 do
+        result.(i * n + j) <- aug.(i).(n + j)
+      done
+    done;
+    from_float_list ~device:t.device ~dtype:t.dtype [n; n] (Array.to_list result)
+  | _ -> invalid_arg "inv: expected square 2D tensor"
