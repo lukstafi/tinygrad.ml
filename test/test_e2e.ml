@@ -4953,7 +4953,83 @@ let test_tril_triu () =
   check_float "tril k=1[0,1]" (List.nth lo1v 1) 2.0 0.01;
   check_float "tril k=1[0,2]" (List.nth lo1v 2) 0.0 0.01
 
-(* ---- Test 108: Tensor.where broadcast ---- *)
+(* ---- Test 108: diag/trace validation ---- *)
+let test_diag_trace_validation () =
+  Printf.printf "\n=== Diag/Trace Validation ===\n%!";
+  Schedule.reset ();
+  (* diag rejects 3D input *)
+  let ok = try
+    let t3d = Tensor.from_float_list [2; 2; 2] [1.0; 2.0; 3.0; 4.0; 5.0; 6.0; 7.0; 8.0] in
+    ignore (Tensor.diag t3d); false
+  with Invalid_argument _ -> true in
+  check "diag rejects 3D" ok;
+  (* trace rejects 1D input *)
+  let ok2 = try
+    let t1d = Tensor.from_float_list [3] [1.0; 2.0; 3.0] in
+    ignore (Tensor.trace t1d); false
+  with Invalid_argument _ -> true in
+  check "trace rejects 1D" ok2;
+  Printf.printf "  diag/trace validation OK\n%!"
+
+(* ---- Test 109: TE forward+backward smoke ---- *)
+let test_te_smoke () =
+  Printf.printf "\n=== TE Smoke ===\n%!";
+  Schedule.reset ();
+  Random.init 99;
+  let te = Nn.transformer_encoder_layer ~d_model:4 ~num_heads:2 () in
+  let x = Tensor.from_float_list [2; 4] [0.1; 0.2; 0.3; 0.4; 0.5; 0.6; 0.7; 0.8] in
+  let out = Nn.transformer_encoder_layer_forward te x in
+  check "te out shape" (out.shape = [2; 4]);
+  let ov = Tensor.to_float_list out in
+  Printf.printf "  TE output[0] = %.4f\n%!" (List.hd ov);
+  (* Backward through FFN params *)
+  let loss = Tensor.mean out in
+  let ff_params = Nn.linear_params te.te_ff1 @ Nn.linear_params te.te_ff2 in
+  let grads = Tensor.backward loss ff_params in
+  check "te ffn grad count" (List.length grads = List.length ff_params);
+  List.iter (fun ((p : Tensor.t), (g : Tensor.t)) ->
+    check "te ffn grad shape" (p.shape = g.shape)
+  ) grads;
+  Printf.printf "  TE backward through FFN: %d grads\n%!" (List.length grads)
+
+(* ---- Test 110: eye ---- *)
+let test_eye () =
+  Printf.printf "\n=== Eye ===\n%!";
+  Schedule.reset ();
+  let e3 = Tensor.eye 3 in
+  let ev = Tensor.to_float_list e3 in
+  check "eye shape" (e3.shape = [3; 3]);
+  check_float "eye[0,0]" (List.nth ev 0) 1.0 0.01;
+  check_float "eye[0,1]" (List.nth ev 1) 0.0 0.01;
+  check_float "eye[1,1]" (List.nth ev 4) 1.0 0.01;
+  check_float "eye[2,2]" (List.nth ev 8) 1.0 0.01;
+  check_float "eye[2,0]" (List.nth ev 6) 0.0 0.01;
+  (* Non-square eye *)
+  Schedule.reset ();
+  let e23 = Tensor.eye ~m:3 2 in
+  let e23v = Tensor.to_float_list e23 in
+  check "eye 2x3 shape" (e23.shape = [2; 3]);
+  check_float "eye 2x3[0,0]" (List.nth e23v 0) 1.0 0.01;
+  check_float "eye 2x3[0,2]" (List.nth e23v 2) 0.0 0.01;
+  check_float "eye 2x3[1,1]" (List.nth e23v 4) 1.0 0.01
+
+(* ---- Test 111: linspace ---- *)
+let test_linspace () =
+  Printf.printf "\n=== Linspace ===\n%!";
+  Schedule.reset ();
+  let l = Tensor.linspace ~start:0.0 ~stop:1.0 5 in
+  let lv = Tensor.to_float_list l in
+  check "linspace shape" (l.shape = [5]);
+  check_float "linspace[0]" (List.nth lv 0) 0.0 0.01;
+  check_float "linspace[1]" (List.nth lv 1) 0.25 0.01;
+  check_float "linspace[4]" (List.nth lv 4) 1.0 0.01;
+  (* Single point *)
+  Schedule.reset ();
+  let l1 = Tensor.linspace ~start:3.0 ~stop:3.0 1 in
+  let l1v = Tensor.to_float_list l1 in
+  check "linspace 1pt" ((List.hd l1v) = 3.0)
+
+(* ---- Test 112: Tensor.where broadcast ---- *)
 let test_where_broadcast () =
   Printf.printf "\n=== Where Broadcast ===\n%!";
   Schedule.reset ();
@@ -5438,6 +5514,10 @@ let () =
   run_test "sort" test_sort;
   run_test "diag_trace" test_diag_trace;
   run_test "tril_triu" test_tril_triu;
+  run_test "diag_trace_validation" test_diag_trace_validation;
+  run_test "te_smoke" test_te_smoke;
+  run_test "eye" test_eye;
+  run_test "linspace" test_linspace;
   run_test "where_broadcast" test_where_broadcast;
   run_test "cuda_backend" test_cuda_backend;
   run_test "backend_availability" test_backend_availability;
