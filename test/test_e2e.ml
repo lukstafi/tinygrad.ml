@@ -4069,7 +4069,99 @@ let test_gru () =
     ignore (Nn.gru_forward cell bad_x);
     check "gru bad input_size should fail" false
   with Invalid_argument _ -> check "gru bad input_size" true);
+  (* Validation: wrong h0 shape *)
+  (try
+    let x4 = Tensor.from_float_list [2; 1; 3] (List.init 6 Float.of_int) in
+    let bad_h0 = Tensor.zeros [1; 99] in
+    ignore (Nn.gru_forward cell ~h0:bad_h0 x4);
+    check "gru bad h0 should fail" false
+  with Invalid_argument msg ->
+    check "gru bad h0" (String.length msg > 0));
   Printf.printf "  GRU: cell forward, sequence forward, unbatched all pass\n%!"
+
+(* ---- Test 93: topk ---- *)
+let test_topk () =
+  Printf.printf "\n=== Topk ===\n%!";
+  Schedule.reset ();
+  (* 1D: [3, 1, 4, 1, 5, 9, 2, 6] → top 3: values [9, 6, 5], indices [5, 7, 4] *)
+  let t = Tensor.from_float_list [8] [3.0; 1.0; 4.0; 1.0; 5.0; 9.0; 2.0; 6.0] in
+  let (vals, idxs) = Tensor.topk ~k:3 t in
+  check "topk vals shape" (vals.shape = [3]);
+  check "topk idxs shape" (idxs.shape = [3]);
+  let vv = Tensor.to_float_list vals in
+  let iv = Tensor.to_float_list idxs in
+  check_float "topk v[0]" (List.nth vv 0) 9.0 0.01;
+  check_float "topk v[1]" (List.nth vv 1) 6.0 0.01;
+  check_float "topk v[2]" (List.nth vv 2) 5.0 0.01;
+  check_float "topk i[0]" (List.nth iv 0) 5.0 0.01;
+  check_float "topk i[1]" (List.nth iv 1) 7.0 0.01;
+  check_float "topk i[2]" (List.nth iv 2) 4.0 0.01;
+  (* 2D: [[1, 5, 3], [7, 2, 4]] → top 2 along axis 1 *)
+  let t2 = Tensor.from_float_list [2; 3] [1.0; 5.0; 3.0;  7.0; 2.0; 4.0] in
+  let (vals2, idxs2) = Tensor.topk ~k:2 ~axis:1 t2 in
+  check "topk 2d vals shape" (vals2.shape = [2; 2]);
+  let vv2 = Tensor.to_float_list vals2 in
+  let iv2 = Tensor.to_float_list idxs2 in
+  (* Row 0: top2 = [5, 3] at indices [1, 2] *)
+  check_float "topk 2d v[0,0]" (List.nth vv2 0) 5.0 0.01;
+  check_float "topk 2d v[0,1]" (List.nth vv2 1) 3.0 0.01;
+  check_float "topk 2d i[0,0]" (List.nth iv2 0) 1.0 0.01;
+  check_float "topk 2d i[0,1]" (List.nth iv2 1) 2.0 0.01;
+  (* Row 1: top2 = [7, 4] at indices [0, 2] *)
+  check_float "topk 2d v[1,0]" (List.nth vv2 2) 7.0 0.01;
+  check_float "topk 2d v[1,1]" (List.nth vv2 3) 4.0 0.01;
+  (* k=0 → empty *)
+  (try
+    ignore (Tensor.topk ~k:0 t);
+    check "topk k=0 should fail" false
+  with Invalid_argument _ -> check "topk k=0" true)
+
+(* ---- Test 94: LR warmup scheduler ---- *)
+let test_lr_warmup () =
+  Printf.printf "\n=== LR Warmup ===\n%!";
+  (* Linear warmup for 5 steps from 0 to base_lr=0.01 *)
+  let sched = Nn.lr_scheduler_init 0.01 in
+  check_float "warmup start" sched.current_lr 0.01 0.001;
+  (* Step 1: lr should be 0.01 * 1/5 = 0.002 *)
+  let s1 = Nn.lr_linear_warmup ~warmup_steps:5 sched in
+  check_float "warmup step1" s1.current_lr 0.002 0.001;
+  let s2 = Nn.lr_linear_warmup ~warmup_steps:5 s1 in
+  check_float "warmup step2" s2.current_lr 0.004 0.001;
+  let s3 = Nn.lr_linear_warmup ~warmup_steps:5 s2 in
+  check_float "warmup step3" s3.current_lr 0.006 0.001;
+  let s4 = Nn.lr_linear_warmup ~warmup_steps:5 s3 in
+  check_float "warmup step4" s4.current_lr 0.008 0.001;
+  let s5 = Nn.lr_linear_warmup ~warmup_steps:5 s4 in
+  check_float "warmup step5" s5.current_lr 0.01 0.001;
+  (* After warmup_steps, stays at base_lr *)
+  let s6 = Nn.lr_linear_warmup ~warmup_steps:5 s5 in
+  check_float "warmup step6" s6.current_lr 0.01 0.001;
+  (* Warmup with cosine annealing after *)
+  let sched2 = Nn.lr_scheduler_init 0.1 in
+  let w1 = Nn.lr_warmup_cosine ~warmup_steps:2 ~total_steps:10 sched2 in
+  check_float "warmup_cos step1" w1.current_lr 0.05 0.01;
+  let w2 = Nn.lr_warmup_cosine ~warmup_steps:2 ~total_steps:10 w1 in
+  check_float "warmup_cos step2" w2.current_lr 0.1 0.01;
+  (* After warmup, cosine decay starts *)
+  let w3 = Nn.lr_warmup_cosine ~warmup_steps:2 ~total_steps:10 w2 in
+  check "warmup_cos step3 decay" (w3.current_lr < 0.1)
+
+(* ---- Test 95: accuracy helper ---- *)
+let test_accuracy () =
+  Printf.printf "\n=== Accuracy ===\n%!";
+  Schedule.reset ();
+  (* Predictions: [3, 4] logits, targets: [3] integer labels *)
+  let logits = Tensor.from_float_list [3; 4]
+    [0.1; 0.9; 0.0; 0.0;   (* pred: class 1 *)
+     0.0; 0.0; 0.8; 0.2;   (* pred: class 2 *)
+     0.5; 0.1; 0.1; 0.3] in (* pred: class 0 *)
+  let targets = Tensor.from_float_list [3] [1.0; 2.0; 0.0] in
+  let acc = Nn.accuracy logits targets in
+  check_float "accuracy 100%" acc 1.0 0.01;
+  (* One wrong *)
+  let targets2 = Tensor.from_float_list [3] [1.0; 0.0; 0.0] in
+  let acc2 = Nn.accuracy logits targets2 in
+  check_float "accuracy 66%" acc2 (2.0 /. 3.0) 0.01
 
 (* ---- Test 86: CUDA backend registration ---- *)
 let test_cuda_backend () =
@@ -4499,6 +4591,9 @@ let () =
   run_test "group_norm" test_group_norm;
   run_test "instance_norm" test_instance_norm;
   run_test "gru" test_gru;
+  run_test "topk" test_topk;
+  run_test "lr_warmup" test_lr_warmup;
+  run_test "accuracy" test_accuracy;
   run_test "cuda_backend" test_cuda_backend;
   run_test "backend_availability" test_backend_availability;
   Printf.printf "\n============================\n%!";

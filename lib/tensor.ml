@@ -1237,3 +1237,47 @@ let argmin ?(axis=(-1)) (t : t) : t =
   done;
   let out_shape = List.filteri (fun i _ -> i <> ax) t.shape in
   from_float_list ~device:t.device ~dtype:t.dtype out_shape (Array.to_list result)
+
+(** Top-k values and indices along a given axis.
+    Returns (values, indices) tensors, both with the axis dimension replaced by k.
+    Values are sorted in descending order.
+    Host-side operation (no gradient flow). *)
+let topk ?(axis=(-1)) ~k (t : t) : t * t =
+  let ( + ) = Stdlib.( + ) and ( - ) = Stdlib.( - ) and ( * ) = Stdlib.( * ) in
+  if k <= 0 then
+    invalid_arg (Printf.sprintf "topk: k must be > 0, got %d" k);
+  let ndim = List.length t.shape in
+  let ax = if axis < 0 then ndim + axis else axis in
+  if ax < 0 || ax >= ndim then
+    invalid_arg (Printf.sprintf "topk: axis %d out of range for %d-D tensor" axis ndim);
+  let axis_dim = List.nth t.shape ax in
+  if k > axis_dim then
+    invalid_arg (Printf.sprintf "topk: k=%d exceeds axis dimension %d" k axis_dim);
+  let _t = !realize_ref t in
+  let vals = Array.of_list (to_float_list _t) in
+  let outer_size = ref 1 in
+  for i = 0 to ax - 1 do outer_size := !outer_size * List.nth t.shape i done;
+  let inner_size = ref 1 in
+  for i = ax + 1 to ndim - 1 do inner_size := !inner_size * List.nth t.shape i done;
+  let out_size = !outer_size * k * !inner_size in
+  let top_vals = Array.make out_size 0.0 in
+  let top_idxs = Array.make out_size 0.0 in
+  for o = 0 to !outer_size - 1 do
+    for i = 0 to !inner_size - 1 do
+      let pairs = Array.init axis_dim (fun a ->
+        let flat = (o * axis_dim + a) * !inner_size + i in
+        (vals.(flat), a)
+      ) in
+      Array.sort (fun (v1, _) (v2, _) -> Float.compare v2 v1) pairs;
+      for j = 0 to k - 1 do
+        let (v, idx) = pairs.(j) in
+        let out_flat = (o * k + j) * !inner_size + i in
+        top_vals.(out_flat) <- v;
+        top_idxs.(out_flat) <- Float.of_int idx
+      done
+    done
+  done;
+  let out_shape = List.mapi (fun i d -> if i = ax then k else d) t.shape in
+  let v_t = from_float_list ~device:t.device ~dtype:t.dtype out_shape (Array.to_list top_vals) in
+  let i_t = from_float_list ~device:t.device ~dtype:t.dtype out_shape (Array.to_list top_idxs) in
+  (v_t, i_t)

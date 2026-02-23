@@ -510,3 +510,12 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **InstanceNorm**: Thin wrapper over GroupNorm with `num_groups = num_channels`. Normalizes each channel independently. Delegates to `group_norm_forward` for the actual computation.
 - **GRU cell and sequence**: `Nn.gru` creates a GRU cell with `weight_ih` [3*H, I] and `weight_hh` [3*H, H]. Proper reset gate applied to hidden projection before candidate computation (`n = tanh(x_n + r * h_n)`). Full shape validation like LSTM. `gru_forward` processes sequences with optional h0, supports batched and unbatched inputs.
 - **Test count**: 1211 passing tests.
+
+## Claude round 60 decisions
+
+- **Codex review fix (round 58 HIGH)**: Documented GroupNorm/InstanceNorm input-gradient limitation explicitly in API docs. This is the same scheduler limitation affecting BatchNorm, conv2d, and pool ops — normalization is host-side so gradients cannot propagate to input. Weight/bias gradients work correctly.
+- **Codex review fix (round 58 LOW)**: Added GRU bad h0 shape test to cover the validation branch.
+- **Tensor.topk**: Returns (values, indices) tensors sorted descending along a given axis. Host-side operation. Validates k > 0 and k <= axis_dim.
+- **LR warmup schedulers**: `lr_linear_warmup` ramps LR from 0 to base_lr over warmup_steps, then holds. `lr_warmup_cosine` combines linear warmup with cosine decay over total_steps.
+- **Nn.accuracy**: Classification accuracy metric. Takes [batch; num_classes] logits and [batch] integer targets, returns fraction correct using argmax predictions.
+- **Test count**: 1240 passing tests.
