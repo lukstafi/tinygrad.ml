@@ -527,3 +527,11 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Tensor.cosine_similarity**: Computes cos(a,b) = dot(a,b)/(||a||*||b||+eps) along last axis. Squeezes the reduced dimension. Works for 1D and batched N-D tensors. Uses tensor ops (autograd-compatible).
 - **Tensor.cross_entropy_smooth**: Label smoothing cross entropy. Smooths targets: y_smooth = (1-alpha)*y + alpha/num_classes. alpha=0 is standard CE. Validates alpha in [0,1].
 - **Test count**: 1253 passing tests.
+
+## Claude round 62 decisions
+
+- **Codex review fix (round 60 MEDIUM)**: Fixed `cosine_similarity` 1D to return scalar shape `[]` instead of `[1]`. Removed guard that skipped reshape for empty out_shape; now always reshapes.
+- **Tensor.huber_loss**: Smooth L1 loss with configurable delta. Quadratic for |diff| <= delta, linear otherwise. Validates delta > 0. Autograd-compatible (uses tensor ops: abs, where, mul).
+- **Nn.parameter_count / sequential_parameter_count**: Count total parameters in a layer or sequential model. Uses `Helpers.prod` on param shapes.
+- **Classification pipeline test**: Verifies end-to-end pipeline: model creation → forward pass → loss computation → backward → gradient shapes → accuracy computation. Uses MSE loss to avoid cross_entropy backward codegen issue.
+- **Test count**: 1266 passing tests.

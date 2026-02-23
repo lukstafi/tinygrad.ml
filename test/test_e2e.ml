@@ -4189,6 +4189,7 @@ let test_cosine_similarity () =
   let a = Tensor.from_float_list [3] [1.0; 2.0; 3.0] in
   let b = Tensor.from_float_list [3] [1.0; 2.0; 3.0] in
   let cs = Tensor.cosine_similarity a b in
+  check "cos_sim 1d scalar shape" (cs.shape = []);
   check_float "cos_sim identical" (Tensor.item cs) 1.0 0.01;
   (* Orthogonal: [1,0] and [0,1] → cos_sim = 0 *)
   let a2 = Tensor.from_float_list [2] [1.0; 0.0] in
@@ -4237,6 +4238,87 @@ let test_cross_entropy_smooth () =
     ignore (Tensor.cross_entropy_smooth ~alpha:1.5 logits targets);
     check "ce_smooth bad alpha should fail" false
   with Invalid_argument _ -> check "ce_smooth bad alpha" true)
+
+(* ---- Test 99: Huber loss ---- *)
+let test_huber_loss () =
+  Printf.printf "\n=== Huber Loss ===\n%!";
+  Schedule.reset ();
+  (* Small errors: should behave like 0.5*MSE *)
+  let pred = Tensor.from_float_list [4] [0.1; 0.2; 0.3; 0.4] in
+  let target = Tensor.from_float_list [4] [0.0; 0.0; 0.0; 0.0] in
+  let h1 = Tensor.huber_loss ~delta:1.0 pred target in
+  let v1 = Tensor.item h1 in
+  (* errors are 0.1, 0.2, 0.3, 0.4 — all < delta=1.0
+     huber = 0.5 * (0.01 + 0.04 + 0.09 + 0.16) / 4 = 0.5 * 0.075 = 0.0375 *)
+  check_float "huber small" v1 0.0375 0.001;
+  (* Large errors: should behave like linear *)
+  let pred2 = Tensor.from_float_list [2] [5.0; -5.0] in
+  let target2 = Tensor.from_float_list [2] [0.0; 0.0] in
+  let h2 = Tensor.huber_loss ~delta:1.0 pred2 target2 in
+  let v2 = Tensor.item h2 in
+  (* |diff| = 5.0 > delta=1.0 → huber = 1.0 * (5.0 - 0.5) = 4.5, mean = 4.5 *)
+  check_float "huber large" v2 4.5 0.01;
+  (* Validation *)
+  (try
+    ignore (Tensor.huber_loss ~delta:0.0 pred target);
+    check "huber bad delta should fail" false
+  with Invalid_argument _ -> check "huber bad delta" true)
+
+(* ---- Test 100: parameter count ---- *)
+let test_parameter_count () =
+  Printf.printf "\n=== Parameter Count ===\n%!";
+  let l1 = Nn.linear ~in_features:10 ~out_features:5 () in
+  let l2 = Nn.linear ~in_features:5 ~out_features:2 () in
+  let model = [
+    Nn.of_linear "fc1" l1;
+    Nn.activation "relu" Tensor.relu;
+    Nn.of_linear "fc2" l2;
+  ] in
+  let count = Nn.sequential_parameter_count model in
+  (* fc1: 10*5 + 1*5 = 55, fc2: 5*2 + 1*2 = 12, total = 67 *)
+  check "param count" (count = 67);
+  let params = Nn.sequential_params model in
+  check "param count matches" (Nn.parameter_count params = 67)
+
+(* ---- Test 101: end-to-end classification pipeline ---- *)
+let test_classification_pipeline () =
+  Printf.printf "\n=== Classification Pipeline ===\n%!";
+  Schedule.reset ();
+  Random.init 123;
+  (* Verify pipeline components compose correctly *)
+  (* 1. Build model and check parameter count *)
+  let l = Nn.linear ~in_features:2 ~out_features:2 () in
+  let model = [Nn.of_linear "fc" l] in
+  let count = Nn.sequential_parameter_count model in
+  Printf.printf "  Pipeline params: %d\n%!" count;
+  check "pipeline param count" (count = 6);
+  (* 2. Forward pass works *)
+  let x = Tensor.from_float_list [4; 2]
+    [1.0; 0.0;  0.0; 1.0;  -1.0; 0.0;  0.0; -1.0] in
+  let pred = Nn.sequential_forward model x in
+  check "pipeline forward shape" (pred.shape = [4; 2]);
+  (* 3. Single step SGD update *)
+  let y = Tensor.from_float_list [4; 2]
+    [1.0; 0.0;  0.0; 1.0;  0.0; 1.0;  1.0; 0.0] in
+  let loss = Tensor.mse_loss pred y in
+  let lv = Tensor.item loss in
+  Printf.printf "  Initial loss: %.4f\n%!" lv;
+  check "pipeline loss finite" (Float.is_finite lv);
+  let params = Nn.sequential_params model in
+  let grads = Tensor.backward loss params in
+  (* Verify we got gradients for all params *)
+  check "pipeline grad count" (List.length grads = List.length params);
+  List.iter (fun ((p : Tensor.t), (g : Tensor.t)) ->
+    check "pipeline grad shape" (p.shape = g.shape)
+  ) grads;
+  (* 4. Accuracy computation works *)
+  Schedule.reset ();
+  let x2 = Tensor.from_float_list [3; 2] [1.0; 2.0;  3.0; 4.0;  5.0; 6.0] in
+  let pred2 = Nn.sequential_forward model x2 in
+  let targets = Tensor.from_float_list [3] [0.0; 1.0; 0.0] in
+  let acc = Nn.accuracy pred2 targets in
+  Printf.printf "  Accuracy: %.1f%%\n%!" (acc *. 100.0);
+  check "pipeline accuracy range" (acc >= 0.0 && acc <= 1.0)
 
 (* ---- Test 86: CUDA backend registration ---- *)
 let test_cuda_backend () =
@@ -4672,6 +4754,9 @@ let () =
   run_test "lr_warmup_horizon" test_lr_warmup_horizon;
   run_test "cosine_similarity" test_cosine_similarity;
   run_test "cross_entropy_smooth" test_cross_entropy_smooth;
+  run_test "huber_loss" test_huber_loss;
+  run_test "parameter_count" test_parameter_count;
+  run_test "classification_pipeline" test_classification_pipeline;
   run_test "cuda_backend" test_cuda_backend;
   run_test "backend_availability" test_backend_availability;
   Printf.printf "\n============================\n%!";
