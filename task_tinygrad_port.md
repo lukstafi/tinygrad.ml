@@ -666,3 +666,10 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - Added `Tensor.kron` (Kronecker product): 2D [m,n]⊗[p,q]→[m*p,n*q] and 1D [m]⊗[n]→[m*n]. Host-side.
 - Added `Tensor.vander` (Vandermonde matrix): 1D [m]→[m,n] with optional `~n` parameter. Row i = [1, x_i, x_i^2, ...]. Host-side.
 - **Test count**: 1580 passing tests (5/5 stable).
+
+## Claude round 79 decisions
+
+- Added kron/vander negative-path validation tests: rejects 3D input, rejects mixed rank for kron; rejects 2D input for vander. Addresses codex review LOW feedback.
+- Added `Tensor.block_diag`: constructs block diagonal matrix from list of 2D tensors. Host-side.
+- Added `Tensor.cross`: cross product of two 3-element vectors. Host-side.
+- **Test count**: 1607 passing tests (5/5 stable).

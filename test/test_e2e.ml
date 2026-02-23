@@ -5489,6 +5489,86 @@ let test_vander () =
   check_float "vander[1,3]" (List.nth v2v 7) 8.0 0.01;
   Printf.printf "  Vander OK\n%!"
 
+(* ---- Test 132: kron/vander validation ---- *)
+let test_kron_vander_validation () =
+  Printf.printf "\n=== Kron/Vander Validation ===\n%!";
+  (* kron rejects 3D input *)
+  (try
+    let a = Tensor.from_float_list [2; 2] [1.0; 2.0; 3.0; 4.0] in
+    let b = Tensor.from_float_list [1; 2; 2] [1.0; 2.0; 3.0; 4.0] in
+    ignore (Tensor.kron a b);
+    check "kron rejects 3D" false
+  with Invalid_argument _ -> check "kron rejects 3D" true);
+  (* kron rejects mixed ranks (1D vs 2D) *)
+  (try
+    let a = Tensor.from_float_list [2] [1.0; 2.0] in
+    let b = Tensor.from_float_list [2; 2] [1.0; 2.0; 3.0; 4.0] in
+    ignore (Tensor.kron a b);
+    check "kron rejects mixed rank" false
+  with Invalid_argument _ -> check "kron rejects mixed rank" true);
+  (* vander rejects 2D input *)
+  (try
+    let t = Tensor.from_float_list [2; 2] [1.0; 2.0; 3.0; 4.0] in
+    ignore (Tensor.vander t);
+    check "vander rejects 2D" false
+  with Invalid_argument _ -> check "vander rejects 2D" true);
+  Printf.printf "  Kron/vander validation OK\n%!"
+
+(* ---- Test 133: Tensor.block_diag ---- *)
+let test_block_diag () =
+  Printf.printf "\n=== Block Diag ===\n%!";
+  Schedule.reset ();
+  (* block_diag([[1,2],[3,4]], [[5]]) = [[1,2,0],[3,4,0],[0,0,5]] *)
+  let a = Tensor.from_float_list [2; 2] [1.0; 2.0; 3.0; 4.0] in
+  let b = Tensor.from_float_list [1; 1] [5.0] in
+  let bd = Tensor.block_diag [a; b] in
+  check "block_diag shape" (bd.shape = [3; 3]);
+  let bv = Tensor.to_float_list bd in
+  let expected = [1.0; 2.0; 0.0; 3.0; 4.0; 0.0; 0.0; 0.0; 5.0] in
+  List.iteri (fun i e ->
+    check_float (Printf.sprintf "blkdiag[%d]" i) (List.nth bv i) e 0.01
+  ) expected;
+  (* Three blocks *)
+  Schedule.reset ();
+  let c = Tensor.from_float_list [1; 2] [6.0; 7.0] in
+  let d = Tensor.from_float_list [2; 1] [8.0; 9.0] in
+  let e = Tensor.from_float_list [1; 1] [10.0] in
+  let bd2 = Tensor.block_diag [c; d; e] in
+  check "block_diag 3 shape" (bd2.shape = [4; 4]);
+  let bv2 = Tensor.to_float_list bd2 in
+  (* Row 0: [6,7,0,0], Row 1: [0,0,8,0], Row 2: [0,0,9,0], Row 3: [0,0,0,10] *)
+  check_float "blkdiag3[0]" (List.nth bv2 0) 6.0 0.01;
+  check_float "blkdiag3[1]" (List.nth bv2 1) 7.0 0.01;
+  check_float "blkdiag3[4]" (List.nth bv2 4) 0.0 0.01;
+  check_float "blkdiag3[6]" (List.nth bv2 6) 8.0 0.01;
+  check_float "blkdiag3[10]" (List.nth bv2 10) 9.0 0.01;
+  check_float "blkdiag3[15]" (List.nth bv2 15) 10.0 0.01;
+  Printf.printf "  Block diag OK\n%!"
+
+(* ---- Test 134: Tensor.cross ---- *)
+let test_cross () =
+  Printf.printf "\n=== Cross Product ===\n%!";
+  Schedule.reset ();
+  (* [1,0,0] × [0,1,0] = [0,0,1] *)
+  let a = Tensor.from_float_list [3] [1.0; 0.0; 0.0] in
+  let b = Tensor.from_float_list [3] [0.0; 1.0; 0.0] in
+  let c = Tensor.cross a b in
+  check "cross shape" (c.shape = [3]);
+  let cv = Tensor.to_float_list c in
+  check_float "cross[0]" (List.nth cv 0) 0.0 0.01;
+  check_float "cross[1]" (List.nth cv 1) 0.0 0.01;
+  check_float "cross[2]" (List.nth cv 2) 1.0 0.01;
+  (* [1,2,3] × [4,5,6] = [-3, 6, -3] *)
+  Schedule.reset ();
+  let a2 = Tensor.from_float_list [3] [1.0; 2.0; 3.0] in
+  let b2 = Tensor.from_float_list [3] [4.0; 5.0; 6.0] in
+  let c2 = Tensor.cross a2 b2 in
+  let c2v = Tensor.to_float_list c2 in
+  check_float "cross2[0]" (List.nth c2v 0) (-3.0) 0.01;
+  check_float "cross2[1]" (List.nth c2v 1) 6.0 0.01;
+  check_float "cross2[2]" (List.nth c2v 2) (-3.0) 0.01;
+  Printf.printf "  Cross product OK\n%!"
+
 (* ---- Test 127: Tensor.where broadcast ---- *)
 let test_where_broadcast () =
   Printf.printf "\n=== Where Broadcast ===\n%!";
@@ -5997,6 +6077,9 @@ let () =
   run_test "cov_corrcoef_validation" test_cov_corrcoef_validation;
   run_test "kron" test_kron;
   run_test "vander" test_vander;
+  run_test "kron_vander_validation" test_kron_vander_validation;
+  run_test "block_diag" test_block_diag;
+  run_test "cross" test_cross;
   run_test "where_broadcast" test_where_broadcast;
   run_test "cuda_backend" test_cuda_backend;
   run_test "backend_availability" test_backend_availability;
