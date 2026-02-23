@@ -1973,6 +1973,7 @@ let interpolate_1d ?(mode=`Linear) (t : t) ~target_size : t =
   let ndim = List.length shape in
   if ndim < 1 then invalid_arg "interpolate_1d: tensor must be at least 1D";
   let src_len = List.nth shape (ndim - 1) in
+  if src_len < 1 then invalid_arg "interpolate_1d: source length must be >= 1";
   if target_size < 1 then invalid_arg "interpolate_1d: target_size must be >= 1";
   let batch_size = List.fold_left ( * ) 1 (List.filteri (fun i _ -> i < ndim - 1) shape) in
   let vals = Array.of_list (to_float_list t) in
@@ -1993,3 +1994,23 @@ let interpolate_1d ?(mode=`Linear) (t : t) ~target_size : t =
   done;
   let out_shape = List.mapi (fun i s -> if i = ndim - 1 then target_size else s) shape in
   from_float_list ~device:t.device ~dtype:t.dtype out_shape (Array.to_list out)
+
+(** Replace NaN, positive infinity, and negative infinity with finite values.
+    Host-side operation; does not participate in autograd. *)
+let nan_to_num ?(nan=0.0) ?(posinf=3.4028234e+38) ?(neginf=(-3.4028234e+38)) (t : t) : t =
+  let vals = to_float_list t in
+  let fixed = List.map (fun v ->
+    if Float.is_nan v then nan
+    else if Float.is_infinite v && v > 0.0 then posinf
+    else if Float.is_infinite v && v < 0.0 then neginf
+    else v
+  ) vals in
+  from_float_list ~device:t.device ~dtype:t.dtype t.shape fixed
+
+(** Check if any element is NaN. Host-side. *)
+let has_nan (t : t) : bool =
+  List.exists Float.is_nan (to_float_list t)
+
+(** Check if all elements are finite. Host-side. *)
+let all_finite (t : t) : bool =
+  List.for_all Float.is_finite (to_float_list t)
