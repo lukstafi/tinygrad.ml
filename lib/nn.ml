@@ -574,6 +574,34 @@ let lr_cosine_annealing ~t_max ?(eta_min=0.0) (sched : lr_scheduler) : lr_schedu
     (1.0 +. Stdlib.cos (Float.pi *. progress)) in
   { base_lr = sched.base_lr; current_lr = lr; step_count = step }
 
+(** Linear warmup: ramps LR from 0 to base_lr over warmup_steps.
+    After warmup_steps, stays at base_lr. *)
+let lr_linear_warmup ~warmup_steps (sched : lr_scheduler) : lr_scheduler =
+  if warmup_steps <= 0 then invalid_arg "lr_linear_warmup: warmup_steps must be > 0";
+  let step = sched.step_count + 1 in
+  let lr = if step >= warmup_steps then sched.base_lr
+    else sched.base_lr *. (Float.of_int step /. Float.of_int warmup_steps) in
+  { base_lr = sched.base_lr; current_lr = lr; step_count = step }
+
+(** Warmup + cosine annealing: linear warmup for warmup_steps,
+    then cosine decay from base_lr to 0 over remaining steps.
+    total_steps includes the warmup phase. *)
+let lr_warmup_cosine ~warmup_steps ~total_steps ?(eta_min=0.0) (sched : lr_scheduler) : lr_scheduler =
+  if warmup_steps <= 0 then invalid_arg "lr_warmup_cosine: warmup_steps must be > 0";
+  if total_steps <= warmup_steps then invalid_arg "lr_warmup_cosine: total_steps must be > warmup_steps";
+  let step = sched.step_count + 1 in
+  let lr =
+    if step <= warmup_steps then
+      sched.base_lr *. (Float.of_int step /. Float.of_int warmup_steps)
+    else
+      let decay_steps = total_steps - warmup_steps in
+      let decay_step = step - warmup_steps in
+      let progress = Float.of_int decay_step /. Float.of_int decay_steps in
+      eta_min +. 0.5 *. (sched.base_lr -. eta_min) *.
+        (1.0 +. Stdlib.cos (Float.pi *. progress))
+  in
+  { base_lr = sched.base_lr; current_lr = lr; step_count = step }
+
 (* ---- Model Save/Load ---- *)
 
 (** Save model parameters to a file.
@@ -769,7 +797,9 @@ let group_norm ?(device="CPU") ?(dtype=Dtype.float32) ?(eps=1e-5) ~num_groups ~n
 (** Forward pass for group normalization.
     Input x: [batch; channels; ...], normalizes within each group of channels.
     Normalization is host-side; affine transform (weight * normed + bias) uses
-    tensor ops to keep weight/bias in the autograd graph for training. *)
+    tensor ops to keep weight/bias in the autograd graph for training.
+    NOTE: Gradients flow through weight/bias but NOT through input x, due to
+    host-side normalization (same scheduler limitation as BatchNorm, conv2d, pool). *)
 let group_norm_forward (gn : group_norm) (x : Tensor.t) : Tensor.t =
   let ndim = List.length x.shape in
   if ndim < 2 then invalid_arg "GroupNorm: input must have at least 2 dimensions";
@@ -837,7 +867,8 @@ let of_group_norm name (gn : group_norm) : layer =
 
 (** Instance normalization: GroupNorm with num_groups = num_channels.
     Normalizes each channel independently across spatial dimensions.
-    Commonly used in style transfer and generative models. *)
+    Commonly used in style transfer and generative models.
+    Inherits GroupNorm's gradient limitation: weight/bias grads flow, input grads do not. *)
 let instance_norm ?(device="CPU") ?(dtype=Dtype.float32) ?(eps=1e-5) num_channels =
   group_norm ~device ~dtype ~eps ~num_groups:num_channels ~num_channels ()
 
@@ -968,3 +999,24 @@ let gru_params (cell : gru) : Tensor.t list =
   match cell.gru_bias with
   | Some b -> [cell.gru_weight_ih; cell.gru_weight_hh; b]
   | None -> [cell.gru_weight_ih; cell.gru_weight_hh]
+
+(* ---- Metrics ---- *)
+
+(** Compute classification accuracy: fraction of correct predictions.
+    logits: [batch; num_classes], targets: [batch] (integer class indices as floats).
+    Returns a float in [0, 1]. *)
+let accuracy (logits : Tensor.t) (targets : Tensor.t) : float =
+  if List.length logits.shape <> 2 then
+    invalid_arg "accuracy: logits must be 2-D [batch, num_classes]";
+  if List.length targets.shape <> 1 then
+    invalid_arg "accuracy: targets must be 1-D [batch]";
+  let batch = List.hd logits.shape in
+  if List.hd targets.shape <> batch then
+    invalid_arg "accuracy: batch sizes must match";
+  let preds = Tensor.argmax ~axis:1 logits in
+  let pv = Tensor.to_float_list preds in
+  let tv = Tensor.to_float_list targets in
+  let correct = List.fold_left2 (fun acc p t ->
+    if Float.equal (Float.round p) (Float.round t) then acc + 1 else acc
+  ) 0 pv tv in
+  Float.of_int correct /. Float.of_int batch
