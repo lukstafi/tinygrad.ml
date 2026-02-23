@@ -2133,3 +2133,50 @@ let vander ?(n=0) (x : t) : t =
     done;
     from_float_list ~device:x.device ~dtype:x.dtype [m; cols] (Array.to_list result)
   | _ -> invalid_arg "vander: expected 1D tensor"
+
+(** Construct a block diagonal matrix from a list of 2D tensors.
+    Each tensor occupies a diagonal block; off-diagonal entries are zero.
+    Host-side operation; does not participate in autograd. *)
+let block_diag (blocks : t list) : t =
+  let ( * ) = Stdlib.( * ) in
+  let ( + ) = Stdlib.( + ) in
+  let ( - ) = Stdlib.( - ) in
+  ignore ( - );
+  if blocks = [] then invalid_arg "block_diag: empty list";
+  let device = (List.hd blocks).device in
+  let dtype = (List.hd blocks).dtype in
+  let dims = List.map (fun (b : t) ->
+    match b.shape with
+    | [r; c] -> (r, c)
+    | _ -> invalid_arg "block_diag: all tensors must be 2D"
+  ) blocks in
+  let total_rows = List.fold_left (fun acc (r, _) -> acc + r) 0 dims in
+  let total_cols = List.fold_left (fun acc (_, c) -> acc + c) 0 dims in
+  let result = Array.make (total_rows * total_cols) 0.0 in
+  let row_off = ref 0 in
+  let col_off = ref 0 in
+  List.iter2 (fun (b : t) (r, c) ->
+    let bv = Array.of_list (to_float_list b) in
+    for i = 0 to r - 1 do
+      for j = 0 to c - 1 do
+        result.((!row_off + i) * total_cols + !col_off + j) <- bv.(i * c + j)
+      done
+    done;
+    row_off := !row_off + r;
+    col_off := !col_off + c
+  ) blocks dims;
+  from_float_list ~device ~dtype [total_rows; total_cols] (Array.to_list result)
+
+(** Cross product of two 3-element vectors.
+    a × b = [a1*b2 - a2*b1, a2*b0 - a0*b2, a0*b1 - a1*b0].
+    Host-side operation; does not participate in autograd. *)
+let cross (a : t) (b : t) : t =
+  match a.shape, b.shape with
+  | [3], [3] ->
+    let av = Array.of_list (to_float_list a) in
+    let bv = Array.of_list (to_float_list b) in
+    let r0 = av.(1) *. bv.(2) -. av.(2) *. bv.(1) in
+    let r1 = av.(2) *. bv.(0) -. av.(0) *. bv.(2) in
+    let r2 = av.(0) *. bv.(1) -. av.(1) *. bv.(0) in
+    from_float_list ~device:a.device ~dtype:a.dtype [3] [r0; r1; r2]
+  | _ -> invalid_arg "cross: expected both tensors to be 1D with 3 elements"
