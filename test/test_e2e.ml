@@ -5389,6 +5389,106 @@ let test_cov_corrcoef () =
   let r3v = Tensor.to_float_list r3 in
   check_float "corr uncorr" (List.nth r3v 1) 0.0 0.01
 
+(* ---- Test 128: Deterministic TE finite assertion ---- *)
+let test_te_deterministic_finite () =
+  Printf.printf "\n=== TE Deterministic Finite ===\n%!";
+  Schedule.reset ();
+  Random.init 0;
+  (* Smallest viable TE: d_model=2, num_heads=1, dim_feedforward=4 *)
+  let te = Nn.transformer_encoder_layer ~d_model:2 ~num_heads:1 ~dim_feedforward:4 () in
+  let x = Tensor.from_float_list [2; 2] [0.01; 0.02; 0.03; 0.04] in
+  let out = Nn.transformer_encoder_layer_forward te x in
+  check "te det shape" (out.shape = [2; 2]);
+  let ov = Tensor.to_float_list out in
+  let all_fin = List.for_all Float.is_finite ov in
+  check "te det finite" all_fin;
+  Printf.printf "  TE deterministic output: [%s]\n%!"
+    (String.concat "; " (List.map (Printf.sprintf "%.6f") ov));
+  Printf.printf "  TE deterministic finite OK\n%!"
+
+(* ---- Test 129: cov/corrcoef validation ---- *)
+let test_cov_corrcoef_validation () =
+  Printf.printf "\n=== Cov/Corrcoef Validation ===\n%!";
+  (* cov rejects 1D input *)
+  (try
+    let t = Tensor.from_float_list [3] [1.0; 2.0; 3.0] in
+    ignore (Tensor.cov t);
+    check "cov rejects 1D" false
+  with Invalid_argument _ -> check "cov rejects 1D" true);
+  (* cov rejects n < 2 rows *)
+  (try
+    let t = Tensor.from_float_list [1; 3] [1.0; 2.0; 3.0] in
+    ignore (Tensor.cov t);
+    check "cov rejects n<2" false
+  with Invalid_argument _ -> check "cov rejects n<2" true);
+  (* corrcoef rejects 1D input *)
+  (try
+    let t = Tensor.from_float_list [4] [1.0; 2.0; 3.0; 4.0] in
+    ignore (Tensor.corrcoef t);
+    check "corrcoef rejects 1D" false
+  with Invalid_argument _ -> check "corrcoef rejects 1D" true);
+  (* corrcoef rejects n < 2 (via cov) *)
+  (try
+    let t = Tensor.from_float_list [1; 2] [1.0; 2.0] in
+    ignore (Tensor.corrcoef t);
+    check "corrcoef rejects n<2" false
+  with Invalid_argument _ -> check "corrcoef rejects n<2" true);
+  Printf.printf "  Cov/corrcoef validation OK\n%!"
+
+(* ---- Test 130: Tensor.kron (Kronecker product) ---- *)
+let test_kron () =
+  Printf.printf "\n=== Kron ===\n%!";
+  Schedule.reset ();
+  (* kron([[1,2],[3,4]], [[0,5],[6,7]]) = [[0,5,0,10],[6,7,12,14],[0,15,0,20],[18,21,24,28]] *)
+  let a = Tensor.from_float_list [2; 2] [1.0; 2.0; 3.0; 4.0] in
+  let b = Tensor.from_float_list [2; 2] [0.0; 5.0; 6.0; 7.0] in
+  let k = Tensor.kron a b in
+  check "kron shape" (k.shape = [4; 4]);
+  let kv = Tensor.to_float_list k in
+  let expected = [0.0; 5.0; 0.0; 10.0; 6.0; 7.0; 12.0; 14.0;
+                  0.0; 15.0; 0.0; 20.0; 18.0; 21.0; 24.0; 28.0] in
+  List.iteri (fun i e ->
+    check_float (Printf.sprintf "kron[%d]" i) (List.nth kv i) e 0.01
+  ) expected;
+  (* 1D kron: [1,2] ⊗ [3,4,5] = [3,4,5,6,8,10] *)
+  Schedule.reset ();
+  let a1 = Tensor.from_float_list [2] [1.0; 2.0] in
+  let b1 = Tensor.from_float_list [3] [3.0; 4.0; 5.0] in
+  let k1 = Tensor.kron a1 b1 in
+  check "kron 1d shape" (k1.shape = [6]);
+  let k1v = Tensor.to_float_list k1 in
+  let exp1 = [3.0; 4.0; 5.0; 6.0; 8.0; 10.0] in
+  List.iteri (fun i e ->
+    check_float (Printf.sprintf "kron1d[%d]" i) (List.nth k1v i) e 0.01
+  ) exp1;
+  Printf.printf "  Kron OK\n%!"
+
+(* ---- Test 131: Tensor.vander (Vandermonde matrix) ---- *)
+let test_vander () =
+  Printf.printf "\n=== Vander ===\n%!";
+  Schedule.reset ();
+  (* vander([1,2,3], n=3) = [[1,1,1],[1,2,4],[1,3,9]] *)
+  let x = Tensor.from_float_list [3] [1.0; 2.0; 3.0] in
+  let v = Tensor.vander ~n:3 x in
+  check "vander shape" (v.shape = [3; 3]);
+  let vv = Tensor.to_float_list v in
+  let expected = [1.0; 1.0; 1.0; 1.0; 2.0; 4.0; 1.0; 3.0; 9.0] in
+  List.iteri (fun i e ->
+    check_float (Printf.sprintf "vander[%d]" i) (List.nth vv i) e 0.01
+  ) expected;
+  (* Default n = length of input *)
+  Schedule.reset ();
+  let x2 = Tensor.from_float_list [4] [1.0; 2.0; 3.0; 4.0] in
+  let v2 = Tensor.vander x2 in
+  check "vander default n" (v2.shape = [4; 4]);
+  let v2v = Tensor.to_float_list v2 in
+  (* Row for x=2: [1, 2, 4, 8] *)
+  check_float "vander[1,0]" (List.nth v2v 4) 1.0 0.01;
+  check_float "vander[1,1]" (List.nth v2v 5) 2.0 0.01;
+  check_float "vander[1,2]" (List.nth v2v 6) 4.0 0.01;
+  check_float "vander[1,3]" (List.nth v2v 7) 8.0 0.01;
+  Printf.printf "  Vander OK\n%!"
+
 (* ---- Test 127: Tensor.where broadcast ---- *)
 let test_where_broadcast () =
   Printf.printf "\n=== Where Broadcast ===\n%!";
@@ -5893,6 +5993,10 @@ let () =
   run_test "interpolate_1d_validation" test_interpolate_1d_validation;
   run_test "rnn_deterministic_finite" test_rnn_deterministic_finite;
   run_test "cov_corrcoef" test_cov_corrcoef;
+  run_test "te_deterministic_finite" test_te_deterministic_finite;
+  run_test "cov_corrcoef_validation" test_cov_corrcoef_validation;
+  run_test "kron" test_kron;
+  run_test "vander" test_vander;
   run_test "where_broadcast" test_where_broadcast;
   run_test "cuda_backend" test_cuda_backend;
   run_test "backend_availability" test_backend_availability;
