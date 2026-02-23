@@ -4320,6 +4320,129 @@ let test_classification_pipeline () =
   Printf.printf "  Accuracy: %.1f%%\n%!" (acc *. 100.0);
   check "pipeline accuracy range" (acc >= 0.0 && acc <= 1.0)
 
+(* ---- Test 87: Huber gradient boundary ---- *)
+let test_huber_gradient_boundary () =
+  Printf.printf "\n=== Huber Gradient Boundary ===\n%!";
+  Schedule.reset ();
+  (* At exactly |diff|=delta, quadratic = linear = 0.5*delta^2 *)
+  let delta = 1.0 in
+  (* diff = 1.0 = delta exactly: should use quadratic = 0.5*1.0^2 = 0.5 *)
+  let pred = Tensor.from_float_list [2] [2.0; 5.0] in
+  let target = Tensor.from_float_list [2] [1.0; 3.0] in  (* diffs = [1.0, 2.0] *)
+  let loss = Tensor.huber_loss ~delta pred target in
+  let lv = Tensor.item loss in
+  (* elem 0: |1| <= 1 → 0.5*1^2 = 0.5, elem 1: |2| > 1 → 1*(2-0.5) = 1.5, mean = 1.0 *)
+  Printf.printf "  huber boundary loss: %.4f\n%!" lv;
+  check_float "huber boundary" lv 1.0 0.01;
+  (* Verify boundary value: at |diff|=delta, quadratic=linear=0.5*delta^2 *)
+  Schedule.reset ();
+  let p_boundary = Tensor.from_float_list [1] [2.0] in
+  let t_boundary = Tensor.from_float_list [1] [1.0] in  (* |diff|=1.0=delta *)
+  let l_boundary = Tensor.huber_loss ~delta p_boundary t_boundary in
+  let bv = Tensor.item l_boundary in
+  Printf.printf "  huber at boundary: %.4f (expected 0.5)\n%!" bv;
+  check_float "huber at boundary" bv 0.5 0.01;
+  (* delta=2: |diff|=1 < 2, so quadratic: 0.5*1^2 = 0.5 *)
+  Schedule.reset ();
+  let p2 = Tensor.from_float_list [1] [2.0] in
+  let t2 = Tensor.from_float_list [1] [1.0] in
+  let l_d2 = Tensor.huber_loss ~delta:2.0 p2 t2 in
+  check_float "huber delta=2" (Tensor.item l_d2) 0.5 0.01
+
+(* ---- Test 88: KL divergence loss ---- *)
+let test_kl_div_loss () =
+  Printf.printf "\n=== KL Divergence Loss ===\n%!";
+  Schedule.reset ();
+  (* Same logits → target = softmax(logits), pred = logits → KL ≈ 0 *)
+  let logits = Tensor.from_float_list [1; 3] [1.0; 2.0; 3.0] in
+  let target_probs = Tensor.softmax logits in
+  let kl_same = Tensor.kl_div_loss logits target_probs in
+  let v = Tensor.item kl_same in
+  Printf.printf "  KL(same logits): %.6f\n%!" v;
+  check "kl same ≈ 0" (Float.abs v < 0.01);
+  (* Different distributions → KL > 0 *)
+  Schedule.reset ();
+  let pred2 = Tensor.from_float_list [1; 3] [1.0; 0.0; 0.0] in
+  let target2 = Tensor.from_float_list [1; 3] [0.1; 0.1; 0.8] in
+  let kl_diff = Tensor.kl_div_loss pred2 target2 in
+  let vd = Tensor.item kl_diff in
+  Printf.printf "  KL(diff): %.4f\n%!" vd;
+  check "kl diff > 0" (vd > 0.0);
+  check "kl diff finite" (Float.is_finite vd);
+  (* Shape mismatch *)
+  let bad = try ignore (Tensor.kl_div_loss logits (Tensor.from_float_list [1; 2] [1.0; 2.0])); false
+    with Invalid_argument _ -> true in
+  check "kl bad shape" bad
+
+(* ---- Test 89: L2 normalize ---- *)
+let test_normalize () =
+  Printf.printf "\n=== Normalize ===\n%!";
+  Schedule.reset ();
+  (* 1D: normalize [3; 4] → [0.6; 0.8] *)
+  let t = Tensor.from_float_list [2] [3.0; 4.0] in
+  let n = Tensor.normalize t in
+  let nv = Tensor.to_float_list n in
+  Printf.printf "  norm([3,4]): [%s]\n%!" (String.concat "; " (List.map (Printf.sprintf "%.4f") nv));
+  check_float "norm 0" (List.nth nv 0) 0.6 0.001;
+  check_float "norm 1" (List.nth nv 1) 0.8 0.001;
+  (* 2D: normalize each row *)
+  Schedule.reset ();
+  let t2 = Tensor.from_float_list [2; 2] [3.0; 4.0; 0.0; 5.0] in
+  let n2 = Tensor.normalize ~axis:1 t2 in
+  let nv2 = Tensor.to_float_list n2 in
+  check_float "norm 2d row0 col0" (List.nth nv2 0) 0.6 0.001;
+  check_float "norm 2d row0 col1" (List.nth nv2 1) 0.8 0.001;
+  check_float "norm 2d row1 col0" (List.nth nv2 2) 0.0 0.001;
+  check_float "norm 2d row1 col1" (List.nth nv2 3) 1.0 0.001;
+  (* Bad axis *)
+  let bad = try ignore (Tensor.normalize ~axis:5 t); false
+    with Invalid_argument _ -> true in
+  check "norm bad axis" bad
+
+(* ---- Test 90: Conv1d ---- *)
+let test_conv1d () =
+  Printf.printf "\n=== Conv1d ===\n%!";
+  Schedule.reset ();
+  (* input: [1, 5] = 1 channel, length 5 *)
+  let x = Tensor.from_float_list [1; 5] [1.0; 2.0; 3.0; 4.0; 5.0] in
+  (* weight: [1, 1, 3] = 1 out channel, 1 in channel, kernel=3 *)
+  let w = Tensor.from_float_list [1; 1; 3] [1.0; 1.0; 1.0] in
+  let y = Tensor.conv1d x w in
+  (* output: [1, 3], values = [6, 9, 12] *)
+  let yv = Tensor.to_float_list y in
+  Printf.printf "  conv1d out: [%s]\n%!" (String.concat "; " (List.map (Printf.sprintf "%.1f") yv));
+  check "conv1d shape" (y.shape = [1; 3]);
+  check_float "conv1d[0]" (List.nth yv 0) 6.0 0.01;
+  check_float "conv1d[1]" (List.nth yv 1) 9.0 0.01;
+  check_float "conv1d[2]" (List.nth yv 2) 12.0 0.01;
+  (* with padding: conv1d is host-side, automatically realizes *)
+  Schedule.reset ();
+  let xp = Tensor.from_float_list [1; 5] [1.0; 2.0; 3.0; 4.0; 5.0] in
+  let wp = Tensor.from_float_list [1; 1; 3] [1.0; 1.0; 1.0] in
+  let yp = Tensor.conv1d ~padding:1 xp wp in
+  check "conv1d padded shape" (yp.shape = [1; 5]);
+  (* with stride *)
+  Schedule.reset ();
+  let xs = Tensor.from_float_list [1; 5] [1.0; 2.0; 3.0; 4.0; 5.0] in
+  let ws = Tensor.from_float_list [1; 1; 3] [1.0; 1.0; 1.0] in
+  let ys = Tensor.conv1d ~stride:2 xs ws in
+  check "conv1d stride shape" (ys.shape = [1; 2]);
+  (* Nn.conv1d layer *)
+  Schedule.reset ();
+  let c = Nn.conv1d ~in_channels:2 ~out_channels:3 ~kernel_size:3 () in
+  let x2 = Tensor.from_float_list [2; 6] (* 2 channels, length 6 *)
+    [1.0; 2.0; 3.0; 4.0; 5.0; 6.0;
+     6.0; 5.0; 4.0; 3.0; 2.0; 1.0] in
+  let y2 = Nn.conv1d_forward c x2 in
+  check "nn conv1d shape" (y2.shape = [3; 4]);
+  let params = Nn.conv1d_params c in
+  check "nn conv1d params" (List.length params = 2);
+  (* bad input dims *)
+  Schedule.reset ();
+  let bad = try ignore (Tensor.conv1d (Tensor.from_float_list [2; 3; 4] (List.init 24 Float.of_int)) wp); false
+    with Invalid_argument _ -> true in
+  check "conv1d bad dims" bad
+
 (* ---- Test 86: CUDA backend registration ---- *)
 let test_cuda_backend () =
   Printf.printf "\n=== CUDA Backend ===\n%!";
@@ -4757,6 +4880,10 @@ let () =
   run_test "huber_loss" test_huber_loss;
   run_test "parameter_count" test_parameter_count;
   run_test "classification_pipeline" test_classification_pipeline;
+  run_test "huber_gradient_boundary" test_huber_gradient_boundary;
+  run_test "kl_div_loss" test_kl_div_loss;
+  run_test "normalize" test_normalize;
+  run_test "conv1d" test_conv1d;
   run_test "cuda_backend" test_cuda_backend;
   run_test "backend_availability" test_backend_availability;
   Printf.printf "\n============================\n%!";

@@ -535,3 +535,13 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Nn.parameter_count / sequential_parameter_count**: Count total parameters in a layer or sequential model. Uses `Helpers.prod` on param shapes.
 - **Classification pipeline test**: Verifies end-to-end pipeline: model creation → forward pass → loss computation → backward → gradient shapes → accuracy computation. Uses MSE loss to avoid cross_entropy backward codegen issue.
 - **Test count**: 1266 passing tests.
+
+## Claude round 63 decisions
+
+- **Codex review fix (round 61 LOW)**: Documented `parameter_count` and `sequential_parameter_count` as counting parameter entries, not unique tensor identities. Shared/tied weights counted per occurrence.
+- **Codex review fix (round 61 optional)**: Added Huber loss boundary test verifying values at exactly `|diff|=delta` and with different delta values.
+- **Tensor.kl_div_loss**: KL divergence loss. pred = logits (converted via log_softmax), target = probability distribution. Returns mean of target * (log(target) - log_softmax(pred)). Same logits → KL ≈ 0.
+- **Tensor.normalize**: L2-normalize along given axis. Returns x / (||x||_2 + eps). Autograd-compatible (uses tensor ops: mul, sum, sqrt, div).
+- **Tensor.conv1d**: 1D convolution via host-side computation. input [C_in, L], weight [C_out, C_in, K] → [C_out, OL]. Supports stride and padding. Same pattern as conv2d (forward/inference only, no backward).
+- **Nn.conv1d**: 1D convolution layer with weight + optional bias. Kaiming initialization. Supports stride and padding. Wraps Tensor.conv1d.
+- **Test count**: 1289 passing tests.
