@@ -650,3 +650,11 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Tensor.has_nan / Tensor.all_finite**: Simple host-side predicates for numerical debugging.
 - **Test stability**: All 10/10 runs pass with 0 failures (1523 tests). No more intermittent test failures.
 - **Test count**: 1523 passing tests (stable).
+
+## Claude round 77 decisions
+
+- **Codex review fix (round 75 MEDIUM)**: Added deterministic finite assertions for LSTM and GRU with small models (input_size:2, hidden_size:2, seed 0, single timestep). These strict checks complement the tolerant checks in the full tests.
+- **Codex review fix (round 75 LOW)**: Added negative-path test for `interpolate_1d` with empty source dimension (src_len=0).
+- **Tensor.cov**: Sample covariance matrix from [n, d] observations. Uses Bessel's correction (n-1 denominator). Host-side.
+- **Tensor.corrcoef**: Pearson correlation coefficient matrix from [n, d] data. Normalizes covariance by standard deviations. Host-side.
+- **Test count**: 1535 passing tests (5/5 stable).

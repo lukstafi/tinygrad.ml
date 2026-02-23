@@ -5329,9 +5329,67 @@ let test_interpolate_1d_validation () =
     ignore (Tensor.interpolate_1d t ~target_size:0); false
   with Invalid_argument _ -> true in
   check "interp rejects target 0" ok1;
+  (* Rejects empty source (src_len = 0) *)
+  Schedule.reset ();
+  let ok2 = try
+    let t = Tensor.from_float_list [0] [] in
+    ignore (Tensor.interpolate_1d t ~target_size:3); false
+  with Invalid_argument _ -> true in
+  check "interp rejects empty src" ok2;
   Printf.printf "  interpolate_1d validation OK\n%!"
 
-(* ---- Test 125: Tensor.where broadcast ---- *)
+(* ---- Test 125: deterministic finite checks for LSTM/GRU ---- *)
+let test_rnn_deterministic_finite () =
+  Printf.printf "\n=== RNN Deterministic Finite ===\n%!";
+  (* LSTM with known small seed — must produce finite output *)
+  Schedule.reset ();
+  Random.init 0;
+  let cell = Nn.lstm ~input_size:2 ~hidden_size:2 () in
+  let x = Tensor.from_float_list [1; 1; 2] [0.1; 0.2] in
+  let (out, (_h_n, _c_n)) = Nn.lstm_forward cell x in
+  let ov = Tensor.to_float_list out in
+  let all_fin = List.for_all Float.is_finite ov in
+  check "lstm deterministic finite" all_fin;
+  (* GRU with known small seed — must produce finite output *)
+  Schedule.reset ();
+  Random.init 0;
+  let gcell = Nn.gru ~input_size:2 ~hidden_size:2 () in
+  let gx = Tensor.from_float_list [1; 1; 2] [0.1; 0.2] in
+  let (gout, _gh) = Nn.gru_forward gcell gx in
+  let gov = Tensor.to_float_list gout in
+  let gall_fin = List.for_all Float.is_finite gov in
+  check "gru deterministic finite" gall_fin;
+  Printf.printf "  RNN deterministic finite OK\n%!"
+
+(* ---- Test 126: covariance and correlation ---- *)
+let test_cov_corrcoef () =
+  Printf.printf "\n=== Cov & Corrcoef ===\n%!";
+  Schedule.reset ();
+  (* 3 observations, 2 variables: x=[1,2,3], y=[4,5,6] perfectly correlated *)
+  let data = Tensor.from_float_list [3; 2] [1.0; 4.0; 2.0; 5.0; 3.0; 6.0] in
+  let c = Tensor.cov data in
+  let cv = Tensor.to_float_list c in
+  check "cov shape" (c.shape = [2; 2]);
+  check_float "var(x)" (List.nth cv 0) 1.0 0.01;  (* var of [1,2,3] = 1.0 *)
+  check_float "cov(x,y)" (List.nth cv 1) 1.0 0.01;  (* perfect correlation *)
+  check_float "var(y)" (List.nth cv 3) 1.0 0.01;  (* var of [4,5,6] = 1.0 *)
+  (* Correlation *)
+  Schedule.reset ();
+  let data2 = Tensor.from_float_list [3; 2] [1.0; 4.0; 2.0; 5.0; 3.0; 6.0] in
+  let r = Tensor.corrcoef data2 in
+  let rv = Tensor.to_float_list r in
+  check "corrcoef shape" (r.shape = [2; 2]);
+  check_float "corr(x,x)" (List.nth rv 0) 1.0 0.01;
+  check_float "corr(x,y)" (List.nth rv 1) 1.0 0.01;  (* perfectly correlated *)
+  check_float "corr(y,y)" (List.nth rv 3) 1.0 0.01;
+  (* Uncorrelated variables *)
+  Schedule.reset ();
+  let data3 = Tensor.from_float_list [4; 2] [1.0; 0.0; 0.0; 1.0; (-1.0); 0.0; 0.0; (-1.0)] in
+  let r3 = Tensor.corrcoef data3 in
+  let r3v = Tensor.to_float_list r3 in
+  check_float "corr uncorr" (List.nth r3v 1) 0.0 0.01
+
+(* ---- Test 127: Tensor.where broadcast ---- *)
 let test_where_broadcast () =
   Printf.printf "\n=== Where Broadcast ===\n%!";
   Schedule.reset ();
@@ -5833,6 +5891,8 @@ let () =
   run_test "interpolate_1d" test_interpolate_1d;
   run_test "nan_to_num" test_nan_to_num;
   run_test "interpolate_1d_validation" test_interpolate_1d_validation;
+  run_test "rnn_deterministic_finite" test_rnn_deterministic_finite;
+  run_test "cov_corrcoef" test_cov_corrcoef;
   run_test "where_broadcast" test_where_broadcast;
   run_test "cuda_backend" test_cuda_backend;
   run_test "backend_availability" test_backend_availability;
