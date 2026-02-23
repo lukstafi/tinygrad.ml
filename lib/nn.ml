@@ -71,49 +71,79 @@ let sgd_step ~lr (grads : (Tensor.t * Tensor.t) list) : (Tensor.t * Tensor.t) li
     (param, new_t)
   ) grads
 
-(** Batch normalization layer (eval mode only).
-    y = (x - running_mean) / sqrt(running_var + eps) * weight + bias
-    Note: this implementation only supports inference/eval mode.
-    Running statistics must be pre-populated; they are not updated during forward. *)
+(** Batch normalization layer with training and eval modes.
+    Training: normalizes using batch statistics, updates running stats.
+    Eval: normalizes using running statistics.
+    y = (x - mean) / sqrt(var + eps) * weight + bias *)
 type batch_norm = {
   weight: Tensor.t;         (** Scale (gamma), shape [num_features] *)
   bn_bias: Tensor.t;        (** Shift (beta), shape [num_features] *)
-  running_mean: float array; (** Running mean for eval mode *)
-  running_var: float array;  (** Running var for eval mode *)
+  running_mean: float array; (** Running mean, updated during training *)
+  running_var: float array;  (** Running var, updated during training *)
   num_features: int;
   eps: float;
   momentum: float;
+  mutable training: bool;    (** Training/eval mode flag *)
 }
 
-(** Create a BatchNorm layer *)
+(** Create a BatchNorm layer (starts in training mode) *)
 let batch_norm ?(device="CPU") ?(dtype=Dtype.float32) ?(eps=1e-5) ?(momentum=0.1) num_features =
   { weight = Tensor.ones ~device ~dtype [num_features];
     bn_bias = Tensor.zeros ~device ~dtype [num_features];
     running_mean = Array.make num_features 0.0;
     running_var = Array.make num_features 1.0;
-    num_features; eps; momentum }
+    num_features; eps; momentum; training = true }
 
-(** Forward pass for batch normalization (eval mode only).
+(** Forward pass for batch normalization.
     Input x: [batch; channels; ...], normalizes over all dims except dim 1.
-    Uses pre-populated running_mean and running_var; does not compute batch statistics. *)
+    Training mode: computes batch statistics, updates running stats with momentum.
+    Eval mode: uses running_mean/running_var. *)
 let batch_norm_forward (bn : batch_norm) (x : Tensor.t) : Tensor.t =
   let ndim = List.length x.shape in
   if ndim < 2 then invalid_arg "BatchNorm: input must have at least 2 dimensions";
-  (* Use running statistics (eval mode) *)
-  let rm = Tensor.from_float_list ~device:x.device ~dtype:x.dtype
-    [bn.num_features] (Array.to_list bn.running_mean) in
-  let rv = Tensor.from_float_list ~device:x.device ~dtype:x.dtype
-    [bn.num_features] (Array.to_list bn.running_var) in
-  (* Reshape [C] → [1, C, 1, 1, ...] for broadcasting *)
   let bc_shape = List.init ndim (fun i -> if i = 1 then bn.num_features else 1) in
-  let rm_bc = Tensor.reshape rm bc_shape in
-  let rv_bc = Tensor.reshape rv bc_shape in
+  let mean_t, var_t =
+    if bn.training then begin
+      (* Compute batch statistics over all dims except dim 1 (channel dim) *)
+      let reduce_axes = List.init ndim Fun.id
+        |> List.filter (fun i -> i <> 1) in
+      let batch_mean = Tensor.mean ~axes:reduce_axes x in
+      let diff = Tensor.sub x (Tensor.expand (Tensor.reshape batch_mean bc_shape) x.shape) in
+      let batch_var = Tensor.mean ~axes:reduce_axes (Tensor.mul diff diff) in
+      (* Extract values and update running stats *)
+      let mean_vals = Array.of_list (Tensor.to_float_list batch_mean) in
+      let var_vals = Array.of_list (Tensor.to_float_list batch_var) in
+      for i = 0 to bn.num_features - 1 do
+        bn.running_mean.(i) <- (1.0 -. bn.momentum) *. bn.running_mean.(i)
+          +. bn.momentum *. mean_vals.(i);
+        bn.running_var.(i) <- (1.0 -. bn.momentum) *. bn.running_var.(i)
+          +. bn.momentum *. var_vals.(i);
+      done;
+      (* Use batch stats for normalization *)
+      let m = Tensor.from_float_list ~device:x.device ~dtype:x.dtype
+        [bn.num_features] (Array.to_list mean_vals) in
+      let v = Tensor.from_float_list ~device:x.device ~dtype:x.dtype
+        [bn.num_features] (Array.to_list var_vals) in
+      (m, v)
+    end else begin
+      (* Eval mode: use running statistics *)
+      let m = Tensor.from_float_list ~device:x.device ~dtype:x.dtype
+        [bn.num_features] (Array.to_list bn.running_mean) in
+      let v = Tensor.from_float_list ~device:x.device ~dtype:x.dtype
+        [bn.num_features] (Array.to_list bn.running_var) in
+      (m, v)
+    end
+  in
+  let m_bc = Tensor.reshape mean_t bc_shape in
+  let v_bc = Tensor.reshape var_t bc_shape in
   let w_bc = Tensor.reshape bn.weight bc_shape in
   let b_bc = Tensor.reshape bn.bn_bias bc_shape in
-  let eps_t = Tensor.const_like rv_bc bn.eps in
-  (* Normalize: (x - mean) / sqrt(var + eps) * weight + bias *)
-  let normed = Tensor.div (Tensor.sub x rm_bc) (Tensor.sqrt_ (Tensor.add rv_bc eps_t)) in
+  let eps_t = Tensor.const_like v_bc bn.eps in
+  let normed = Tensor.div (Tensor.sub x m_bc) (Tensor.sqrt_ (Tensor.add v_bc eps_t)) in
   Tensor.add (Tensor.mul normed w_bc) b_bc
+
+let batch_norm_eval (bn : batch_norm) = bn.training <- false
+let batch_norm_train (bn : batch_norm) = bn.training <- true
 
 (** Get trainable parameters from a batch_norm layer *)
 let batch_norm_params (bn : batch_norm) : Tensor.t list =

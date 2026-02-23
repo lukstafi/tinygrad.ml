@@ -465,10 +465,10 @@ let layer_norm ?(eps=1e-5) ?weight ?bias (t : t) ~normalized_shape =
   | Some b -> add scaled (expand (reshape b bcast_shape) t.shape)
   | None -> scaled
 
-(** Matrix multiply: a[N, K] @ b[K, M] = c[N, M].
-    Both inputs must be exactly 2-D.
-    Implemented via reshape + expand + elementwise mul + sum reduction,
-    matching tinygrad's approach of decomposing matmul into primitive ops. *)
+(** Matrix multiply: supports 2-D and batched (3D+) tensors.
+    2-D: a[N,K] @ b[K,M] → [N,M].
+    Batched: a[...,N,K] @ b[...,K,M] → [...,N,M] with broadcast-compatible batch dims.
+    Implemented via reshape + expand + elementwise mul + sum reduction. *)
 let matmul (a : t) (b : t) =
   let a_ndim = List.length a.shape in
   let b_ndim = List.length b.shape in

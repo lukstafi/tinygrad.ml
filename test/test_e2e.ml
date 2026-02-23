@@ -2872,6 +2872,7 @@ let test_nn_batch_norm () =
   let open Tensor in
   (* Create a BatchNorm for 3 features with known running stats *)
   let bn = Nn.batch_norm ~eps:1e-5 3 in
+  Nn.batch_norm_eval bn;
   (* Set running_mean = [1, 2, 3], running_var = [1, 1, 1] *)
   bn.running_mean.(0) <- 1.0; bn.running_mean.(1) <- 2.0; bn.running_mean.(2) <- 3.0;
   bn.running_var.(0) <- 1.0; bn.running_var.(1) <- 1.0; bn.running_var.(2) <- 1.0;
@@ -3683,26 +3684,95 @@ let test_batch_matmul () =
   check "2d matmul shape" (out2.shape = [2; 2]);
   let v2 = Tensor.to_float_list out2 in
   check_float "2d mm[0,0]" (List.nth v2 0) 4.0 1e-4;
-  check_float "2d mm[0,1]" (List.nth v2 1) 2.0 1e-4
+  check_float "2d mm[0,1]" (List.nth v2 1) 2.0 1e-4;
+  (* Broadcast: [1, 2, 3] @ [2, 3, 2] → [2, 2, 2] *)
+  Schedule.reset ();
+  let a3 = Tensor.from_float_list [1; 2; 3] [1.;0.;0.; 0.;1.;0.] in
+  let b3 = Tensor.from_float_list [2; 3; 2]
+    [1.;2.; 3.;4.; 5.;6.;  (* batch 0 *)
+     7.;8.; 9.;10.; 11.;12.] in  (* batch 1 *)
+  let out3 = Tensor.matmul a3 b3 in
+  check "bmm bcast shape" (out3.shape = [2; 2; 2]);
+  let v3 = Tensor.to_float_list out3 in
+  (* batch 0: [[1,0,0],[0,1,0]] @ [[1,2],[3,4],[5,6]] = [[1,2],[3,4]] *)
+  check_float "bmm_bc[0,0,0]" (List.nth v3 0) 1.0 1e-4;
+  check_float "bmm_bc[0,0,1]" (List.nth v3 1) 2.0 1e-4;
+  check_float "bmm_bc[0,1,0]" (List.nth v3 2) 3.0 1e-4;
+  check_float "bmm_bc[0,1,1]" (List.nth v3 3) 4.0 1e-4;
+  (* batch 1: identity @ [[7,8],[9,10],[11,12]] = [[7,8],[9,10]] *)
+  check_float "bmm_bc[1,0,0]" (List.nth v3 4) 7.0 1e-4;
+  check_float "bmm_bc[1,0,1]" (List.nth v3 5) 8.0 1e-4;
+  (* Non-broadcastable batch mismatch should fail *)
+  let bmm_err = try
+    let bad_a = Tensor.from_float_list [2; 2; 3] (List.init 12 Float.of_int) in
+    let bad_b = Tensor.from_float_list [3; 3; 2] (List.init 18 Float.of_int) in
+    ignore (Tensor.matmul bad_a bad_b); false
+  with Failure _ -> true in
+  check "bmm mismatch rejected" bmm_err
 
 (* ---- Test 86r: AdamW Optimizer ---- *)
 let test_adamw () =
   Printf.printf "\n=== AdamW Optimizer ===\n%!";
   Schedule.reset ();
-  let x = Tensor.from_float_list [3] [5.0; 10.0; 15.0] in
-  let grad = Tensor.from_float_list [3] [1.0; 1.0; 1.0] in
-  let state = Nn.adam_init 3 in
-  let (x1, s1) = Nn.adamw_step ~lr:0.01 ~weight_decay:0.1 x grad state in
-  let v1 = Tensor.to_float_list x1 in
-  (* Weight decay shrinks params: x * (1 - lr * wd) = x * 0.999 *)
+  let x = Tensor.from_float_list [2] [1.0; 2.0] in
+  let grad = Tensor.from_float_list [2] [0.5; 1.0] in
+  let state = Nn.adam_init 2 in
+  (* One step with known params: lr=0.001, beta1=0.9, beta2=0.999, wd=0.01 *)
+  let (x1, s1) = Nn.adamw_step ~lr:0.001 ~beta1:0.9 ~beta2:0.999 ~eps:1e-8
+      ~weight_decay:0.01 x grad state in
   check "adamw step=1" (s1.t_step = 1);
-  check "adamw moved x[0]" (List.nth v1 0 < 5.0);
-  check "adamw moved x[1]" (List.nth v1 1 < 10.0);
-  check "adamw moved x[2]" (List.nth v1 2 < 15.0);
-  (* Larger params should decay more *)
-  let delta0 = 5.0 -. List.nth v1 0 in
-  let delta2 = 15.0 -. List.nth v1 2 in
+  let v1 = Tensor.to_float_list x1 in
+  (* Manual computation for x[0]=1.0, g=0.5:
+     m = 0.1 * 0.5 = 0.05, v = 0.001 * 0.25 = 0.00025
+     bc1 = 0.1, bc2 = 0.001
+     m_hat = 0.5, v_hat = 0.25
+     p_decayed = 1.0 * (1 - 0.001*0.01) = 0.99999
+     result = 0.99999 - 0.001 * 0.5 / (sqrt(0.25) + 1e-8) = 0.99999 - 0.001 = 0.99899 *)
+  check_float "adamw x[0]" (List.nth v1 0) 0.99899 1e-3;
+  (* x[1]=2.0, g=1.0: p_decayed = 2.0 * 0.99999 = 1.99998, adam_update = 0.001 *)
+  check_float "adamw x[1]" (List.nth v1 1) 1.99898 1e-3;
+  (* Larger weight decays more with larger params *)
+  Schedule.reset ();
+  let x2 = Tensor.from_float_list [3] [5.0; 10.0; 15.0] in
+  let grad2 = Tensor.from_float_list [3] [1.0; 1.0; 1.0] in
+  let state2 = Nn.adam_init 3 in
+  let (x2r, _) = Nn.adamw_step ~lr:0.01 ~weight_decay:0.1 x2 grad2 state2 in
+  let v2 = Tensor.to_float_list x2r in
+  let delta0 = 5.0 -. List.nth v2 0 in
+  let delta2 = 15.0 -. List.nth v2 2 in
   check "adamw larger decay for larger param" (delta2 > delta0)
+
+(* ---- Test 86s: BatchNorm training mode ---- *)
+let test_bn_training () =
+  Printf.printf "\n=== BatchNorm Training ===\n%!";
+  Schedule.reset ();
+  let bn = Nn.batch_norm ~eps:1e-5 ~momentum:0.1 2 in
+  (* Training mode: compute batch stats from input *)
+  (* Input: [3, 2] — 3 samples, 2 channels *)
+  let x = Tensor.from_float_list [3; 2]
+    [1.0; 10.0;   2.0; 20.0;   3.0; 30.0] in
+  let out = Nn.batch_norm_forward bn x in
+  let ov = Tensor.to_float_list out in
+  (* Channel 0: mean=2.0, var=2/3
+     Channel 1: mean=20.0, var=200/3
+     Normalized: (x-mean)/sqrt(var+eps) * 1 + 0 *)
+  (* Sample 0, ch0: (1-2)/sqrt(2/3) = -1/0.8165 ≈ -1.2247 *)
+  check_float "bn_train[0]" (List.nth ov 0) (-1.2247) 0.01;
+  (* Sample 1, ch0: (2-2)/sqrt(2/3) = 0 *)
+  check_float "bn_train[2]" (List.nth ov 2) 0.0 0.01;
+  (* Sample 2, ch0: (3-2)/sqrt(2/3) ≈ 1.2247 *)
+  check_float "bn_train[4]" (List.nth ov 4) 1.2247 0.01;
+  (* Running stats should be updated: rm = 0.9*0 + 0.1*batch_mean *)
+  check_float "bn_rm[0]" bn.running_mean.(0) 0.2 0.01;
+  check_float "bn_rm[1]" bn.running_mean.(1) 2.0 0.01;
+  (* Running var: rv = 0.9*1.0 + 0.1*batch_var *)
+  check_float "bn_rv[0]" bn.running_var.(0) (0.9 +. 0.1 *. (2.0 /. 3.0)) 0.01;
+  (* Switch to eval mode *)
+  Nn.batch_norm_eval bn;
+  check "bn not training" (not bn.training);
+  (* Switch back *)
+  Nn.batch_norm_train bn;
+  check "bn training" bn.training
 
 (* ---- Test 86: CUDA backend registration ---- *)
 let test_cuda_backend () =
@@ -4125,6 +4195,7 @@ let () =
   run_test "leaky_relu" test_leaky_relu;
   run_test "batch_matmul" test_batch_matmul;
   run_test "adamw" test_adamw;
+  run_test "bn_training" test_bn_training;
   run_test "cuda_backend" test_cuda_backend;
   run_test "backend_availability" test_backend_availability;
   Printf.printf "\n============================\n%!";
