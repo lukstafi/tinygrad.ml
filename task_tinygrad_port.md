@@ -601,3 +601,11 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Tensor.trace**: Sum of diagonal elements of 2D tensor. Implemented via `diag` + `sum` (the sum is autograd-capable, only the diagonal extraction is host-side).
 - **Tensor.tril/triu tests**: Added tests for the existing graph-based (autograd-compatible) tril/triu with default k and k=1 offset. Avoided adding duplicate host-side implementations.
 - **Test count**: 1446 passing tests.
+
+## Claude round 71 decisions
+
+- **Codex review fix (round 69 MEDIUM)**: Restored transformer encoder integration smoke test (`test_te_smoke`) that exercises `transformer_encoder_layer_forward` end-to-end and verifies backward through FFN params. Keeps both standalone FFN backward and integrated TE tests.
+- **Codex review fix (round 69 optional)**: Added negative-path validation tests for `diag` (rejects 3D) and `trace` (rejects 1D) to lock in error semantics.
+- **Tensor.eye enhancement**: Extended existing `eye` with optional `~m` parameter for non-square identity matrices (e.g., `eye ~m:3 2` → [2; 3]).
+- **Tensor.linspace/eye tests**: Added tests for eye (square, non-square) and linspace (multi-point, single-point). Both already existed; tests confirm they work.
+- **Test count**: 1469 passing tests.

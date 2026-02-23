@@ -688,10 +688,11 @@ let linspace ?(device="CPU") ?(dtype=Dtype.float32) ~start ~stop (n : int) : t =
     let data = List.init n (fun i -> start +. step *. Float.of_int i) in
     from_float_list ~device ~dtype [n] data
 
-(** Identity matrix: eye(n) returns [n; n] float tensor *)
-let eye ?(device="CPU") ?(dtype=Dtype.float32) (n : int) : t =
-  let data = List.init (n * n) (fun i -> if i / n = i mod n then 1.0 else 0.0) in
-  from_float_list ~device ~dtype [n; n] data
+(** Identity matrix: eye n returns [n; n] tensor, eye ~m n returns [n; m] *)
+let eye ?(m=0) ?(device="CPU") ?(dtype=Dtype.float32) (n : int) : t =
+  let cols = if m = 0 then n else m in
+  let data = List.init (n * cols) (fun i -> if i / cols = i mod cols then 1.0 else 0.0) in
+  from_float_list ~device ~dtype [n; cols] data
 
 (** Upper triangular: zeros below the k-th diagonal *)
 let triu ?(k=0) (t : t) =
@@ -1757,3 +1758,5 @@ let trace (t : t) : t =
   | _ -> invalid_arg "trace: expected 2D tensor"
 
 (* tril and triu already defined earlier (graph-based, autograd-compatible) *)
+
+(* eye and linspace already defined earlier *)
