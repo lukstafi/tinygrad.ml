@@ -3811,7 +3811,100 @@ let test_bn_training_backward () =
   let bgv = Tensor.to_float_list b_grad in
   check_float "bn_backward bgrad[0]" (List.nth bgv 0) 3.0 0.1;
   check_float "bn_backward bgrad[1]" (List.nth bgv 1) 3.0 0.1;
+  (* Note: backward through input x requires differentiating through mean/var
+     reductions, which exceeds current scheduler capabilities.
+     Weight/bias backward is sufficient to validate gradient flow. *)
   Printf.printf "  BN training backward: gradients flow through graph\n%!"
+
+(* ---- Test 88: argmax/argmin ---- *)
+let test_argmax_argmin () =
+  Printf.printf "\n=== Argmax / Argmin ===\n%!";
+  Schedule.reset ();
+  (* 2D tensor: [[1, 3, 2], [5, 4, 6]] → argmax axis=1: [1, 2] *)
+  let t = Tensor.from_float_list [2; 3] [1.0; 3.0; 2.0;  5.0; 4.0; 6.0] in
+  let am = Tensor.argmax ~axis:1 t in
+  let amv = Tensor.to_float_list am in
+  check "argmax shape" (am.shape = [2]);
+  check_float "argmax[0]" (List.nth amv 0) 1.0 0.01;
+  check_float "argmax[1]" (List.nth amv 1) 2.0 0.01;
+  (* argmax axis=0: [1, 0, 1] *)
+  let am0 = Tensor.argmax ~axis:0 t in
+  let am0v = Tensor.to_float_list am0 in
+  check "argmax axis0 shape" (am0.shape = [3]);
+  check_float "argmax0[0]" (List.nth am0v 0) 1.0 0.01;  (* 5 > 1 *)
+  check_float "argmax0[1]" (List.nth am0v 1) 1.0 0.01;  (* 4 > 3 *)
+  check_float "argmax0[2]" (List.nth am0v 2) 1.0 0.01;  (* 6 > 2 *)
+  (* argmin: [[1, 3, 2], [5, 4, 6]] axis=1 → [0, 1] *)
+  let ami = Tensor.argmin ~axis:1 t in
+  let amiv = Tensor.to_float_list ami in
+  check_float "argmin[0]" (List.nth amiv 0) 0.0 0.01;
+  check_float "argmin[1]" (List.nth amiv 1) 1.0 0.01;
+  (* Default axis (-1) = last axis *)
+  let am_def = Tensor.argmax t in
+  let am_defv = Tensor.to_float_list am_def in
+  check_float "argmax default[0]" (List.nth am_defv 0) 1.0 0.01;
+  check_float "argmax default[1]" (List.nth am_defv 1) 2.0 0.01;
+  (* 1D tensor *)
+  let t1d = Tensor.from_float_list [5] [3.0; 1.0; 4.0; 1.0; 5.0] in
+  let am1 = Tensor.argmax t1d in
+  check_float "argmax 1d" (List.hd (Tensor.to_float_list am1)) 4.0 0.01;
+  let ami1 = Tensor.argmin t1d in
+  check_float "argmin 1d" (List.hd (Tensor.to_float_list ami1)) 1.0 0.01;
+  (* Error: bad axis *)
+  (try
+    ignore (Tensor.argmax ~axis:5 t);
+    check "argmax bad axis should fail" false
+  with Invalid_argument _ -> check "argmax bad axis" true)
+
+(* ---- Test 89: LSTM cell ---- *)
+let test_lstm () =
+  Printf.printf "\n=== LSTM ===\n%!";
+  Schedule.reset ();
+  Random.init 99;
+  let cell = Nn.lstm ~input_size:3 ~hidden_size:4 () in
+  (* Single step: x [1,3], h [1,4], c [1,4] *)
+  let x = Tensor.from_float_list [1; 3] [0.1; 0.2; 0.3] in
+  let h0 = Tensor.zeros [1; 4] in
+  let c0 = Tensor.zeros [1; 4] in
+  let (h1, c1) = Nn.lstm_cell_forward cell x h0 c0 in
+  check "lstm h1 shape" (h1.shape = [1; 4]);
+  check "lstm c1 shape" (c1.shape = [1; 4]);
+  let hv = Tensor.to_float_list h1 in
+  List.iter (fun v -> check "lstm h1 finite" (Float.is_finite v)) hv;
+  (* Hidden should be in (-1, 1) range due to tanh *)
+  List.iter (fun v ->
+    check "lstm h1 bounded" (Float.abs v < 1.0)
+  ) hv;
+  (* Sequence: x [3, 1, 3] → output [3, 1, 4] *)
+  let x_seq = Tensor.from_float_list [3; 1; 3]
+    [0.1; 0.2; 0.3;  0.4; 0.5; 0.6;  0.7; 0.8; 0.9] in
+  let (output, (h_n, c_n)) = Nn.lstm_forward cell x_seq in
+  check "lstm output shape" (output.shape = [3; 1; 4]);
+  check "lstm h_n shape" (h_n.shape = [1; 4]);
+  check "lstm c_n shape" (c_n.shape = [1; 4]);
+  let ov = Tensor.to_float_list output in
+  List.iter (fun v -> check "lstm output finite" (Float.is_finite v)) ov;
+  (* Last output should match h_n: compare values directly *)
+  let ov_all = Tensor.to_float_list output in
+  let h_nv = Tensor.to_float_list h_n in
+  (* output is [3; 1; 4], last timestep starts at index 2*1*4 = 8 *)
+  let last_start = 2 * 1 * 4 in
+  List.iteri (fun i expected ->
+    let got = List.nth ov_all (last_start + i) in
+    check_float (Printf.sprintf "lstm last_h = h_n[%d]" i) got expected 1e-5
+  ) h_nv;
+  (* Unbatched: x [3, 3] → output [3, 4] *)
+  Schedule.reset ();
+  Random.init 99;
+  let cell2 = Nn.lstm ~input_size:3 ~hidden_size:4 () in
+  let x_unbatch = Tensor.from_float_list [3; 3]
+    [0.1; 0.2; 0.3;  0.4; 0.5; 0.6;  0.7; 0.8; 0.9] in
+  let (out_ub, _) = Nn.lstm_forward cell2 x_unbatch in
+  check "lstm unbatched shape" (out_ub.shape = [3; 4]);
+  (* Params *)
+  let ps = Nn.lstm_params cell in
+  check "lstm params count" (List.length ps = 3);
+  Printf.printf "  LSTM: cell forward, sequence forward, unbatched all pass\n%!"
 
 (* ---- Test 86: CUDA backend registration ---- *)
 let test_cuda_backend () =
@@ -4236,6 +4329,8 @@ let () =
   run_test "adamw" test_adamw;
   run_test "bn_training" test_bn_training;
   run_test "bn_training_backward" test_bn_training_backward;
+  run_test "argmax_argmin" test_argmax_argmin;
+  run_test "lstm" test_lstm;
   run_test "cuda_backend" test_cuda_backend;
   run_test "backend_availability" test_backend_availability;
   Printf.printf "\n============================\n%!";
