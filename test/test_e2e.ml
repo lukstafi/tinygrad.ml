@@ -3844,12 +3844,14 @@ let test_argmax_argmin () =
   let am_defv = Tensor.to_float_list am_def in
   check_float "argmax default[0]" (List.nth am_defv 0) 1.0 0.01;
   check_float "argmax default[1]" (List.nth am_defv 1) 2.0 0.01;
-  (* 1D tensor *)
+  (* 1D tensor → scalar output (shape []) *)
   let t1d = Tensor.from_float_list [5] [3.0; 1.0; 4.0; 1.0; 5.0] in
   let am1 = Tensor.argmax t1d in
-  check_float "argmax 1d" (List.hd (Tensor.to_float_list am1)) 4.0 0.01;
+  check "argmax 1d scalar shape" (am1.shape = []);
+  check_float "argmax 1d" (Tensor.item am1) 4.0 0.01;
   let ami1 = Tensor.argmin t1d in
-  check_float "argmin 1d" (List.hd (Tensor.to_float_list ami1)) 1.0 0.01;
+  check "argmin 1d scalar shape" (ami1.shape = []);
+  check_float "argmin 1d" (Tensor.item ami1) 1.0 0.01;
   (* Error: bad axis *)
   (try
     ignore (Tensor.argmax ~axis:5 t);
@@ -3904,7 +3906,71 @@ let test_lstm () =
   (* Params *)
   let ps = Nn.lstm_params cell in
   check "lstm params count" (List.length ps = 3);
-  Printf.printf "  LSTM: cell forward, sequence forward, unbatched all pass\n%!"
+  Printf.printf "  LSTM: cell forward, sequence forward, unbatched all pass\n%!";
+  (* Validation: wrong input feature dim *)
+  (try
+    let bad_x = Tensor.from_float_list [3; 1; 5] (List.init 15 Float.of_int) in
+    ignore (Nn.lstm_forward cell bad_x);
+    check "lstm bad input_size should fail" false
+  with Invalid_argument msg ->
+    check "lstm bad input_size" (String.length msg > 0));
+  (* Validation: wrong h0 shape *)
+  (try
+    let x3 = Tensor.from_float_list [2; 1; 3] (List.init 6 Float.of_int) in
+    let bad_h0 = Tensor.zeros [1; 99] in
+    ignore (Nn.lstm_forward cell ~h0:bad_h0 x3);
+    check "lstm bad h0 should fail" false
+  with Invalid_argument msg ->
+    check "lstm bad h0" (String.length msg > 0))
+
+(* ---- Test 90: GroupNorm ---- *)
+let test_group_norm () =
+  Printf.printf "\n=== GroupNorm ===\n%!";
+  Schedule.reset ();
+  (* 4 channels, 2 groups → 2 channels per group *)
+  let gn = Nn.group_norm ~num_groups:2 ~num_channels:4 () in
+  (* Input: [2, 4] — 2 batch, 4 channels, no spatial *)
+  let x = Tensor.from_float_list [2; 4]
+    [1.0; 2.0; 3.0; 4.0;   5.0; 6.0; 7.0; 8.0] in
+  let out = Nn.group_norm_forward gn x in
+  check "gn output shape" (out.shape = [2; 4]);
+  let ov = Tensor.to_float_list out in
+  (* Group 0 (ch 0,1): batch 0 vals [1,2], mean=1.5, var=0.25, std=0.5
+     Normalized: (1-1.5)/0.5=-1, (2-1.5)/0.5=1 *)
+  check_float "gn[0,0]" (List.nth ov 0) (-1.0) 0.01;
+  check_float "gn[0,1]" (List.nth ov 1) 1.0 0.01;
+  (* Group 1 (ch 2,3): batch 0 vals [3,4], mean=3.5, var=0.25
+     Normalized: (3-3.5)/0.5=-1, (4-3.5)/0.5=1 *)
+  check_float "gn[0,2]" (List.nth ov 2) (-1.0) 0.01;
+  check_float "gn[0,3]" (List.nth ov 3) 1.0 0.01;
+  (* Batch element 1: same pattern *)
+  check_float "gn[1,0]" (List.nth ov 4) (-1.0) 0.01;
+  check_float "gn[1,1]" (List.nth ov 5) 1.0 0.01;
+  (* With spatial dims: [1, 4, 2] — 1 batch, 4 channels, spatial 2 *)
+  Schedule.reset ();
+  let gn2 = Nn.group_norm ~num_groups:2 ~num_channels:4 () in
+  let x2 = Tensor.from_float_list [1; 4; 2]
+    [1.0; 3.0;  2.0; 4.0;   5.0; 7.0;  6.0; 8.0] in
+  let out2 = Nn.group_norm_forward gn2 x2 in
+  check "gn spatial shape" (out2.shape = [1; 4; 2]);
+  let ov2 = Tensor.to_float_list out2 in
+  (* Group 0 (ch 0,1): vals [1,3,2,4], mean=2.5, var=1.25, std=sqrt(1.25)≈1.118
+     ch0,s0: (1-2.5)/1.118 ≈ -1.342 *)
+  check_float "gn_sp[0,0,0]" (List.nth ov2 0) (-1.342) 0.02;
+  (* Params *)
+  let ps = Nn.group_norm_params gn in
+  check "gn params count" (List.length ps = 2);
+  (* Validation: channels not divisible *)
+  (try
+    ignore (Nn.group_norm ~num_groups:3 ~num_channels:4 ());
+    check "gn bad divisibility should fail" false
+  with Invalid_argument _ -> check "gn bad divisibility" true);
+  (* Validation: channel mismatch *)
+  (try
+    let bad_x = Tensor.from_float_list [1; 6] (List.init 6 Float.of_int) in
+    ignore (Nn.group_norm_forward gn bad_x);
+    check "gn channel mismatch should fail" false
+  with Invalid_argument _ -> check "gn channel mismatch" true)
 
 (* ---- Test 86: CUDA backend registration ---- *)
 let test_cuda_backend () =
@@ -4331,6 +4397,7 @@ let () =
   run_test "bn_training_backward" test_bn_training_backward;
   run_test "argmax_argmin" test_argmax_argmin;
   run_test "lstm" test_lstm;
+  run_test "group_norm" test_group_norm;
   run_test "cuda_backend" test_cuda_backend;
   run_test "backend_availability" test_backend_availability;
   Printf.printf "\n============================\n%!";

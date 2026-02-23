@@ -648,6 +648,18 @@ let lstm ?(device="CPU") ?(dtype=Dtype.float32) ?(bias=true) ~input_size ~hidden
     Returns (h', c'). *)
 let lstm_cell_forward (cell : lstm) (x : Tensor.t) (h : Tensor.t) (c : Tensor.t)
     : Tensor.t * Tensor.t =
+  if List.length x.shape <> 2 then
+    invalid_arg "LSTM cell: x must be 2-D [batch, input_size]";
+  let x_feat = List.nth x.shape 1 in
+  if x_feat <> cell.input_size then
+    invalid_arg (Printf.sprintf "LSTM cell: input feature dim %d != input_size %d"
+      x_feat cell.input_size);
+  if h.shape <> [List.hd x.shape; cell.hidden_size] then
+    invalid_arg (Printf.sprintf "LSTM cell: h shape [%s] != expected [%d; %d]"
+      (String.concat "," (List.map string_of_int h.shape))
+      (List.hd x.shape) cell.hidden_size);
+  if c.shape <> h.shape then
+    invalid_arg "LSTM cell: c shape must match h shape";
   (* gates = x @ W_ih^T + h @ W_hh^T + bias *)
   let x_proj = Tensor.matmul x (Tensor.transpose cell.weight_ih) in
   let h_proj = Tensor.matmul h (Tensor.transpose cell.weight_hh) in
@@ -678,17 +690,35 @@ let lstm_forward (cell : lstm) ?(h0 : Tensor.t option) ?(c0 : Tensor.t option)
     invalid_arg "LSTM: input must be 2-D [seq, input_size] or 3-D [seq, batch, input_size]";
   let seq_len = List.hd x.shape in
   let batch, x_3d =
-    if ndim = 2 then
+    if ndim = 2 then begin
+      let feat = List.nth x.shape 1 in
+      if feat <> cell.input_size then
+        invalid_arg (Printf.sprintf "LSTM: input feature dim %d != input_size %d"
+          feat cell.input_size);
       (1, Tensor.reshape x [seq_len; 1; cell.input_size])
-    else
-      (List.nth x.shape 1, x) in
+    end else begin
+      let feat = List.nth x.shape 2 in
+      if feat <> cell.input_size then
+        invalid_arg (Printf.sprintf "LSTM: input feature dim %d != input_size %d"
+          feat cell.input_size);
+      (List.nth x.shape 1, x)
+    end in
   let device = x.device and dtype = x.dtype in
+  let expected_state = [batch; cell.hidden_size] in
   let h = ref (match h0 with
-    | Some h -> h
-    | None -> Tensor.zeros ~device ~dtype [batch; cell.hidden_size]) in
+    | Some h ->
+      if h.shape <> expected_state then
+        invalid_arg (Printf.sprintf "LSTM: h0 shape [%s] != expected [%d; %d]"
+          (String.concat "," (List.map string_of_int h.shape)) batch cell.hidden_size);
+      h
+    | None -> Tensor.zeros ~device ~dtype expected_state) in
   let c = ref (match c0 with
-    | Some c -> c
-    | None -> Tensor.zeros ~device ~dtype [batch; cell.hidden_size]) in
+    | Some c ->
+      if c.shape <> expected_state then
+        invalid_arg (Printf.sprintf "LSTM: c0 shape [%s] != expected [%d; %d]"
+          (String.concat "," (List.map string_of_int c.shape)) batch cell.hidden_size);
+      c
+    | None -> Tensor.zeros ~device ~dtype expected_state) in
   let outputs = Array.make seq_len (Tensor.zeros ~device ~dtype [batch; cell.hidden_size]) in
   for t = 0 to seq_len - 1 do
     let x_t = Tensor.shrink x_3d [(t, t + 1); (0, batch); (0, cell.input_size)] in
@@ -711,3 +741,94 @@ let lstm_params (cell : lstm) : Tensor.t list =
   match cell.lstm_bias with
   | Some b -> [cell.weight_ih; cell.weight_hh; b]
   | None -> [cell.weight_ih; cell.weight_hh]
+
+(** Group normalization layer.
+    Divides channels into [num_groups] groups and normalizes within each group.
+    Useful when batch size is small (where BatchNorm is unstable).
+    Input: [batch; channels; ...], channels must be divisible by num_groups.
+    y = (x - group_mean) / sqrt(group_var + eps) * weight + bias *)
+type group_norm = {
+  gn_weight: Tensor.t;         (** Scale (gamma), shape [num_channels] *)
+  gn_bias: Tensor.t;           (** Shift (beta), shape [num_channels] *)
+  num_groups: int;
+  num_channels: int;
+  gn_eps: float;
+}
+
+(** Create a GroupNorm layer *)
+let group_norm ?(device="CPU") ?(dtype=Dtype.float32) ?(eps=1e-5) ~num_groups ~num_channels () =
+  if num_channels mod num_groups <> 0 then
+    invalid_arg (Printf.sprintf "GroupNorm: num_channels=%d not divisible by num_groups=%d"
+      num_channels num_groups);
+  if num_groups <= 0 then
+    invalid_arg "GroupNorm: num_groups must be > 0";
+  { gn_weight = Tensor.ones ~device ~dtype [num_channels];
+    gn_bias = Tensor.zeros ~device ~dtype [num_channels];
+    num_groups; num_channels; gn_eps = eps }
+
+(** Forward pass for group normalization.
+    Input x: [batch; channels; ...], normalizes within each group of channels.
+    Host-side computation for simplicity (like conv2d, pool ops). *)
+let group_norm_forward (gn : group_norm) (x : Tensor.t) : Tensor.t =
+  let ndim = List.length x.shape in
+  if ndim < 2 then invalid_arg "GroupNorm: input must have at least 2 dimensions";
+  let c = List.nth x.shape 1 in
+  if c <> gn.num_channels then
+    invalid_arg (Printf.sprintf "GroupNorm: expected %d channels, got %d" gn.num_channels c);
+  let batch = List.hd x.shape in
+  let spatial = List.filteri (fun i _ -> i >= 2) x.shape in
+  let spatial_size = List.fold_left Stdlib.( * ) 1 spatial in
+  let channels_per_group = gn.num_channels / gn.num_groups in
+  let _x = !(Tensor.realize_ref) x in
+  let vals = Array.of_list (Tensor.to_float_list _x) in
+  let w_vals = Array.of_list (Tensor.to_float_list gn.gn_weight) in
+  let b_vals = Array.of_list (Tensor.to_float_list gn.gn_bias) in
+  let total = batch * c * spatial_size in
+  let result = Array.make total 0.0 in
+  (* For each batch element and group, compute mean and var *)
+  let group_size = channels_per_group * spatial_size in
+  for b = 0 to batch - 1 do
+    for g = 0 to gn.num_groups - 1 do
+      let c_start = g * channels_per_group in
+      (* Compute mean *)
+      let sum = ref 0.0 in
+      for ci = 0 to channels_per_group - 1 do
+        let ch = c_start + ci in
+        for s = 0 to spatial_size - 1 do
+          sum := !sum +. vals.((b * c + ch) * spatial_size + s)
+        done
+      done;
+      let mean = !sum /. Float.of_int group_size in
+      (* Compute var *)
+      let var_sum = ref 0.0 in
+      for ci = 0 to channels_per_group - 1 do
+        let ch = c_start + ci in
+        for s = 0 to spatial_size - 1 do
+          let d = vals.((b * c + ch) * spatial_size + s) -. mean in
+          var_sum := !var_sum +. d *. d
+        done
+      done;
+      let var = !var_sum /. Float.of_int group_size in
+      let inv_std = 1.0 /. Stdlib.sqrt (var +. gn.gn_eps) in
+      (* Normalize and apply affine *)
+      for ci = 0 to channels_per_group - 1 do
+        let ch = c_start + ci in
+        for s = 0 to spatial_size - 1 do
+          let idx = (b * c + ch) * spatial_size + s in
+          let normed = (vals.(idx) -. mean) *. inv_std in
+          result.(idx) <- normed *. w_vals.(ch) +. b_vals.(ch)
+        done
+      done
+    done
+  done;
+  Tensor.from_float_list ~device:x.device ~dtype:x.dtype x.shape (Array.to_list result)
+
+(** Get trainable parameters from a group_norm layer *)
+let group_norm_params (gn : group_norm) : Tensor.t list =
+  [gn.gn_weight; gn.gn_bias]
+
+(** Wrap a group_norm layer as a generic layer *)
+let of_group_norm name (gn : group_norm) : layer =
+  { name;
+    forward = group_norm_forward gn;
+    params = (fun () -> group_norm_params gn) }

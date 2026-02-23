@@ -495,3 +495,10 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **LSTM cell and sequence**: `Nn.lstm` creates an LSTM cell with combined weight matrices `weight_ih` [4*H, I] and `weight_hh` [4*H, H]. `lstm_cell_forward` computes one timestep with i/f/g/o gates. `lstm_forward` processes a full sequence with optional initial states, stacking per-timestep hidden states. Supports both batched [seq, batch, input] and unbatched [seq, input] inputs. Realizes intermediate states to keep the graph manageable.
 - **Codex review fix (round 55)**: Confirmed BN backward through weight/bias params works. Input-gradient backward through BN requires differentiating through mean/var reductions, which exceeds current scheduler capabilities (same limitation as conv2d/pool).
 - **Test count**: 1155 passing tests.
+
+## Claude round 58 decisions
+
+- **Codex review fix (round 56 MEDIUM)**: Fixed `argmax`/`argmin` to return true scalar shape `[]` for 1D input (was incorrectly forced to `[1]`). Output shape now consistently removes the reduction axis, matching PyTorch semantics.
+- **Codex review fix (round 56 MEDIUM)**: Added comprehensive LSTM shape validation. `lstm_cell_forward` checks x rank, input feature dim, h/c shape compatibility. `lstm_forward` validates input feature size and h0/c0 shapes when provided. All errors raise `Invalid_argument` with descriptive messages.
+- **GroupNorm layer**: `Nn.group_norm` divides channels into `num_groups` groups and normalizes within each group. Host-side computation for simplicity. Validates channels divisible by groups and channel count at forward time. Supports arbitrary spatial dimensions `[batch; channels; ...]`.
+- **Test count**: 1171 passing tests.

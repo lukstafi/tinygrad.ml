@@ -1202,7 +1202,6 @@ let argmax ?(axis=(-1)) (t : t) : t =
     done
   done;
   let out_shape = List.filteri (fun i _ -> i <> ax) t.shape in
-  let out_shape = if out_shape = [] then [1] else out_shape in
   from_float_list ~device:t.device ~dtype:t.dtype out_shape (Array.to_list result)
 
 (** Argmin along a given axis. Returns integer indices as float tensor.
@@ -1237,5 +1236,4 @@ let argmin ?(axis=(-1)) (t : t) : t =
     done
   done;
   let out_shape = List.filteri (fun i _ -> i <> ax) t.shape in
-  let out_shape = if out_shape = [] then [1] else out_shape in
   from_float_list ~device:t.device ~dtype:t.dtype out_shape (Array.to_list result)
