@@ -585,3 +585,11 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Tensor.diff**: Finite differences along an axis (host-side, forward only). Output axis dimension is one less than input. output[i] = input[i+1] - input[i].
 - **Nn.positional_encoding**: Sinusoidal positional encoding for transformers. PE(pos,2i) = sin(pos/10000^(2i/d)), PE(pos,2i+1) = cos(...). Returns [max_len, d_model] tensor. Handles odd d_model. No trainable parameters.
 - **Test count**: 1395 passing tests.
+
+## Claude round 69 decisions
+
+- **Codex review fix (round 67 LOW)**: Added transformer encoder backward test verifying FFN params receive gradients with correct shapes through backward pass.
+- **Codex review fix (round 67 optional)**: Added negative-axis regression tests for cumsum (axis=-1) and diff (axis=-1) confirming axis normalization works correctly.
+- **Sort via topk**: Demonstrated sorting by using `topk ~k:n` (full descending sort with indices). No separate sort API needed since topk generalizes it.
+- **Where broadcast test**: Verified where_ correctly handles condition-based selection including 2D positive-value clamping pattern.
+- **Test count**: 1423 passing tests.
