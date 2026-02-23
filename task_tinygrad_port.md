@@ -502,3 +502,11 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Codex review fix (round 56 MEDIUM)**: Added comprehensive LSTM shape validation. `lstm_cell_forward` checks x rank, input feature dim, h/c shape compatibility. `lstm_forward` validates input feature size and h0/c0 shapes when provided. All errors raise `Invalid_argument` with descriptive messages.
 - **GroupNorm layer**: `Nn.group_norm` divides channels into `num_groups` groups and normalizes within each group. Host-side computation for simplicity. Validates channels divisible by groups and channel count at forward time. Supports arbitrary spatial dimensions `[batch; channels; ...]`.
 - **Test count**: 1171 passing tests.
+
+## Claude round 59 decisions
+
+- **Codex review fix (round 57 HIGH)**: Fixed GroupNorm forward to keep weight/bias in autograd graph. Normalization is host-side, but affine transform (`weight * normed + bias`) now uses tensor operations with broadcast. Added backward test verifying weight/bias gradients.
+- **Codex review fix (round 57 MEDIUM)**: Reordered GroupNorm constructor to check `num_groups > 0` before divisibility, preventing Division_by_zero. Added `num_groups=0` test.
+- **InstanceNorm**: Thin wrapper over GroupNorm with `num_groups = num_channels`. Normalizes each channel independently. Delegates to `group_norm_forward` for the actual computation.
+- **GRU cell and sequence**: `Nn.gru` creates a GRU cell with `weight_ih` [3*H, I] and `weight_hh` [3*H, H]. Proper reset gate applied to hidden projection before candidate computation (`n = tanh(x_n + r * h_n)`). Full shape validation like LSTM. `gru_forward` processes sequences with optional h0, supports batched and unbatched inputs.
+- **Test count**: 1211 passing tests.

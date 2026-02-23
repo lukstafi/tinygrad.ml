@@ -757,18 +757,19 @@ type group_norm = {
 
 (** Create a GroupNorm layer *)
 let group_norm ?(device="CPU") ?(dtype=Dtype.float32) ?(eps=1e-5) ~num_groups ~num_channels () =
+  if num_groups <= 0 then
+    invalid_arg "GroupNorm: num_groups must be > 0";
   if num_channels mod num_groups <> 0 then
     invalid_arg (Printf.sprintf "GroupNorm: num_channels=%d not divisible by num_groups=%d"
       num_channels num_groups);
-  if num_groups <= 0 then
-    invalid_arg "GroupNorm: num_groups must be > 0";
   { gn_weight = Tensor.ones ~device ~dtype [num_channels];
     gn_bias = Tensor.zeros ~device ~dtype [num_channels];
     num_groups; num_channels; gn_eps = eps }
 
 (** Forward pass for group normalization.
     Input x: [batch; channels; ...], normalizes within each group of channels.
-    Host-side computation for simplicity (like conv2d, pool ops). *)
+    Normalization is host-side; affine transform (weight * normed + bias) uses
+    tensor ops to keep weight/bias in the autograd graph for training. *)
 let group_norm_forward (gn : group_norm) (x : Tensor.t) : Tensor.t =
   let ndim = List.length x.shape in
   if ndim < 2 then invalid_arg "GroupNorm: input must have at least 2 dimensions";
@@ -781,16 +782,13 @@ let group_norm_forward (gn : group_norm) (x : Tensor.t) : Tensor.t =
   let channels_per_group = gn.num_channels / gn.num_groups in
   let _x = !(Tensor.realize_ref) x in
   let vals = Array.of_list (Tensor.to_float_list _x) in
-  let w_vals = Array.of_list (Tensor.to_float_list gn.gn_weight) in
-  let b_vals = Array.of_list (Tensor.to_float_list gn.gn_bias) in
   let total = batch * c * spatial_size in
-  let result = Array.make total 0.0 in
-  (* For each batch element and group, compute mean and var *)
+  let normed_vals = Array.make total 0.0 in
+  (* Host-side: compute group mean/var and normalize *)
   let group_size = channels_per_group * spatial_size in
   for b = 0 to batch - 1 do
     for g = 0 to gn.num_groups - 1 do
       let c_start = g * channels_per_group in
-      (* Compute mean *)
       let sum = ref 0.0 in
       for ci = 0 to channels_per_group - 1 do
         let ch = c_start + ci in
@@ -799,7 +797,6 @@ let group_norm_forward (gn : group_norm) (x : Tensor.t) : Tensor.t =
         done
       done;
       let mean = !sum /. Float.of_int group_size in
-      (* Compute var *)
       let var_sum = ref 0.0 in
       for ci = 0 to channels_per_group - 1 do
         let ch = c_start + ci in
@@ -810,18 +807,23 @@ let group_norm_forward (gn : group_norm) (x : Tensor.t) : Tensor.t =
       done;
       let var = !var_sum /. Float.of_int group_size in
       let inv_std = 1.0 /. Stdlib.sqrt (var +. gn.gn_eps) in
-      (* Normalize and apply affine *)
       for ci = 0 to channels_per_group - 1 do
         let ch = c_start + ci in
         for s = 0 to spatial_size - 1 do
           let idx = (b * c + ch) * spatial_size + s in
-          let normed = (vals.(idx) -. mean) *. inv_std in
-          result.(idx) <- normed *. w_vals.(ch) +. b_vals.(ch)
+          normed_vals.(idx) <- (vals.(idx) -. mean) *. inv_std
         done
       done
     done
   done;
-  Tensor.from_float_list ~device:x.device ~dtype:x.dtype x.shape (Array.to_list result)
+  (* Build normalized tensor, then apply affine via tensor ops (in-graph) *)
+  let normed = Tensor.from_float_list ~device:x.device ~dtype:x.dtype x.shape
+    (Array.to_list normed_vals) in
+  (* Reshape weight/bias to broadcast: [1; channels; 1; 1; ...] *)
+  let bc_shape = List.init ndim (fun i -> if i = 1 then gn.num_channels else 1) in
+  let w_bc = Tensor.expand (Tensor.reshape gn.gn_weight bc_shape) x.shape in
+  let b_bc = Tensor.expand (Tensor.reshape gn.gn_bias bc_shape) x.shape in
+  Tensor.add (Tensor.mul normed w_bc) b_bc
 
 (** Get trainable parameters from a group_norm layer *)
 let group_norm_params (gn : group_norm) : Tensor.t list =
@@ -832,3 +834,137 @@ let of_group_norm name (gn : group_norm) : layer =
   { name;
     forward = group_norm_forward gn;
     params = (fun () -> group_norm_params gn) }
+
+(** Instance normalization: GroupNorm with num_groups = num_channels.
+    Normalizes each channel independently across spatial dimensions.
+    Commonly used in style transfer and generative models. *)
+let instance_norm ?(device="CPU") ?(dtype=Dtype.float32) ?(eps=1e-5) num_channels =
+  group_norm ~device ~dtype ~eps ~num_groups:num_channels ~num_channels ()
+
+(** Forward pass for instance normalization (delegates to GroupNorm) *)
+let instance_norm_forward = group_norm_forward
+
+(** Get trainable parameters from an instance_norm layer *)
+let instance_norm_params = group_norm_params
+
+(** Wrap as a generic layer *)
+let of_instance_norm name (gn : group_norm) : layer =
+  { name;
+    forward = instance_norm_forward gn;
+    params = (fun () -> instance_norm_params gn) }
+
+(** GRU (Gated Recurrent Unit) cell.
+    Simpler than LSTM with two gates: reset and update.
+    weight_ih: [3 * hidden_size, input_size]
+    weight_hh: [3 * hidden_size, hidden_size]
+    bias: [3 * hidden_size] (optional) *)
+type gru = {
+  gru_weight_ih: Tensor.t;
+  gru_weight_hh: Tensor.t;
+  gru_bias: Tensor.t option;
+  gru_input_size: int;
+  gru_hidden_size: int;
+}
+
+(** Create a GRU cell *)
+let gru ?(device="CPU") ?(dtype=Dtype.float32) ?(bias=true) ~input_size ~hidden_size () =
+  let w_ih = Tensor.kaiming_uniform ~device ~dtype ~fan_in:input_size
+    [3 * hidden_size; input_size] in
+  let w_hh = Tensor.kaiming_uniform ~device ~dtype ~fan_in:hidden_size
+    [3 * hidden_size; hidden_size] in
+  let b = if bias then
+    Some (Tensor.zeros ~device ~dtype [1; 3 * hidden_size])
+  else None in
+  { gru_weight_ih = w_ih; gru_weight_hh = w_hh; gru_bias = b;
+    gru_input_size = input_size; gru_hidden_size = hidden_size }
+
+(** GRU cell forward: one time step.
+    x: [batch, input_size], h: [batch, hidden_size]
+    Returns h'. *)
+let gru_cell_forward (cell : gru) (x : Tensor.t) (h : Tensor.t) : Tensor.t =
+  if List.length x.shape <> 2 then
+    invalid_arg "GRU cell: x must be 2-D [batch, input_size]";
+  let x_feat = List.nth x.shape 1 in
+  if x_feat <> cell.gru_input_size then
+    invalid_arg (Printf.sprintf "GRU cell: input feature dim %d != input_size %d"
+      x_feat cell.gru_input_size);
+  let batch = List.hd x.shape in
+  if h.shape <> [batch; cell.gru_hidden_size] then
+    invalid_arg (Printf.sprintf "GRU cell: h shape [%s] != expected [%d; %d]"
+      (String.concat "," (List.map string_of_int h.shape))
+      batch cell.gru_hidden_size);
+  let hs = cell.gru_hidden_size in
+  (* Compute x and h projections separately for proper reset gate application *)
+  let x_proj = Tensor.matmul x (Tensor.transpose cell.gru_weight_ih) in
+  let h_proj = Tensor.matmul h (Tensor.transpose cell.gru_weight_hh) in
+  (* Add bias to x_proj (split evenly between input and hidden is common,
+     but applying all to x_proj is equivalent for r and z gates) *)
+  let x_proj = match cell.gru_bias with
+    | Some b -> Tensor.add x_proj b
+    | None -> x_proj in
+  (* r and z gates: use combined projections *)
+  let x_rz = Tensor.shrink x_proj [(0, batch); (0, 2 * hs)] in
+  let h_rz = Tensor.shrink h_proj [(0, batch); (0, 2 * hs)] in
+  let rz = Tensor.add x_rz h_rz in
+  let r = Tensor.sigmoid (Tensor.shrink rz [(0, batch); (0, hs)]) in
+  let z = Tensor.sigmoid (Tensor.shrink rz [(0, batch); (hs, 2 * hs)]) in
+  (* Candidate: n = tanh(x_proj_n + r * h_proj_n) — reset gate applied to h projection *)
+  let x_n = Tensor.shrink x_proj [(0, batch); (2 * hs, 3 * hs)] in
+  let h_n = Tensor.shrink h_proj [(0, batch); (2 * hs, 3 * hs)] in
+  let n = Tensor.tanh_ (Tensor.add x_n (Tensor.mul r h_n)) in
+  (* h' = (1 - z) * n + z * h *)
+  let one = Tensor.ones ~device:x.device ~dtype:x.dtype [batch; hs] in
+  let h' = Tensor.add (Tensor.mul (Tensor.sub one z) n) (Tensor.mul z h) in
+  h'
+
+(** GRU forward over a sequence.
+    x: [seq_len, batch, input_size] (or [seq_len, input_size] for unbatched)
+    Returns (output, h_n). *)
+let gru_forward (cell : gru) ?(h0 : Tensor.t option) (x : Tensor.t)
+    : Tensor.t * Tensor.t =
+  let ndim = List.length x.shape in
+  if ndim < 2 || ndim > 3 then
+    invalid_arg "GRU: input must be 2-D [seq, input_size] or 3-D [seq, batch, input_size]";
+  let seq_len = List.hd x.shape in
+  let batch, x_3d =
+    if ndim = 2 then begin
+      let feat = List.nth x.shape 1 in
+      if feat <> cell.gru_input_size then
+        invalid_arg (Printf.sprintf "GRU: input feature dim %d != input_size %d"
+          feat cell.gru_input_size);
+      (1, Tensor.reshape x [seq_len; 1; cell.gru_input_size])
+    end else begin
+      let feat = List.nth x.shape 2 in
+      if feat <> cell.gru_input_size then
+        invalid_arg (Printf.sprintf "GRU: input feature dim %d != input_size %d"
+          feat cell.gru_input_size);
+      (List.nth x.shape 1, x)
+    end in
+  let device = x.device and dtype = x.dtype in
+  let expected_state = [batch; cell.gru_hidden_size] in
+  let h = ref (match h0 with
+    | Some h ->
+      if h.shape <> expected_state then
+        invalid_arg (Printf.sprintf "GRU: h0 shape [%s] != expected [%d; %d]"
+          (String.concat "," (List.map string_of_int h.shape)) batch cell.gru_hidden_size);
+      h
+    | None -> Tensor.zeros ~device ~dtype expected_state) in
+  let outputs = Array.make seq_len (Tensor.zeros ~device ~dtype [batch; cell.gru_hidden_size]) in
+  for t = 0 to seq_len - 1 do
+    let x_t = Tensor.shrink x_3d [(t, t + 1); (0, batch); (0, cell.gru_input_size)] in
+    let x_t = Tensor.reshape x_t [batch; cell.gru_input_size] in
+    let h' = gru_cell_forward cell x_t !h in
+    let h' = !(Tensor.realize_ref) h' in
+    h := h';
+    outputs.(t) <- h'
+  done;
+  let output = Tensor.stack ~axis:0 (Array.to_list outputs) in
+  let output = if ndim = 2 then Tensor.reshape output [seq_len; cell.gru_hidden_size]
+    else output in
+  (output, !h)
+
+(** Get trainable parameters from a GRU cell *)
+let gru_params (cell : gru) : Tensor.t list =
+  match cell.gru_bias with
+  | Some b -> [cell.gru_weight_ih; cell.gru_weight_hh; b]
+  | None -> [cell.gru_weight_ih; cell.gru_weight_hh]
