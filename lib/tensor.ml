@@ -1898,3 +1898,63 @@ let cdist (a : t) (b : t) : t =
   from_float_list ~device:a.device ~dtype:a.dtype [n; m] (Array.to_list out)
 
 (* causal_mask already defined earlier (additive style: 0.0 attend, -1e9 masked) *)
+
+(** Return sorted unique values from a 1D tensor.
+    Host-side operation; does not participate in autograd. *)
+let unique (t : t) : t =
+  match t.shape with
+  | [_] ->
+    let vals = Array.of_list (to_float_list t) in
+    Array.sort Float.compare vals;
+    let uniq = Array.to_list vals |> List.sort_uniq Float.compare in
+    from_float_list ~device:t.device ~dtype:t.dtype [List.length uniq] uniq
+  | _ -> invalid_arg "unique: expected 1D tensor"
+
+(** Count occurrences of each non-negative integer value.
+    Input must be 1D with non-negative integer values.
+    Returns 1D tensor of length max(input)+1.
+    Host-side operation; does not participate in autograd. *)
+let bincount (t : t) : t =
+  let ( + ) = Stdlib.( + ) in
+  match t.shape with
+  | [_] ->
+    let vals = Array.of_list (to_float_list t) in
+    let max_val = ref 0 in
+    Array.iter (fun v ->
+      let iv = Float.to_int v in
+      if Float.abs (v -. Float.of_int iv) > 1e-6 then
+        invalid_arg (Printf.sprintf "bincount: value %.4f is not an integer" v);
+      if iv < 0 then invalid_arg (Printf.sprintf "bincount: negative value %d" iv);
+      if iv > !max_val then max_val := iv
+    ) vals;
+    let counts = Array.make (!max_val + 1) 0.0 in
+    Array.iter (fun v ->
+      let iv = Float.to_int v in
+      counts.(iv) <- counts.(iv) +. 1.0
+    ) vals;
+    from_float_list ~device:t.device ~dtype:t.dtype [!max_val + 1] (Array.to_list counts)
+  | _ -> invalid_arg "bincount: expected 1D tensor"
+
+(** Compute histogram of values in bins defined by edges.
+    Returns counts for each bin: [edges[0],edges[1]), [edges[1],edges[2]), ...
+    Host-side operation; does not participate in autograd. *)
+let histogram (t : t) (edges : t) : t =
+  let ( + ) = Stdlib.( + ) in
+  let ( - ) = Stdlib.( - ) in
+  ignore ( + );
+  match edges.shape with
+  | [n_edges] when n_edges >= 2 ->
+    let vals = Array.of_list (to_float_list t) in
+    let ev = Array.of_list (to_float_list edges) in
+    let n_bins = n_edges - 1 in
+    let counts = Array.make n_bins 0.0 in
+    Array.iter (fun v ->
+      for b = 0 to n_bins - 1 do
+        let lo = ev.(b) in
+        let hi = ev.(b + 1) in
+        if (b = n_bins - 1 && v >= lo && v <= hi) || (v >= lo && v < hi) then
+          counts.(b) <- counts.(b) +. 1.0
+      done
+    ) vals;
+    from_float_list ~device:t.device ~dtype:t.dtype [n_bins] (Array.to_list counts)
+  | _ -> invalid_arg "histogram: edges must be 1D with >= 2 elements"
