@@ -5652,7 +5652,100 @@ let test_inv () =
   check_float "A*Ainv[0,1]" (List.nth pv 1) 0.0 0.01;
   check_float "A*Ainv[1,0]" (List.nth pv 2) 0.0 0.01;
   check_float "A*Ainv[1,1]" (List.nth pv 3) 1.0 0.01;
+  (* 3x3 inverse: verify A * A^-1 ≈ I *)
+  Schedule.reset ();
+  let m3 = Tensor.from_float_list [3; 3] [1.0; 2.0; 3.0; 0.0; 1.0; 4.0; 5.0; 6.0; 0.0] in
+  let mi3 = Tensor.inv m3 in
+  check "inv 3x3 shape" (mi3.shape = [3; 3]);
+  let prod3 = Tensor.matmul m3 mi3 in
+  let pv3 = Tensor.to_float_list prod3 in
+  check_float "3x3 A*Ainv[0,0]" (List.nth pv3 0) 1.0 0.02;
+  check_float "3x3 A*Ainv[0,1]" (List.nth pv3 1) 0.0 0.02;
+  check_float "3x3 A*Ainv[1,1]" (List.nth pv3 4) 1.0 0.02;
+  check_float "3x3 A*Ainv[2,2]" (List.nth pv3 8) 1.0 0.02;
   Printf.printf "  Matrix inverse OK\n%!"
+
+(* ---- Test 138: det/inv validation ---- *)
+let test_det_inv_validation () =
+  Printf.printf "\n=== Det/Inv Validation ===\n%!";
+  (* det rejects non-square *)
+  (try
+    let t = Tensor.from_float_list [2; 3] [1.0; 2.0; 3.0; 4.0; 5.0; 6.0] in
+    ignore (Tensor.det t);
+    check "det rejects non-square" false
+  with Invalid_argument _ -> check "det rejects non-square" true);
+  (* det rejects 1D *)
+  (try
+    let t = Tensor.from_float_list [4] [1.0; 2.0; 3.0; 4.0] in
+    ignore (Tensor.det t);
+    check "det rejects 1D" false
+  with Invalid_argument _ -> check "det rejects 1D" true);
+  (* inv rejects non-square *)
+  (try
+    let t = Tensor.from_float_list [2; 3] [1.0; 2.0; 3.0; 4.0; 5.0; 6.0] in
+    ignore (Tensor.inv t);
+    check "inv rejects non-square" false
+  with Invalid_argument _ -> check "inv rejects non-square" true);
+  (* inv rejects singular matrix *)
+  (try
+    let t = Tensor.from_float_list [2; 2] [1.0; 2.0; 2.0; 4.0] in
+    ignore (Tensor.inv t);
+    check "inv rejects singular" false
+  with Invalid_argument _ -> check "inv rejects singular" true);
+  Printf.printf "  Det/inv validation OK\n%!"
+
+(* ---- Test 139: Tensor.solve (Ax = b) ---- *)
+let test_solve () =
+  Printf.printf "\n=== Solve ===\n%!";
+  Schedule.reset ();
+  (* Solve [[1,2],[3,5]] x = [1,2] → x = [-1,1] *)
+  let a = Tensor.from_float_list [2; 2] [1.0; 2.0; 3.0; 5.0] in
+  let b = Tensor.from_float_list [2] [1.0; 2.0] in
+  let x = Tensor.solve a b in
+  check "solve shape" (x.shape = [2]);
+  let xv = Tensor.to_float_list x in
+  check_float "solve[0]" (List.nth xv 0) (-1.0) 0.01;
+  check_float "solve[1]" (List.nth xv 1) 1.0 0.01;
+  (* 3x3 system *)
+  Schedule.reset ();
+  let a2 = Tensor.from_float_list [3; 3] [2.0; 1.0; (-1.0); (-3.0); (-1.0); 2.0; (-2.0); 1.0; 2.0] in
+  let b2 = Tensor.from_float_list [3] [8.0; (-11.0); (-3.0)] in
+  let x2 = Tensor.solve a2 b2 in
+  let x2v = Tensor.to_float_list x2 in
+  check_float "solve3[0]" (List.nth x2v 0) 2.0 0.01;
+  check_float "solve3[1]" (List.nth x2v 1) 3.0 0.01;
+  check_float "solve3[2]" (List.nth x2v 2) (-1.0) 0.01;
+  Printf.printf "  Solve OK\n%!"
+
+(* ---- Test 140: Tensor.norm (vector and Frobenius) ---- *)
+let test_norm () =
+  Printf.printf "\n=== Norm ===\n%!";
+  Schedule.reset ();
+  (* L2 norm of [3,4] = 5 *)
+  let v = Tensor.from_float_list [2] [3.0; 4.0] in
+  let n = Tensor.vector_norm v in
+  let nv = Tensor.to_float_list n in
+  check "norm shape" (n.shape = [1]);
+  check_float "L2 norm" (List.hd nv) 5.0 0.01;
+  (* L1 norm of [-1, 2, -3] = 6 *)
+  Schedule.reset ();
+  let v2 = Tensor.from_float_list [3] [(-1.0); 2.0; (-3.0)] in
+  let n2 = Tensor.vector_norm ~ord:1.0 v2 in
+  let n2v = Tensor.to_float_list n2 in
+  check_float "L1 norm" (List.hd n2v) 6.0 0.01;
+  (* Inf norm of [-1, 2, -3] = 3 *)
+  Schedule.reset ();
+  let v3 = Tensor.from_float_list [3] [(-1.0); 2.0; (-3.0)] in
+  let n3 = Tensor.vector_norm ~ord:infinity v3 in
+  let n3v = Tensor.to_float_list n3 in
+  check_float "Linf norm" (List.hd n3v) 3.0 0.01;
+  (* Frobenius norm of 2x2 matrix *)
+  Schedule.reset ();
+  let m = Tensor.from_float_list [2; 2] [1.0; 2.0; 3.0; 4.0] in
+  let nf = Tensor.vector_norm m in
+  let nfv = Tensor.to_float_list nf in
+  check_float "Frobenius" (List.hd nfv) (sqrt 30.0) 0.01;
+  Printf.printf "  Norm OK\n%!"
 
 (* ---- Test 127: Tensor.where broadcast ---- *)
 let test_where_broadcast () =
@@ -6168,6 +6261,9 @@ let () =
   run_test "block_diag_cross_validation" test_block_diag_cross_validation;
   run_test "det" test_det;
   run_test "inv" test_inv;
+  run_test "det_inv_validation" test_det_inv_validation;
+  run_test "solve" test_solve;
+  run_test "norm" test_norm;
   run_test "where_broadcast" test_where_broadcast;
   run_test "cuda_backend" test_cuda_backend;
   run_test "backend_availability" test_backend_availability;

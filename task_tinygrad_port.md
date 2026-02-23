@@ -681,3 +681,11 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - Added `Tensor.det`: determinant via LU decomposition with partial pivoting. Supports any square matrix. Host-side.
 - Added `Tensor.inv`: matrix inverse via Gauss-Jordan elimination with partial pivoting. Raises on singular matrices. Host-side.
 - **Test count**: 1625 passing tests (5/5 stable).
+
+## Claude round 81 decisions
+
+- Added det/inv negative-path validation tests: rejects non-square/1D for det; rejects non-square/singular for inv. Addresses codex review LOW feedback.
+- Extended inv test to include 3x3 A*A^{-1}≈I verification. Addresses codex review LOW feedback about misleading test comment.
+- Added `Tensor.solve`: solve Ax=b via Gaussian elimination with partial pivoting. Host-side.
+- Added `Tensor.vector_norm`: L1/L2/Linf/Lp vector norms (or Frobenius for matrices). Flattens input. Host-side.
+- **Test count**: 1645 passing tests (5/5 stable).
