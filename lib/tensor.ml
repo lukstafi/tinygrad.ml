@@ -2075,3 +2075,61 @@ let corrcoef (t : t) : t =
     done;
     from_float_list ~device:t.device ~dtype:t.dtype [d; d] (Array.to_list corr)
   | _ -> invalid_arg "corrcoef: expected 2D tensor"
+
+(** Kronecker product of two tensors.
+    For 2D: [m,n] ⊗ [p,q] → [m*p, n*q].
+    For 1D: [m] ⊗ [n] → [m*n].
+    Host-side operation; does not participate in autograd. *)
+let kron (a : t) (b : t) : t =
+  let ( * ) = Stdlib.( * ) in
+  let ( + ) = Stdlib.( + ) in
+  let ( - ) = Stdlib.( - ) in
+  ignore ( - );
+  let av = Array.of_list (to_float_list a) in
+  let bv = Array.of_list (to_float_list b) in
+  match a.shape, b.shape with
+  | [m; n], [p; q] ->
+    let result = Array.make (m * p * n * q) 0.0 in
+    for i = 0 to m - 1 do
+      for j = 0 to n - 1 do
+        for k = 0 to p - 1 do
+          for l = 0 to q - 1 do
+            result.((i * p + k) * (n * q) + (j * q + l)) <- av.(i * n + j) *. bv.(k * q + l)
+          done
+        done
+      done
+    done;
+    from_float_list ~device:a.device ~dtype:a.dtype [m * p; n * q] (Array.to_list result)
+  | [m], [n] ->
+    let result = Array.make (m * n) 0.0 in
+    for i = 0 to m - 1 do
+      for j = 0 to n - 1 do
+        result.(i * n + j) <- av.(i) *. bv.(j)
+      done
+    done;
+    from_float_list ~device:a.device ~dtype:a.dtype [m * n] (Array.to_list result)
+  | _ -> invalid_arg "kron: expected both tensors to be 1D or 2D"
+
+(** Vandermonde matrix. Input: 1D tensor [m] → output: [m, n].
+    Row i = [1, x_i, x_i^2, ..., x_i^(n-1)].
+    If n is not specified, defaults to length of input.
+    Host-side operation; does not participate in autograd. *)
+let vander ?(n=0) (x : t) : t =
+  let ( * ) = Stdlib.( * ) in
+  let ( + ) = Stdlib.( + ) in
+  let ( - ) = Stdlib.( - ) in
+  match x.shape with
+  | [m] ->
+    let cols = if n = 0 then m else n in
+    let xv = Array.of_list (to_float_list x) in
+    let result = Array.make (m * cols) 0.0 in
+    for i = 0 to m - 1 do
+      let xi = xv.(i) in
+      let pw = ref 1.0 in
+      for j = 0 to cols - 1 do
+        result.(i * cols + j) <- !pw;
+        pw := !pw *. xi
+      done
+    done;
+    from_float_list ~device:x.device ~dtype:x.dtype [m; cols] (Array.to_list result)
+  | _ -> invalid_arg "vander: expected 1D tensor"

@@ -658,3 +658,11 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Tensor.cov**: Sample covariance matrix from [n, d] observations. Uses Bessel's correction (n-1 denominator). Host-side.
 - **Tensor.corrcoef**: Pearson correlation coefficient matrix from [n, d] data. Normalizes covariance by standard deviations. Host-side.
 - **Test count**: 1535 passing tests (5/5 stable).
+
+## Claude round 78 decisions
+
+- Added deterministic TE finite assertion test: d_model=2, num_heads=1, dim_feedforward=4, seed 0, bounded input [0.01..0.04]. Strict `check` assertion on finiteness (not informational). Addresses codex review MEDIUM feedback.
+- Added cov/corrcoef negative-path validation tests: rejects 1D input, rejects n<2 rows for both `cov` and `corrcoef`. Addresses codex review LOW feedback.
+- Added `Tensor.kron` (Kronecker product): 2D [m,n]⊗[p,q]→[m*p,n*q] and 1D [m]⊗[n]→[m*n]. Host-side.
+- Added `Tensor.vander` (Vandermonde matrix): 1D [m]→[m,n] with optional `~n` parameter. Row i = [1, x_i, x_i^2, ...]. Host-side.
+- **Test count**: 1580 passing tests (5/5 stable).
