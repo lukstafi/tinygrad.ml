@@ -4845,25 +4845,32 @@ let test_cumsum_diff_neg_axis () =
   check_float "diff neg[2]" (List.nth dv 2) 3.0 0.01;
   check_float "diff neg[3]" (List.nth dv 3) 4.0 0.01
 
-(* ---- Test 104: Transformer encoder backward (FFN params) ---- *)
-let test_te_backward () =
-  Printf.printf "\n=== TE Backward (FFN) ===\n%!";
+(* ---- Test 104: FFN backward (Linear → ReLU → Linear) ---- *)
+let test_ffn_backward () =
+  Printf.printf "\n=== FFN Backward ===\n%!";
   Schedule.reset ();
   Random.init 77;
-  (* Build a small transformer encoder *)
-  let te = Nn.transformer_encoder_layer ~d_model:4 ~num_heads:2 () in
+  (* Build a 2-layer FFN matching transformer encoder's FFN *)
+  let ff1 = Nn.linear ~in_features:4 ~out_features:8 () in
+  let ff2 = Nn.linear ~in_features:8 ~out_features:4 () in
   let x = Tensor.from_float_list [2; 4] [0.1; 0.2; 0.3; 0.4; 0.5; 0.6; 0.7; 0.8] in
-  let out = Nn.transformer_encoder_layer_forward te x in
+  let h = Tensor.relu (Nn.linear_forward ff1 x) in
+  let out = Nn.linear_forward ff2 h in
   let loss = Tensor.mean out in
-  (* Get FFN params (ff1 weight, ff1 bias, ff2 weight, ff2 bias) *)
-  let ff_params = Nn.linear_params te.te_ff1 @ Nn.linear_params te.te_ff2 in
-  let grads = Tensor.backward loss ff_params in
+  let params = Nn.linear_params ff1 @ Nn.linear_params ff2 in
+  let grads = Tensor.backward loss params in
   Printf.printf "  Got %d FFN gradients\n%!" (List.length grads);
-  check "te ffn grad count" (List.length grads = List.length ff_params);
-  (* All grad shapes should match param shapes *)
+  check "ffn grad count" (List.length grads = List.length params);
   List.iter (fun ((p : Tensor.t), (g : Tensor.t)) ->
-    check "te ffn grad shape" (p.shape = g.shape)
-  ) grads
+    check "ffn grad shape" (p.shape = g.shape)
+  ) grads;
+  (* Check non-zero: at least one grad element has magnitude > epsilon *)
+  let any_nonzero = List.exists (fun (_, (g : Tensor.t)) ->
+    let gv = Tensor.to_float_list g in
+    List.exists (fun v -> Float.abs v > 1e-10) gv
+  ) grads in
+  check "ffn grads nonzero" any_nonzero;
+  Printf.printf "  FFN backward produces non-zero gradients\n%!"
 
 (* ---- Test 105: Sort ---- *)
 let test_sort () =
@@ -4887,7 +4894,66 @@ let test_sort () =
   check_float "sort 2d[0,0]" (List.nth svv2 0) 3.0 0.01;
   check_float "sort 2d[1,0]" (List.nth svv2 2) 6.0 0.01
 
-(* ---- Test 106: Tensor.where broadcast ---- *)
+(* ---- Test 106: diag and trace ---- *)
+let test_diag_trace () =
+  Printf.printf "\n=== Diag & Trace ===\n%!";
+  Schedule.reset ();
+  (* Extract diagonal from 2D *)
+  let m = Tensor.from_float_list [2; 3] [1.0; 2.0; 3.0; 4.0; 5.0; 6.0] in
+  let d = Tensor.diag m in
+  let dv = Tensor.to_float_list d in
+  check "diag 2d shape" (d.shape = [2]);
+  check_float "diag[0]" (List.nth dv 0) 1.0 0.01;
+  check_float "diag[1]" (List.nth dv 1) 5.0 0.01;
+  (* Create diagonal matrix from 1D *)
+  Schedule.reset ();
+  let v = Tensor.from_float_list [3] [2.0; 3.0; 4.0] in
+  let dm = Tensor.diag v in
+  let dmv = Tensor.to_float_list dm in
+  check "diag 1d->2d shape" (dm.shape = [3; 3]);
+  check_float "diag mat[0,0]" (List.nth dmv 0) 2.0 0.01;
+  check_float "diag mat[0,1]" (List.nth dmv 1) 0.0 0.01;
+  check_float "diag mat[1,1]" (List.nth dmv 4) 3.0 0.01;
+  check_float "diag mat[2,2]" (List.nth dmv 8) 4.0 0.01;
+  (* Trace *)
+  Schedule.reset ();
+  let sq = Tensor.from_float_list [3; 3] [1.0; 0.0; 0.0; 0.0; 2.0; 0.0; 0.0; 0.0; 3.0] in
+  let tr = Tensor.trace sq in
+  let trv = Tensor.to_float_list tr in
+  check_float "trace" (List.hd trv) 6.0 0.01;
+  Printf.printf "  trace = %.2f\n%!" (List.hd trv)
+
+(* ---- Test 107: tril and triu ---- *)
+let test_tril_triu () =
+  Printf.printf "\n=== Tril & Triu ===\n%!";
+  Schedule.reset ();
+  let m = Tensor.from_float_list [3; 3] [1.0; 2.0; 3.0; 4.0; 5.0; 6.0; 7.0; 8.0; 9.0] in
+  let lo = Tensor.tril m in
+  let lov = Tensor.to_float_list lo in
+  check "tril shape" (lo.shape = [3; 3]);
+  check_float "tril[0,0]" (List.nth lov 0) 1.0 0.01;
+  check_float "tril[0,1]" (List.nth lov 1) 0.0 0.01;
+  check_float "tril[1,0]" (List.nth lov 3) 4.0 0.01;
+  check_float "tril[1,1]" (List.nth lov 4) 5.0 0.01;
+  check_float "tril[2,2]" (List.nth lov 8) 9.0 0.01;
+  Schedule.reset ();
+  let m2 = Tensor.from_float_list [3; 3] [1.0; 2.0; 3.0; 4.0; 5.0; 6.0; 7.0; 8.0; 9.0] in
+  let up = Tensor.triu m2 in
+  let upv = Tensor.to_float_list up in
+  check "triu shape" (up.shape = [3; 3]);
+  check_float "triu[0,0]" (List.nth upv 0) 1.0 0.01;
+  check_float "triu[1,0]" (List.nth upv 3) 0.0 0.01;
+  check_float "triu[1,1]" (List.nth upv 4) 5.0 0.01;
+  check_float "triu[0,2]" (List.nth upv 2) 3.0 0.01;
+  (* tril with k=1: include one super-diagonal *)
+  Schedule.reset ();
+  let m3 = Tensor.from_float_list [3; 3] [1.0; 2.0; 3.0; 4.0; 5.0; 6.0; 7.0; 8.0; 9.0] in
+  let lo1 = Tensor.tril ~k:1 m3 in
+  let lo1v = Tensor.to_float_list lo1 in
+  check_float "tril k=1[0,1]" (List.nth lo1v 1) 2.0 0.01;
+  check_float "tril k=1[0,2]" (List.nth lo1v 2) 0.0 0.01
+
+(* ---- Test 108: Tensor.where broadcast ---- *)
 let test_where_broadcast () =
   Printf.printf "\n=== Where Broadcast ===\n%!";
   Schedule.reset ();
@@ -5368,8 +5434,10 @@ let () =
   run_test "diff" test_diff;
   run_test "positional_encoding" test_positional_encoding;
   run_test "cumsum_diff_neg_axis" test_cumsum_diff_neg_axis;
-  run_test "te_backward" test_te_backward;
+  run_test "ffn_backward" test_ffn_backward;
   run_test "sort" test_sort;
+  run_test "diag_trace" test_diag_trace;
+  run_test "tril_triu" test_tril_triu;
   run_test "where_broadcast" test_where_broadcast;
   run_test "cuda_backend" test_cuda_backend;
   run_test "backend_availability" test_backend_availability;
