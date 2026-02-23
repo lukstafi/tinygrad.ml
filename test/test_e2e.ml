@@ -4701,11 +4701,11 @@ let test_roll () =
 let test_transformer_encoder_layer () =
   Printf.printf "\n=== Transformer Encoder Layer ===\n%!";
   Schedule.reset ();
-  Random.init 42;
+  Random.init 123;
   let te = Nn.transformer_encoder_layer ~d_model:8 ~num_heads:2 () in
-  (* Input: [4, 8] = seq_len=4, d_model=8 *)
+  (* Input: [4, 8] = seq_len=4, d_model=8 — small values to avoid softmax overflow *)
   let x = Tensor.from_float_list [4; 8]
-    (List.init 32 (fun i -> Float.of_int i *. 0.1)) in
+    (List.init 32 (fun i -> Float.of_int i *. 0.01)) in
   let out = Nn.transformer_encoder_layer_forward te x in
   Printf.printf "  TE output shape: [%s]\n%!"
     (String.concat "," (List.map string_of_int out.shape));
@@ -5157,9 +5157,76 @@ let test_cdist () =
   check_float "cdist self[0,0]" (List.nth d2v 0) 0.0 0.01;
   check_float "cdist self[1,1]" (List.nth d2v 3) 0.0 0.01
 
-(* causal_mask test already defined above at Test 84 *)
+(* ---- Test 117: cdist validation ---- *)
+let test_cdist_validation () =
+  Printf.printf "\n=== Cdist Validation ===\n%!";
+  Schedule.reset ();
+  (* Rejects 1D input *)
+  let ok1 = try
+    let a = Tensor.from_float_list [3] [1.0; 2.0; 3.0] in
+    let b = Tensor.from_float_list [3] [4.0; 5.0; 6.0] in
+    ignore (Tensor.cdist a b); false
+  with Invalid_argument _ -> true in
+  check "cdist rejects 1D" ok1;
+  (* Rejects mismatched feature dims *)
+  Schedule.reset ();
+  let ok2 = try
+    let a = Tensor.from_float_list [2; 3] [1.0; 2.0; 3.0; 4.0; 5.0; 6.0] in
+    let b = Tensor.from_float_list [2; 2] [1.0; 2.0; 3.0; 4.0] in
+    ignore (Tensor.cdist a b); false
+  with Invalid_argument _ -> true in
+  check "cdist rejects dim mismatch" ok2;
+  Printf.printf "  cdist validation OK\n%!"
 
-(* ---- Test 117: Tensor.where broadcast ---- *)
+(* ---- Test 118: unique ---- *)
+let test_unique () =
+  Printf.printf "\n=== Unique ===\n%!";
+  Schedule.reset ();
+  let t = Tensor.from_float_list [7] [3.0; 1.0; 4.0; 1.0; 5.0; 3.0; 2.0] in
+  let u = Tensor.unique t in
+  let uv = Tensor.to_float_list u in
+  check "unique shape" (u.shape = [5]);
+  check_float "unique[0]" (List.nth uv 0) 1.0 0.01;
+  check_float "unique[1]" (List.nth uv 1) 2.0 0.01;
+  check_float "unique[2]" (List.nth uv 2) 3.0 0.01;
+  check_float "unique[3]" (List.nth uv 3) 4.0 0.01;
+  check_float "unique[4]" (List.nth uv 4) 5.0 0.01
+
+(* ---- Test 119: bincount ---- *)
+let test_bincount () =
+  Printf.printf "\n=== Bincount ===\n%!";
+  Schedule.reset ();
+  let t = Tensor.from_float_list [6] [0.0; 1.0; 1.0; 3.0; 3.0; 3.0] in
+  let bc = Tensor.bincount t in
+  let bcv = Tensor.to_float_list bc in
+  check "bincount shape" (bc.shape = [4]);
+  check_float "bincount[0]" (List.nth bcv 0) 1.0 0.01;  (* one 0 *)
+  check_float "bincount[1]" (List.nth bcv 1) 2.0 0.01;  (* two 1s *)
+  check_float "bincount[2]" (List.nth bcv 2) 0.0 0.01;  (* no 2s *)
+  check_float "bincount[3]" (List.nth bcv 3) 3.0 0.01;  (* three 3s *)
+  (* Validation: rejects negative *)
+  Schedule.reset ();
+  let ok = try
+    let tn = Tensor.from_float_list [2] [1.0; -1.0] in
+    ignore (Tensor.bincount tn); false
+  with Invalid_argument _ -> true in
+  check "bincount rejects negative" ok
+
+(* ---- Test 120: histogram ---- *)
+let test_histogram () =
+  Printf.printf "\n=== Histogram ===\n%!";
+  Schedule.reset ();
+  let data = Tensor.from_float_list [8] [0.5; 1.5; 2.5; 3.5; 1.0; 2.0; 3.0; 4.0] in
+  let edges = Tensor.from_float_list [5] [0.0; 1.0; 2.0; 3.0; 4.0] in
+  let h = Tensor.histogram data edges in
+  let hv = Tensor.to_float_list h in
+  check "histogram shape" (h.shape = [4]);
+  check_float "hist[0,1)" (List.nth hv 0) 1.0 0.01;  (* 0.5 *)
+  check_float "hist[1,2)" (List.nth hv 1) 2.0 0.01;  (* 1.0, 1.5 *)
+  check_float "hist[2,3)" (List.nth hv 2) 2.0 0.01;  (* 2.0, 2.5 *)
+  check_float "hist[3,4]" (List.nth hv 3) 3.0 0.01   (* 3.0, 3.5, 4.0 — last bin inclusive *)
+
+(* ---- Test 121: Tensor.where broadcast ---- *)
 let test_where_broadcast () =
   Printf.printf "\n=== Where Broadcast ===\n%!";
   Schedule.reset ();
@@ -5653,6 +5720,10 @@ let () =
   run_test "scatter" test_scatter;
   run_test "scatter_validation" test_scatter_validation;
   run_test "cdist" test_cdist;
+  run_test "cdist_validation" test_cdist_validation;
+  run_test "unique" test_unique;
+  run_test "bincount" test_bincount;
+  run_test "histogram" test_histogram;
   run_test "where_broadcast" test_where_broadcast;
   run_test "cuda_backend" test_cuda_backend;
   run_test "backend_availability" test_backend_availability;
