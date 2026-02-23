@@ -1958,3 +1958,38 @@ let histogram (t : t) (edges : t) : t =
     ) vals;
     from_float_list ~device:t.device ~dtype:t.dtype [n_bins] (Array.to_list counts)
   | _ -> invalid_arg "histogram: edges must be 1D with >= 2 elements"
+
+(** 1D linear interpolation (upsample/downsample).
+    Resizes the last dimension of a tensor to target_size using linear interpolation.
+    Host-side operation; does not participate in autograd. *)
+let interpolate_1d ?(mode=`Linear) (t : t) ~target_size : t =
+  ignore mode;
+  let ( * ) = Stdlib.( * ) in
+  let ( + ) = Stdlib.( + ) in
+  let ( - ) = Stdlib.( - ) in
+  let ( / ) = Stdlib.( / ) in
+  ignore (( + ), ( - ), ( / ));
+  let shape = t.shape in
+  let ndim = List.length shape in
+  if ndim < 1 then invalid_arg "interpolate_1d: tensor must be at least 1D";
+  let src_len = List.nth shape (ndim - 1) in
+  if target_size < 1 then invalid_arg "interpolate_1d: target_size must be >= 1";
+  let batch_size = List.fold_left ( * ) 1 (List.filteri (fun i _ -> i < ndim - 1) shape) in
+  let vals = Array.of_list (to_float_list t) in
+  let out = Array.make (batch_size * target_size) 0.0 in
+  for b = 0 to batch_size - 1 do
+    let src_off = b * src_len in
+    let dst_off = b * target_size in
+    for i = 0 to target_size - 1 do
+      let frac = if target_size = 1 then 0.0
+        else Float.of_int i *. Float.of_int (src_len - 1) /. Float.of_int (target_size - 1) in
+      let lo = Float.to_int (floor frac) in
+      let lo = max 0 lo in
+      let lo = min lo (src_len - 1) in
+      let hi = min (lo + 1) (src_len - 1) in
+      let alpha = frac -. Float.of_int lo in
+      out.(dst_off + i) <- vals.(src_off + lo) *. (1.0 -. alpha) +. vals.(src_off + hi) *. alpha
+    done
+  done;
+  let out_shape = List.mapi (fun i s -> if i = ndim - 1 then target_size else s) shape in
+  from_float_list ~device:t.device ~dtype:t.dtype out_shape (Array.to_list out)
