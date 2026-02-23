@@ -2014,3 +2014,64 @@ let has_nan (t : t) : bool =
 (** Check if all elements are finite. Host-side. *)
 let all_finite (t : t) : bool =
   List.for_all Float.is_finite (to_float_list t)
+
+(** Covariance matrix of rows. Input: [n, d] → output: [d, d].
+    Each column is a variable, each row is an observation.
+    Host-side operation; does not participate in autograd. *)
+let cov (t : t) : t =
+  let ( * ) = Stdlib.( * ) in
+  let ( + ) = Stdlib.( + ) in
+  let ( - ) = Stdlib.( - ) in
+  let ( / ) = Stdlib.( / ) in
+  ignore (( + ), ( - ), ( / ));
+  match t.shape with
+  | [n; d] when n >= 2 ->
+    let vals = Array.of_list (to_float_list t) in
+    (* Compute column means *)
+    let means = Array.make d 0.0 in
+    for i = 0 to n - 1 do
+      for j = 0 to d - 1 do
+        means.(j) <- means.(j) +. vals.(i * d + j)
+      done
+    done;
+    Array.iteri (fun j m -> means.(j) <- m /. Float.of_int n) means;
+    (* Compute covariance *)
+    let cov_mat = Array.make (d * d) 0.0 in
+    for j1 = 0 to d - 1 do
+      for j2 = 0 to d - 1 do
+        let s = ref 0.0 in
+        for i = 0 to n - 1 do
+          s := !s +. (vals.(i * d + j1) -. means.(j1)) *. (vals.(i * d + j2) -. means.(j2))
+        done;
+        cov_mat.(j1 * d + j2) <- !s /. Float.of_int (n - 1)
+      done
+    done;
+    from_float_list ~device:t.device ~dtype:t.dtype [d; d] (Array.to_list cov_mat)
+  | _ -> invalid_arg "cov: expected 2D tensor with n >= 2 rows"
+
+(** Correlation coefficient matrix. Input: [n, d] → output: [d, d].
+    Normalizes covariance by standard deviations.
+    Host-side operation; does not participate in autograd. *)
+let corrcoef (t : t) : t =
+  let ( * ) = Stdlib.( * ) in
+  let ( + ) = Stdlib.( + ) in
+  let ( - ) = Stdlib.( - ) in
+  let ( / ) = Stdlib.( / ) in
+  ignore (( + ), ( - ), ( / ));
+  match t.shape with
+  | [_; d] ->
+    let c = cov t in
+    let cv = Array.of_list (to_float_list c) in
+    let corr = Array.make (d * d) 0.0 in
+    for i = 0 to d - 1 do
+      for j = 0 to d - 1 do
+        let si = sqrt (Float.abs cv.(i * d + i)) in
+        let sj = sqrt (Float.abs cv.(j * d + j)) in
+        if si > 1e-12 && sj > 1e-12 then
+          corr.(i * d + j) <- cv.(i * d + j) /. (si *. sj)
+        else
+          corr.(i * d + j) <- 0.0
+      done
+    done;
+    from_float_list ~device:t.device ~dtype:t.dtype [d; d] (Array.to_list corr)
+  | _ -> invalid_arg "corrcoef: expected 2D tensor"
