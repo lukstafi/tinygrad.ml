@@ -3772,7 +3772,46 @@ let test_bn_training () =
   check "bn not training" (not bn.training);
   (* Switch back *)
   Nn.batch_norm_train bn;
-  check "bn training" bn.training
+  check "bn training" bn.training;
+  (* Channel mismatch guard *)
+  let bad_x = Tensor.from_float_list [3; 5] (List.init 15 Float.of_int) in
+  (try
+    ignore (Nn.batch_norm_forward bn bad_x);
+    check "bn channel mismatch should fail" false
+  with Invalid_argument msg ->
+    check "bn channel mismatch msg" (String.length msg > 0))
+
+(* ---- Test 87: BatchNorm backward in training mode ---- *)
+let test_bn_training_backward () =
+  Printf.printf "\n=== BatchNorm Training Backward ===\n%!";
+  Schedule.reset ();
+  (* Create a BN layer with 2 channels, training mode *)
+  let bn = Nn.batch_norm ~eps:1e-5 ~momentum:0.1 2 in
+  (* Build a tiny model: BN → sum, backward through BN weight *)
+  let x = Tensor.from_float_list [3; 2]
+    [1.0; 10.0;   2.0; 20.0;   3.0; 30.0] in
+  let out = Nn.batch_norm_forward bn x in
+  let loss = Tensor.sum out in
+  let targets = Nn.batch_norm_params bn in
+  let grads = Tensor.backward loss targets in
+  (* Check weight gradient exists and is finite *)
+  let (_, w_grad) = List.nth grads 0 in
+  let wgv = Tensor.to_float_list w_grad in
+  List.iter (fun g ->
+    check "bn_backward wgrad finite" (Float.is_finite g)
+  ) wgv;
+  (* For sum(BN(x)), d(loss)/d(weight) = sum of normalized values per channel.
+     Channel 0 normalized: [-1.2247, 0, 1.2247] → sum = 0
+     Channel 1 normalized: [-1.2247, 0, 1.2247] → sum = 0
+     So weight grads should be near 0 *)
+  check_float "bn_backward wgrad[0]" (List.nth wgv 0) 0.0 0.05;
+  check_float "bn_backward wgrad[1]" (List.nth wgv 1) 0.0 0.05;
+  (* Check bias gradient: d(loss)/d(bias) = number of samples = 3 per channel *)
+  let (_, b_grad) = List.nth grads 1 in
+  let bgv = Tensor.to_float_list b_grad in
+  check_float "bn_backward bgrad[0]" (List.nth bgv 0) 3.0 0.1;
+  check_float "bn_backward bgrad[1]" (List.nth bgv 1) 3.0 0.1;
+  Printf.printf "  BN training backward: gradients flow through graph\n%!"
 
 (* ---- Test 86: CUDA backend registration ---- *)
 let test_cuda_backend () =
@@ -4196,6 +4235,7 @@ let () =
   run_test "batch_matmul" test_batch_matmul;
   run_test "adamw" test_adamw;
   run_test "bn_training" test_bn_training;
+  run_test "bn_training_backward" test_bn_training_backward;
   run_test "cuda_backend" test_cuda_backend;
   run_test "backend_availability" test_backend_availability;
   Printf.printf "\n============================\n%!";
