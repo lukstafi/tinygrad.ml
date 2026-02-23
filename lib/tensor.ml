@@ -793,6 +793,28 @@ let binary_cross_entropy (pred : t) (target : t) =
   let term2 = mul (sub one target) (log (sub (add one eps) clamped)) in
   neg_ (mean (add term1 term2))
 
+(** Huber loss (smooth L1): quadratic for small errors, linear for large errors.
+    huber(x) = 0.5*x^2 if |x| <= delta, else delta*(|x| - 0.5*delta).
+    More robust to outliers than MSE. *)
+let huber_loss ?(delta=1.0) (pred : t) (target : t) =
+  if pred.shape <> target.shape then
+    invalid_arg "huber_loss: shapes must match";
+  if delta <= 0.0 then
+    invalid_arg (Printf.sprintf "huber_loss: delta must be > 0, got %f" delta);
+  let diff = sub pred target in
+  let abs_diff = abs_ diff in
+  let delta_t = const_like diff delta in
+  let half = const_like diff 0.5 in
+  let half_delta = const_like diff (0.5 *. delta) in
+  (* quadratic part: 0.5 * diff^2 *)
+  let quadratic = mul half (mul diff diff) in
+  (* linear part: delta * (|diff| - 0.5 * delta) *)
+  let linear = mul delta_t (sub abs_diff half_delta) in
+  (* select: |diff| <= delta ? quadratic : linear *)
+  let mask = le abs_diff delta_t in
+  let per_elem = where_ mask quadratic linear in
+  mean per_elem
+
 (** Cross-entropy with label smoothing.
     logits: [batch; num_classes], targets: one-hot [batch; num_classes].
     Smooths targets: y_smooth = (1 - alpha) * y + alpha / num_classes.
@@ -826,8 +848,7 @@ let cosine_similarity ?(eps=1e-8) (a : t) (b : t) : t =
   let result = div dot (add (mul norm_a norm_b) eps_t) in
   (* Squeeze the reduced last dimension *)
   let out_shape = List.filteri (fun i _ -> i <> last_ax) result.shape in
-  if out_shape = [] then result
-  else reshape result out_shape
+  reshape result out_shape
 
 (** Scaled dot-product attention: softmax(Q @ K^T / sqrt(d_k)) @ V.
     Q: [seq_q; d_k], K: [seq_k; d_k], V: [seq_k; d_v].

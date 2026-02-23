@@ -1022,3 +1022,11 @@ let accuracy (logits : Tensor.t) (targets : Tensor.t) : float =
     if Float.equal (Float.round p) (Float.round t) then acc + 1 else acc
   ) 0 pv tv in
   Float.of_int correct /. Float.of_int batch
+
+(** Count total number of trainable parameters in a list of tensors. *)
+let parameter_count (params : Tensor.t list) : int =
+  List.fold_left (fun acc (t : Tensor.t) -> acc + Helpers.prod t.shape) 0 params
+
+(** Count total parameters in a sequential model. *)
+let sequential_parameter_count (layers : layer list) : int =
+  parameter_count (sequential_params layers)
