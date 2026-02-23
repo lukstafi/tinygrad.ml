@@ -793,6 +793,42 @@ let binary_cross_entropy (pred : t) (target : t) =
   let term2 = mul (sub one target) (log (sub (add one eps) clamped)) in
   neg_ (mean (add term1 term2))
 
+(** Cross-entropy with label smoothing.
+    logits: [batch; num_classes], targets: one-hot [batch; num_classes].
+    Smooths targets: y_smooth = (1 - alpha) * y + alpha / num_classes.
+    alpha=0.0 is equivalent to standard cross_entropy. *)
+let cross_entropy_smooth ?(alpha=0.1) (logits : t) (targets : t) =
+  if alpha < 0.0 || alpha > 1.0 then
+    invalid_arg (Printf.sprintf "cross_entropy_smooth: alpha must be in [0,1], got %f" alpha);
+  if logits.shape <> targets.shape then
+    invalid_arg "cross_entropy_smooth: logits and targets must have same shape";
+  if List.length logits.shape <> 2 then
+    invalid_arg "cross_entropy_smooth: expected 2-D [batch, num_classes]";
+  let num_classes = List.nth logits.shape 1 in
+  let smooth_factor = const_like targets (alpha /. Float.of_int num_classes) in
+  let one_minus_alpha = const_like targets (1.0 -. alpha) in
+  let smooth_targets = add (mul one_minus_alpha targets) smooth_factor in
+  cross_entropy ~axis:(-1) logits smooth_targets
+
+(** Cosine similarity between two tensors along the last axis.
+    Returns a tensor with the last dimension removed (squeezed).
+    cos_sim(a, b) = sum(a*b) / (||a|| * ||b|| + eps). *)
+let cosine_similarity ?(eps=1e-8) (a : t) (b : t) : t =
+  if a.shape <> b.shape then
+    invalid_arg "cosine_similarity: shapes must match";
+  if List.length a.shape < 1 then
+    invalid_arg "cosine_similarity: tensors must have at least 1 dimension";
+  let last_ax = List.length a.shape - 1 in
+  let dot = sum ~axes:[last_ax] (mul a b) in
+  let norm_a = sqrt_ (sum ~axes:[last_ax] (mul a a)) in
+  let norm_b = sqrt_ (sum ~axes:[last_ax] (mul b b)) in
+  let eps_t = const_like norm_a eps in
+  let result = div dot (add (mul norm_a norm_b) eps_t) in
+  (* Squeeze the reduced last dimension *)
+  let out_shape = List.filteri (fun i _ -> i <> last_ax) result.shape in
+  if out_shape = [] then result
+  else reshape result out_shape
+
 (** Scaled dot-product attention: softmax(Q @ K^T / sqrt(d_k)) @ V.
     Q: [seq_q; d_k], K: [seq_k; d_k], V: [seq_k; d_v].
     Optional mask: [seq_q; seq_k] with -inf for masked positions.

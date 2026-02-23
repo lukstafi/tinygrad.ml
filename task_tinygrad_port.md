@@ -519,3 +519,11 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **LR warmup schedulers**: `lr_linear_warmup` ramps LR from 0 to base_lr over warmup_steps, then holds. `lr_warmup_cosine` combines linear warmup with cosine decay over total_steps.
 - **Nn.accuracy**: Classification accuracy metric. Takes [batch; num_classes] logits and [batch] integer targets, returns fraction correct using argmax predictions.
 - **Test count**: 1240 passing tests.
+
+## Claude round 61 decisions
+
+- **Codex review fix (round 59 MEDIUM)**: Fixed `lr_warmup_cosine` to clamp at `eta_min` when step >= total_steps (was unclamped, causing cosine to cycle). Added test stepping past the schedule horizon.
+- **Codex review note (round 59 HIGH, recurring)**: GroupNorm/InstanceNorm input-gradient limitation is fundamental to the scheduler architecture (same as BatchNorm input-grad, conv2d, pool ops). All host-side normalization ops break input gradient flow. Already documented in API docs. Weight/bias gradients work correctly for all these layers.
+- **Tensor.cosine_similarity**: Computes cos(a,b) = dot(a,b)/(||a||*||b||+eps) along last axis. Squeezes the reduced dimension. Works for 1D and batched N-D tensors. Uses tensor ops (autograd-compatible).
+- **Tensor.cross_entropy_smooth**: Label smoothing cross entropy. Smooths targets: y_smooth = (1-alpha)*y + alpha/num_classes. alpha=0 is standard CE. Validates alpha in [0,1].
+- **Test count**: 1253 passing tests.

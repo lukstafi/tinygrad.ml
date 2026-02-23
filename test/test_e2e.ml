@@ -4163,6 +4163,81 @@ let test_accuracy () =
   let acc2 = Nn.accuracy logits targets2 in
   check_float "accuracy 66%" acc2 (2.0 /. 3.0) 0.01
 
+(* ---- Test 96: lr_warmup_cosine past horizon ---- *)
+let test_lr_warmup_horizon () =
+  Printf.printf "\n=== LR Warmup Horizon ===\n%!";
+  (* warmup_steps=2, total_steps=5, base_lr=0.1, eta_min=0.0 *)
+  let sched = Nn.lr_scheduler_init 0.1 in
+  let s = ref sched in
+  (* Step through all 5 steps *)
+  for _ = 1 to 5 do
+    s := Nn.lr_warmup_cosine ~warmup_steps:2 ~total_steps:5 !s
+  done;
+  (* At step 5 (= total_steps), lr should be eta_min = 0 *)
+  check_float "warmup_cos at horizon" (!s).current_lr 0.0 0.001;
+  (* Step past horizon: should stay at eta_min *)
+  let s6 = Nn.lr_warmup_cosine ~warmup_steps:2 ~total_steps:5 !s in
+  check_float "warmup_cos past horizon" s6.current_lr 0.0 0.001;
+  let s7 = Nn.lr_warmup_cosine ~warmup_steps:2 ~total_steps:5 s6 in
+  check_float "warmup_cos past horizon 2" s7.current_lr 0.0 0.001
+
+(* ---- Test 97: cosine similarity ---- *)
+let test_cosine_similarity () =
+  Printf.printf "\n=== Cosine Similarity ===\n%!";
+  Schedule.reset ();
+  (* Identical vectors → cos_sim = 1 *)
+  let a = Tensor.from_float_list [3] [1.0; 2.0; 3.0] in
+  let b = Tensor.from_float_list [3] [1.0; 2.0; 3.0] in
+  let cs = Tensor.cosine_similarity a b in
+  check_float "cos_sim identical" (Tensor.item cs) 1.0 0.01;
+  (* Orthogonal: [1,0] and [0,1] → cos_sim = 0 *)
+  let a2 = Tensor.from_float_list [2] [1.0; 0.0] in
+  let b2 = Tensor.from_float_list [2] [0.0; 1.0] in
+  let cs2 = Tensor.cosine_similarity a2 b2 in
+  check_float "cos_sim orthogonal" (Tensor.item cs2) 0.0 0.01;
+  (* Opposite: [1,0] and [-1,0] → cos_sim = -1 *)
+  let b3 = Tensor.from_float_list [2] [-1.0; 0.0] in
+  let cs3 = Tensor.cosine_similarity a2 b3 in
+  check_float "cos_sim opposite" (Tensor.item cs3) (-1.0) 0.01;
+  (* Batch: [2, 3] → [2] *)
+  let ab = Tensor.from_float_list [2; 3]
+    [1.0; 0.0; 0.0;   0.0; 1.0; 0.0] in
+  let bb = Tensor.from_float_list [2; 3]
+    [1.0; 0.0; 0.0;   0.0; 0.0; 1.0] in
+  let csb = Tensor.cosine_similarity ab bb in
+  check "cos_sim batch shape" (csb.shape = [2]);
+  let csv = Tensor.to_float_list csb in
+  check_float "cos_sim batch[0]" (List.nth csv 0) 1.0 0.01;  (* same dir *)
+  check_float "cos_sim batch[1]" (List.nth csv 1) 0.0 0.01   (* orthogonal *)
+
+(* ---- Test 98: cross entropy with label smoothing ---- *)
+let test_cross_entropy_smooth () =
+  Printf.printf "\n=== Cross Entropy Smooth ===\n%!";
+  Schedule.reset ();
+  (* alpha=0 should match standard cross_entropy *)
+  let logits = Tensor.from_float_list [2; 3]
+    [2.0; 1.0; 0.0;   0.0; 2.0; 1.0] in
+  let targets = Tensor.from_float_list [2; 3]
+    [1.0; 0.0; 0.0;   0.0; 1.0; 0.0] in
+  let ce_std = Tensor.cross_entropy logits targets in
+  let ce_s0 = Tensor.cross_entropy_smooth ~alpha:0.0 logits targets in
+  let v_std = Tensor.item ce_std in
+  let v_s0 = Tensor.item ce_s0 in
+  check_float "ce_smooth alpha=0" v_s0 v_std 0.01;
+  (* alpha > 0 should give higher loss (smoothed targets are less peaked) *)
+  let ce_s1 = Tensor.cross_entropy_smooth ~alpha:0.1 logits targets in
+  let v_s1 = Tensor.item ce_s1 in
+  check "ce_smooth alpha=0.1 >= alpha=0" (v_s1 >= v_s0 -. 0.01);
+  (* alpha=1.0 → uniform targets → maximum entropy *)
+  let ce_s_max = Tensor.cross_entropy_smooth ~alpha:1.0 logits targets in
+  let v_max = Tensor.item ce_s_max in
+  check "ce_smooth alpha=1.0 finite" (Float.is_finite v_max);
+  (* Validation *)
+  (try
+    ignore (Tensor.cross_entropy_smooth ~alpha:1.5 logits targets);
+    check "ce_smooth bad alpha should fail" false
+  with Invalid_argument _ -> check "ce_smooth bad alpha" true)
+
 (* ---- Test 86: CUDA backend registration ---- *)
 let test_cuda_backend () =
   Printf.printf "\n=== CUDA Backend ===\n%!";
@@ -4594,6 +4669,9 @@ let () =
   run_test "topk" test_topk;
   run_test "lr_warmup" test_lr_warmup;
   run_test "accuracy" test_accuracy;
+  run_test "lr_warmup_horizon" test_lr_warmup_horizon;
+  run_test "cosine_similarity" test_cosine_similarity;
+  run_test "cross_entropy_smooth" test_cross_entropy_smooth;
   run_test "cuda_backend" test_cuda_backend;
   run_test "backend_availability" test_backend_availability;
   Printf.printf "\n============================\n%!";
