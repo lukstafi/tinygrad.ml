@@ -616,3 +616,98 @@ let save_sequential (filename : string) (layers : layer list) : unit =
     List.mapi (fun i t -> (Printf.sprintf "%s.%d" l.name i, t)) (l.params ())
   ) layers in
   save_params filename params
+
+(** LSTM (Long Short-Term Memory) cell.
+    Processes one time step: (h_t, c_t) = lstm_cell(x_t, h_{t-1}, c_{t-1}).
+    Uses combined weight matrices for efficiency:
+    - weight_ih: [4 * hidden_size, input_size]  (input→gates)
+    - weight_hh: [4 * hidden_size, hidden_size] (hidden→gates)
+    - bias: [4 * hidden_size] (optional) *)
+type lstm = {
+  weight_ih: Tensor.t;
+  weight_hh: Tensor.t;
+  lstm_bias: Tensor.t option;
+  input_size: int;
+  hidden_size: int;
+}
+
+(** Create an LSTM cell with Xavier-style initialization *)
+let lstm ?(device="CPU") ?(dtype=Dtype.float32) ?(bias=true) ~input_size ~hidden_size () =
+  let w_ih = Tensor.kaiming_uniform ~device ~dtype ~fan_in:input_size
+    [4 * hidden_size; input_size] in
+  let w_hh = Tensor.kaiming_uniform ~device ~dtype ~fan_in:hidden_size
+    [4 * hidden_size; hidden_size] in
+  let b = if bias then
+    Some (Tensor.zeros ~device ~dtype [1; 4 * hidden_size])
+  else None in
+  { weight_ih = w_ih; weight_hh = w_hh; lstm_bias = b;
+    input_size; hidden_size }
+
+(** LSTM cell forward: one time step.
+    x: [batch, input_size], h: [batch, hidden_size], c: [batch, hidden_size]
+    Returns (h', c'). *)
+let lstm_cell_forward (cell : lstm) (x : Tensor.t) (h : Tensor.t) (c : Tensor.t)
+    : Tensor.t * Tensor.t =
+  (* gates = x @ W_ih^T + h @ W_hh^T + bias *)
+  let x_proj = Tensor.matmul x (Tensor.transpose cell.weight_ih) in
+  let h_proj = Tensor.matmul h (Tensor.transpose cell.weight_hh) in
+  let gates = Tensor.add x_proj h_proj in
+  let gates = match cell.lstm_bias with
+    | Some b -> Tensor.add gates b
+    | None -> gates in
+  (* Split into 4 gates: i, f, g, o each [batch, hidden_size] *)
+  let hs = cell.hidden_size in
+  let batch = List.hd x.shape in
+  let i_gate = Tensor.sigmoid (Tensor.shrink gates [(0, batch); (0, hs)]) in
+  let f_gate = Tensor.sigmoid (Tensor.shrink gates [(0, batch); (hs, 2 * hs)]) in
+  let g_gate = Tensor.tanh_ (Tensor.shrink gates [(0, batch); (2 * hs, 3 * hs)]) in
+  let o_gate = Tensor.sigmoid (Tensor.shrink gates [(0, batch); (3 * hs, 4 * hs)]) in
+  (* c' = f * c + i * g *)
+  let c' = Tensor.add (Tensor.mul f_gate c) (Tensor.mul i_gate g_gate) in
+  (* h' = o * tanh(c') *)
+  let h' = Tensor.mul o_gate (Tensor.tanh_ c') in
+  (h', c')
+
+(** LSTM forward over a sequence.
+    x: [seq_len, batch, input_size] (or [seq_len, input_size] for unbatched)
+    Returns (output, (h_n, c_n)) where output: [seq_len, batch, hidden_size]. *)
+let lstm_forward (cell : lstm) ?(h0 : Tensor.t option) ?(c0 : Tensor.t option)
+    (x : Tensor.t) : Tensor.t * (Tensor.t * Tensor.t) =
+  let ndim = List.length x.shape in
+  if ndim < 2 || ndim > 3 then
+    invalid_arg "LSTM: input must be 2-D [seq, input_size] or 3-D [seq, batch, input_size]";
+  let seq_len = List.hd x.shape in
+  let batch, x_3d =
+    if ndim = 2 then
+      (1, Tensor.reshape x [seq_len; 1; cell.input_size])
+    else
+      (List.nth x.shape 1, x) in
+  let device = x.device and dtype = x.dtype in
+  let h = ref (match h0 with
+    | Some h -> h
+    | None -> Tensor.zeros ~device ~dtype [batch; cell.hidden_size]) in
+  let c = ref (match c0 with
+    | Some c -> c
+    | None -> Tensor.zeros ~device ~dtype [batch; cell.hidden_size]) in
+  let outputs = Array.make seq_len (Tensor.zeros ~device ~dtype [batch; cell.hidden_size]) in
+  for t = 0 to seq_len - 1 do
+    let x_t = Tensor.shrink x_3d [(t, t + 1); (0, batch); (0, cell.input_size)] in
+    let x_t = Tensor.reshape x_t [batch; cell.input_size] in
+    let (h', c') = lstm_cell_forward cell x_t !h !c in
+    let h' = !(Tensor.realize_ref) h' in
+    let c' = !(Tensor.realize_ref) c' in
+    h := h';
+    c := c';
+    outputs.(t) <- h'
+  done;
+  (* Stack outputs: [seq_len, batch, hidden_size] *)
+  let output = Tensor.stack ~axis:0 (Array.to_list outputs) in
+  let output = if ndim = 2 then Tensor.reshape output [seq_len; cell.hidden_size]
+    else output in
+  (output, (!h, !c))
+
+(** Get trainable parameters from an LSTM cell *)
+let lstm_params (cell : lstm) : Tensor.t list =
+  match cell.lstm_bias with
+  | Some b -> [cell.weight_ih; cell.weight_hh; b]
+  | None -> [cell.weight_ih; cell.weight_hh]

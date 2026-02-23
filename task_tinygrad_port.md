@@ -488,3 +488,10 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Codex review fix (round 54 MEDIUM)**: Added channel-size validation guard in `batch_norm_forward`: checks `x.shape[1] = num_features` and raises `Invalid_argument` on mismatch.
 - **BatchNorm backward test**: Added `test_bn_training_backward` that verifies gradients flow through BN in training mode — weight grads near 0 (symmetric normalized distribution sums to 0), bias grads equal to batch size (3.0 per channel for `sum` loss).
 - **Test count**: 1110 passing tests.
+
+## Claude round 57 decisions
+
+- **Tensor argmax/argmin**: Host-side operations that return integer indices as float tensors. Support arbitrary axis (positive or negative), remove the reduction axis from the output shape. No gradient flow (inference-only, like pool ops).
+- **LSTM cell and sequence**: `Nn.lstm` creates an LSTM cell with combined weight matrices `weight_ih` [4*H, I] and `weight_hh` [4*H, H]. `lstm_cell_forward` computes one timestep with i/f/g/o gates. `lstm_forward` processes a full sequence with optional initial states, stacking per-timestep hidden states. Supports both batched [seq, batch, input] and unbatched [seq, input] inputs. Realizes intermediate states to keep the graph manageable.
+- **Codex review fix (round 55)**: Confirmed BN backward through weight/bias params works. Input-gradient backward through BN requires differentiating through mean/var reductions, which exceeds current scheduler capabilities (same limitation as conv2d/pool).
+- **Test count**: 1155 passing tests.

@@ -1168,3 +1168,74 @@ let avg_pool2d ?(stride=0) ?(padding=0) ~kernel_size (input : t) : t =
   done;
   from_float_list ~device:input.device ~dtype:input.dtype [c; oh; ow]
     (Array.to_list out_vals)
+
+(** Argmax along a given axis. Returns integer indices as float tensor.
+    Input shape [...; axis_dim; ...] → output with axis dimension removed.
+    Host-side operation (no gradient flow). *)
+let argmax ?(axis=(-1)) (t : t) : t =
+  let ( + ) = Stdlib.( + ) and ( - ) = Stdlib.( - ) and ( * ) = Stdlib.( * ) in
+  let ndim = List.length t.shape in
+  let ax = if axis < 0 then ndim + axis else axis in
+  if ax < 0 || ax >= ndim then
+    invalid_arg (Printf.sprintf "argmax: axis %d out of range for %d-D tensor" axis ndim);
+  let _t = !realize_ref t in
+  let vals = Array.of_list (to_float_list _t) in
+  let axis_dim = List.nth t.shape ax in
+  let outer_size = ref 1 in
+  for i = 0 to ax - 1 do outer_size := !outer_size * List.nth t.shape i done;
+  let inner_size = ref 1 in
+  for i = ax + 1 to ndim - 1 do inner_size := !inner_size * List.nth t.shape i done;
+  let out_size = !outer_size * !inner_size in
+  let result = Array.make out_size 0.0 in
+  for o = 0 to !outer_size - 1 do
+    for i = 0 to !inner_size - 1 do
+      let best_idx = ref 0 in
+      let best_val = ref neg_infinity in
+      for a = 0 to axis_dim - 1 do
+        let flat = (o * axis_dim + a) * !inner_size + i in
+        if vals.(flat) > !best_val then begin
+          best_val := vals.(flat);
+          best_idx := a
+        end
+      done;
+      result.(o * !inner_size + i) <- Float.of_int !best_idx
+    done
+  done;
+  let out_shape = List.filteri (fun i _ -> i <> ax) t.shape in
+  let out_shape = if out_shape = [] then [1] else out_shape in
+  from_float_list ~device:t.device ~dtype:t.dtype out_shape (Array.to_list result)
+
+(** Argmin along a given axis. Returns integer indices as float tensor.
+    Host-side operation (no gradient flow). *)
+let argmin ?(axis=(-1)) (t : t) : t =
+  let ( + ) = Stdlib.( + ) and ( - ) = Stdlib.( - ) and ( * ) = Stdlib.( * ) in
+  let ndim = List.length t.shape in
+  let ax = if axis < 0 then ndim + axis else axis in
+  if ax < 0 || ax >= ndim then
+    invalid_arg (Printf.sprintf "argmin: axis %d out of range for %d-D tensor" axis ndim);
+  let _t = !realize_ref t in
+  let vals = Array.of_list (to_float_list _t) in
+  let axis_dim = List.nth t.shape ax in
+  let outer_size = ref 1 in
+  for i = 0 to ax - 1 do outer_size := !outer_size * List.nth t.shape i done;
+  let inner_size = ref 1 in
+  for i = ax + 1 to ndim - 1 do inner_size := !inner_size * List.nth t.shape i done;
+  let out_size = !outer_size * !inner_size in
+  let result = Array.make out_size 0.0 in
+  for o = 0 to !outer_size - 1 do
+    for i = 0 to !inner_size - 1 do
+      let best_idx = ref 0 in
+      let best_val = ref infinity in
+      for a = 0 to axis_dim - 1 do
+        let flat = (o * axis_dim + a) * !inner_size + i in
+        if vals.(flat) < !best_val then begin
+          best_val := vals.(flat);
+          best_idx := a
+        end
+      done;
+      result.(o * !inner_size + i) <- Float.of_int !best_idx
+    done
+  done;
+  let out_shape = List.filteri (fun i _ -> i <> ax) t.shape in
+  let out_shape = if out_shape = [] then [1] else out_shape in
+  from_float_list ~device:t.device ~dtype:t.dtype out_shape (Array.to_list result)
