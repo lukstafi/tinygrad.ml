@@ -475,3 +475,9 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Nn.adamw_step**: AdamW optimizer with decoupled weight decay. Weight decay applied directly to parameters (`p * (1 - lr * wd)`) before the Adam update, following Loshchilov & Hutter (2019).
 - **Batched matmul**: Extended `Tensor.matmul` to support 3D+ tensors. Batch dimensions are broadcast-compatible. Implementation: reshape to `[...batch, N, K, 1]` and `[...batch, 1, K, M]`, expand, multiply, sum over K axis.
 - **Test count**: 1088 passing tests.
+
+## Claude round 55 decisions
+
+- **Codex review fix (round 53)**: Updated `matmul` docstring to reflect 2D+ batched behavior. Added broadcast batch matmul test (`[1,2,3] @ [2,3,2] → [2,2,2]`) and non-broadcastable error test. Added deterministic AdamW numeric test with known expected outputs.
+- **BatchNorm training mode**: Extended `batch_norm` with mutable `training` flag. Training mode computes batch mean/var over all dims except channel dim 1, normalizes with batch stats, and updates `running_mean`/`running_var` via exponential moving average with `momentum`. Added `batch_norm_eval`/`batch_norm_train` toggle functions.
+- **Test count**: 1103 passing tests.
