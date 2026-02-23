@@ -617,3 +617,11 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Tensor.meshgrid**: Creates N-dimensional coordinate grids from 1D coordinate vectors. Host-side operation.
 - **Tensor.scatter**: Places values from `src` into tensor at positions specified by `index` along given axis. Complement to `gather`. Host-side, does not participate in autograd.
 - **Test count**: 1491 passing tests.
+
+## Claude round 73 decisions
+
+- **Codex review fix (round 71 HIGH)**: Added comprehensive `scatter` validation mirroring `gather`: axis range check, rank compatibility, non-axis dimension matching, integer index enforcement, and out-of-range index detection. Added 4 negative-path tests.
+- **Codex review fix (round 71 MEDIUM)**: Scatter now validates float indices via `Float.to_int` with fractional check (>1e-6 tolerance) and explicit bounds check against target axis dimension.
+- **Tensor.cdist**: Pairwise L2 distance between rows of two 2D tensors. Host-side, does not participate in autograd. Validates feature dimension match and 2D input.
+- **Duplicate removal**: Removed duplicate `causal_mask` definition (already at line 911 with additive mask convention: 0.0 attend, -1e9 masked).
+- **Test count**: 1502 passing tests.

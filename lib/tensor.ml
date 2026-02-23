@@ -1817,8 +1817,20 @@ let scatter ?(axis=0) (t : t) (index : t) (src : t) : t =
   let ( / ) = Stdlib.( / ) in
   ignore (( + ), ( - ));
   let ndim = List.length t.shape in
+  if ndim = 0 then invalid_arg "scatter: target must be at least 1D";
   let ax = if axis < 0 then ndim + axis else axis in
+  if ax < 0 || ax >= ndim then
+    invalid_arg (Printf.sprintf "scatter: axis %d out of range for %dD tensor" axis ndim);
   if index.shape <> src.shape then invalid_arg "scatter: index and src must have same shape";
+  let idx_ndim = List.length index.shape in
+  if idx_ndim <> ndim then
+    invalid_arg (Printf.sprintf "scatter: index rank %d must match target rank %d" idx_ndim ndim);
+  (* Validate non-axis dimensions match *)
+  List.iteri (fun d s ->
+    if d <> ax && s <> List.nth t.shape d then
+      invalid_arg (Printf.sprintf "scatter: index dim %d is %d but target dim %d is %d" d s d (List.nth t.shape d))
+  ) index.shape;
+  let axis_dim = List.nth t.shape ax in
   let out = Array.of_list (to_float_list t) in
   let idx_vals = Array.of_list (to_float_list index) in
   let src_vals = Array.of_list (to_float_list src) in
@@ -1843,6 +1855,10 @@ let scatter ?(axis=0) (t : t) (index : t) (src : t) : t =
       if d = ax then begin
         let idx_f = idx_vals.(flat) in
         let idx_val = Float.to_int idx_f in
+        if Float.abs (idx_f -. Float.of_int idx_val) > 1e-6 then
+          invalid_arg (Printf.sprintf "scatter: index %.4f is not an integer" idx_f);
+        if idx_val < 0 || idx_val >= axis_dim then
+          invalid_arg (Printf.sprintf "scatter: index %d out of range [0, %d)" idx_val axis_dim);
         out_flat := !out_flat + idx_val * out_strides.(d)
       end else
         out_flat := !out_flat + coord * out_strides.(d)
@@ -1850,3 +1866,35 @@ let scatter ?(axis=0) (t : t) (index : t) (src : t) : t =
     out.(!out_flat) <- src_vals.(flat)
   done;
   from_float_list ~device:t.device ~dtype:t.dtype t.shape (Array.to_list out)
+
+(** Pairwise L2 distance between rows of two 2D tensors.
+    cdist a[n,d] b[m,d] → [n,m] where result[i,j] = ||a[i] - b[j]||.
+    Host-side operation; does not participate in autograd. *)
+let cdist (a : t) (b : t) : t =
+  let ( * ) = Stdlib.( * ) in
+  let ( + ) = Stdlib.( + ) in
+  let ( - ) = Stdlib.( - ) in
+  ignore (( + ), ( - ));
+  (match a.shape, b.shape with
+   | [_; da], [_; db] when da = db -> ()
+   | [_; _], [_; _] -> invalid_arg "cdist: feature dimensions must match"
+   | _ -> invalid_arg "cdist: both tensors must be 2D");
+  let n = List.hd a.shape in
+  let m = List.hd b.shape in
+  let d = List.nth a.shape 1 in
+  let av = Array.of_list (to_float_list a) in
+  let bv = Array.of_list (to_float_list b) in
+  let out = Array.make (n * m) 0.0 in
+  for i = 0 to n - 1 do
+    for j = 0 to m - 1 do
+      let sq_sum = ref 0.0 in
+      for k = 0 to d - 1 do
+        let diff = av.(i * d + k) -. bv.(j * d + k) in
+        sq_sum := !sq_sum +. diff *. diff
+      done;
+      out.(i * m + j) <- sqrt !sq_sum
+    done
+  done;
+  from_float_list ~device:a.device ~dtype:a.dtype [n; m] (Array.to_list out)
+
+(* causal_mask already defined earlier (additive style: 0.0 attend, -1e9 masked) *)
