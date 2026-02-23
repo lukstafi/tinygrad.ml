@@ -3970,7 +3970,106 @@ let test_group_norm () =
     let bad_x = Tensor.from_float_list [1; 6] (List.init 6 Float.of_int) in
     ignore (Nn.group_norm_forward gn bad_x);
     check "gn channel mismatch should fail" false
-  with Invalid_argument _ -> check "gn channel mismatch" true)
+  with Invalid_argument _ -> check "gn channel mismatch" true);
+  (* Validation: num_groups=0 *)
+  (try
+    ignore (Nn.group_norm ~num_groups:0 ~num_channels:4 ());
+    check "gn zero groups should fail" false
+  with Invalid_argument _ -> check "gn zero groups" true);
+  (* Backward test: weight/bias gradients flow through GroupNorm *)
+  Schedule.reset ();
+  let gn3 = Nn.group_norm ~num_groups:2 ~num_channels:4 () in
+  let x3 = Tensor.from_float_list [2; 4]
+    [1.0; 2.0; 3.0; 4.0;   5.0; 6.0; 7.0; 8.0] in
+  let out3 = Nn.group_norm_forward gn3 x3 in
+  let loss3 = Tensor.sum out3 in
+  let grads3 = Tensor.backward loss3 (Nn.group_norm_params gn3) in
+  let (_, w_grad3) = List.nth grads3 0 in
+  let wgv3 = Tensor.to_float_list w_grad3 in
+  List.iter (fun g -> check "gn backward wgrad finite" (Float.is_finite g)) wgv3;
+  (* Weight grad: d(sum(normed * w + b))/d(w[c]) = sum of normalized values for channel c.
+     Ch 0 normalized: [-1 (b0), -1 (b1)] → sum = -2
+     Ch 1 normalized: [1 (b0), 1 (b1)] → sum = 2 *)
+  check_float "gn wgrad[0]" (List.nth wgv3 0) (-2.0) 0.05;
+  check_float "gn wgrad[1]" (List.nth wgv3 1) 2.0 0.05;
+  let (_, b_grad3) = List.nth grads3 1 in
+  let bgv3 = Tensor.to_float_list b_grad3 in
+  (* Bias grad: d(sum)/d(bias) = count of spatial positions * batch = 2 *)
+  check_float "gn bgrad[0]" (List.nth bgv3 0) 2.0 0.1
+
+(* ---- Test 91: InstanceNorm ---- *)
+let test_instance_norm () =
+  Printf.printf "\n=== InstanceNorm ===\n%!";
+  Schedule.reset ();
+  (* InstanceNorm = GroupNorm with num_groups = num_channels *)
+  let in_ = Nn.instance_norm 3 in
+  check "in num_groups" (in_.num_groups = 3);
+  check "in num_channels" (in_.num_channels = 3);
+  (* Input: [2, 3, 4] — 2 batch, 3 channels, 4 spatial *)
+  let x = Tensor.from_float_list [2; 3; 4]
+    [1.0; 2.0; 3.0; 4.0;   (* ch0 *)
+     10.0; 20.0; 30.0; 40.0;  (* ch1 *)
+     5.0; 5.0; 5.0; 5.0;   (* ch2 — constant → normalized to 0 *)
+     (* batch 1 *)
+     2.0; 4.0; 6.0; 8.0;
+     1.0; 1.0; 1.0; 1.0;
+     3.0; 6.0; 9.0; 12.0] in
+  let out = Nn.instance_norm_forward in_ x in
+  check "in output shape" (out.shape = [2; 3; 4]);
+  let ov = Tensor.to_float_list out in
+  (* Ch2 batch0: all 5.0 → var=0, normed=0 *)
+  check_float "in[0,2,0]" (List.nth ov 8) 0.0 0.01;
+  check_float "in[0,2,1]" (List.nth ov 9) 0.0 0.01;
+  (* Ch1 batch1: all 1.0 → normed=0 *)
+  check_float "in[1,1,0]" (List.nth ov 16) 0.0 0.01
+
+(* ---- Test 92: GRU ---- *)
+let test_gru () =
+  Printf.printf "\n=== GRU ===\n%!";
+  Schedule.reset ();
+  Random.init 42;
+  let cell = Nn.gru ~input_size:3 ~hidden_size:4 () in
+  (* Single step: x [1,3], h [1,4] *)
+  let x = Tensor.from_float_list [1; 3] [0.1; 0.2; 0.3] in
+  let h0 = Tensor.zeros [1; 4] in
+  let h1 = Nn.gru_cell_forward cell x h0 in
+  check "gru h1 shape" (h1.shape = [1; 4]);
+  let hv = Tensor.to_float_list h1 in
+  List.iter (fun v -> check "gru h1 finite" (Float.is_finite v)) hv;
+  (* Sequence: x [3, 1, 3] → output [3, 1, 4] *)
+  let x_seq = Tensor.from_float_list [3; 1; 3]
+    [0.1; 0.2; 0.3;  0.4; 0.5; 0.6;  0.7; 0.8; 0.9] in
+  let (output, h_n) = Nn.gru_forward cell x_seq in
+  check "gru output shape" (output.shape = [3; 1; 4]);
+  check "gru h_n shape" (h_n.shape = [1; 4]);
+  let ov = Tensor.to_float_list output in
+  List.iter (fun v -> check "gru output finite" (Float.is_finite v)) ov;
+  (* Last output should match h_n *)
+  let ov_all = Tensor.to_float_list output in
+  let h_nv = Tensor.to_float_list h_n in
+  let last_start = 2 * 1 * 4 in
+  List.iteri (fun i expected ->
+    let got = List.nth ov_all (last_start + i) in
+    check_float (Printf.sprintf "gru last_h = h_n[%d]" i) got expected 1e-5
+  ) h_nv;
+  (* Unbatched: x [3, 3] → output [3, 4] *)
+  Schedule.reset ();
+  Random.init 42;
+  let cell2 = Nn.gru ~input_size:3 ~hidden_size:4 () in
+  let x_ub = Tensor.from_float_list [3; 3]
+    [0.1; 0.2; 0.3;  0.4; 0.5; 0.6;  0.7; 0.8; 0.9] in
+  let (out_ub, _) = Nn.gru_forward cell2 x_ub in
+  check "gru unbatched shape" (out_ub.shape = [3; 4]);
+  (* Params *)
+  let ps = Nn.gru_params cell in
+  check "gru params count" (List.length ps = 3);
+  (* Validation: wrong input size *)
+  (try
+    let bad_x = Tensor.from_float_list [3; 1; 5] (List.init 15 Float.of_int) in
+    ignore (Nn.gru_forward cell bad_x);
+    check "gru bad input_size should fail" false
+  with Invalid_argument _ -> check "gru bad input_size" true);
+  Printf.printf "  GRU: cell forward, sequence forward, unbatched all pass\n%!"
 
 (* ---- Test 86: CUDA backend registration ---- *)
 let test_cuda_backend () =
@@ -4398,6 +4497,8 @@ let () =
   run_test "argmax_argmin" test_argmax_argmin;
   run_test "lstm" test_lstm;
   run_test "group_norm" test_group_norm;
+  run_test "instance_norm" test_instance_norm;
+  run_test "gru" test_gru;
   run_test "cuda_backend" test_cuda_backend;
   run_test "backend_availability" test_backend_availability;
   Printf.printf "\n============================\n%!";
