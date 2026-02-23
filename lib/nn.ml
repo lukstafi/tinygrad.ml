@@ -434,7 +434,9 @@ let of_conv2d name (c : conv2d) : layer =
     forward = conv2d_forward c;
     params = (fun () -> conv2d_params c) }
 
-(** 1D convolution layer. *)
+(** 1D convolution layer (forward/inference only).
+    Uses host-side computation — gradients do NOT flow through
+    input or weight (same scheduler limitation as conv2d). *)
 type conv1d = {
   c1_weight: Tensor.t;
   c1_bias: Tensor.t option;

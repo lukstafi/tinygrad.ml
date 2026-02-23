@@ -545,3 +545,12 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Tensor.conv1d**: 1D convolution via host-side computation. input [C_in, L], weight [C_out, C_in, K] → [C_out, OL]. Supports stride and padding. Same pattern as conv2d (forward/inference only, no backward).
 - **Nn.conv1d**: 1D convolution layer with weight + optional bias. Kaiming initialization. Supports stride and padding. Wraps Tensor.conv1d.
 - **Test count**: 1289 passing tests.
+
+## Claude round 64 decisions
+
+- **Codex review fix (round 62 MEDIUM)**: Fixed conv1d and conv2d output-length math for negative numerators. Added early check `effective_l < 0` before division to reject kernel-larger-than-padded-input configurations. OCaml truncates toward zero unlike Python's floor division.
+- **Codex review fix (round 62 LOW)**: Added gradient limitation doc to `Nn.conv1d` matching `conv2d` warning.
+- **Tensor.l1_loss**: L1 / Mean Absolute Error loss. mean(|pred - target|). Autograd-compatible.
+- **Tensor.max_pool1d**: 1D max pooling via host-side computation. input [C, L] → [C, OL]. Supports stride, padding, kernel_size. Same host-side pattern as max_pool2d (forward/inference only).
+- **Conv1d regression test**: Added test for kernel > input rejection to lock the negative-numerator fix.
+- **Test count**: 1304 passing tests.
