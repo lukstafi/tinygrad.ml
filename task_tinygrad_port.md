@@ -561,3 +561,11 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Tensor.avg_pool1d**: 1D average pooling via host-side computation. input [C, L] → [C, OL]. Same validation and pattern as max_pool1d.
 - **Tensor.gather**: Index-based selection along an axis (host-side). src N-D, index N-D with same dims except axis. Useful for NLP/RL embedding lookups. Validates axis, dimension counts, and non-axis shape matching.
 - **Test count**: 1324 passing tests.
+
+## Claude round 66 decisions
+
+- **Codex review fix (round 64 MEDIUM)**: Added gather index bounds and integer validation. Checks `idx_val >= 0 && idx_val < axis_dim` and rejects fractional indices (|frac| > 1e-6). Added negative-path tests for out-of-range and fractional indices.
+- **Tensor.repeat**: Repeat tensor along each dimension. repeats list specifies count per dim. Uses host-side computation with modular indexing. Validates repeat counts > 0 and length matches dims.
+- **Tensor.avg_pool1d**: 1D average pooling via host-side computation with same validation pattern as max_pool1d.
+- **Gather-based embedding test**: Demonstrates gather as alternative embedding lookup method, verifying results against known weight matrix.
+- **Test count**: 1342 passing tests.

@@ -4569,7 +4569,77 @@ let test_gather () =
   let bad2 = try ignore (Tensor.gather ~axis:0 src2
     (Tensor.from_float_list [3; 3] (List.init 9 Float.of_int))); false
     with Invalid_argument _ -> true in
-  check "gather dim mismatch" bad2
+  check "gather dim mismatch" bad2;
+  (* Out-of-range index *)
+  Schedule.reset ();
+  let bad_oob = try
+    let s = Tensor.from_float_list [1; 3] [1.0; 2.0; 3.0] in
+    let i = Tensor.from_float_list [1; 1] [5.0] in
+    ignore (Tensor.gather ~axis:1 s i); false
+    with Invalid_argument _ -> true in
+  check "gather out of range" bad_oob;
+  (* Fractional index *)
+  Schedule.reset ();
+  let bad_frac = try
+    let s = Tensor.from_float_list [1; 3] [1.0; 2.0; 3.0] in
+    let i = Tensor.from_float_list [1; 1] [1.5] in
+    ignore (Tensor.gather ~axis:1 s i); false
+    with Invalid_argument _ -> true in
+  check "gather fractional index" bad_frac
+
+(* ---- Test 95: Repeat ---- *)
+let test_repeat () =
+  Printf.printf "\n=== Repeat ===\n%!";
+  Schedule.reset ();
+  (* [2] repeated 3x → [6] *)
+  let t = Tensor.from_float_list [2] [1.0; 2.0] in
+  let r = Tensor.repeat t [3] in
+  let rv = Tensor.to_float_list r in
+  Printf.printf "  repeat 1d: [%s]\n%!" (String.concat "; " (List.map (Printf.sprintf "%.0f") rv));
+  check "repeat 1d shape" (r.shape = [6]);
+  check_float "repeat[0]" (List.nth rv 0) 1.0 0.01;
+  check_float "repeat[1]" (List.nth rv 1) 2.0 0.01;
+  check_float "repeat[2]" (List.nth rv 2) 1.0 0.01;
+  check_float "repeat[5]" (List.nth rv 5) 2.0 0.01;
+  (* 2D: [2;3] repeated [2;1] → [4;3] *)
+  Schedule.reset ();
+  let t2 = Tensor.from_float_list [2; 3] [1.0; 2.0; 3.0; 4.0; 5.0; 6.0] in
+  let r2 = Tensor.repeat t2 [2; 1] in
+  check "repeat 2d shape" (r2.shape = [4; 3]);
+  let rv2 = Tensor.to_float_list r2 in
+  check_float "repeat 2d[0]" (List.nth rv2 0) 1.0 0.01;
+  check_float "repeat 2d[3]" (List.nth rv2 3) 4.0 0.01;  (* row 1 = original row 1 *)
+  check_float "repeat 2d[6]" (List.nth rv2 6) 1.0 0.01;  (* row 2 = copy of row 0 *)
+  (* Bad repeats length *)
+  let bad = try ignore (Tensor.repeat t [2; 3]); false
+    with Invalid_argument _ -> true in
+  check "repeat bad length" bad;
+  (* Zero repeat *)
+  let bad0 = try ignore (Tensor.repeat t [0]); false
+    with Invalid_argument _ -> true in
+  check "repeat zero" bad0
+
+(* ---- Test 96: Gather-based embedding lookup ---- *)
+let test_embedding_gather () =
+  Printf.printf "\n=== Embedding with Gather ===\n%!";
+  Schedule.reset ();
+  (* Create a known weight matrix and use gather to look up rows *)
+  let weight = Tensor.from_float_list [4; 3]
+    [10.0; 11.0; 12.0;
+     20.0; 21.0; 22.0;
+     30.0; 31.0; 32.0;
+     40.0; 41.0; 42.0] in
+  (* Look up rows 0, 2, 3 using gather along axis=0 *)
+  let idx_expanded = Tensor.from_float_list [3; 3]
+    [0.0; 0.0; 0.0;  2.0; 2.0; 2.0;  3.0; 3.0; 3.0] in
+  let result = Tensor.gather ~axis:0 weight idx_expanded in
+  let rv = Tensor.to_float_list result in
+  check "gather emb shape" (result.shape = [3; 3]);
+  check_float "gather row0[0]" (List.nth rv 0) 10.0 0.01;
+  check_float "gather row0[2]" (List.nth rv 2) 12.0 0.01;
+  check_float "gather row1[0]" (List.nth rv 3) 30.0 0.01;
+  check_float "gather row2[0]" (List.nth rv 6) 40.0 0.01;
+  Printf.printf "  Gather-based embedding lookup works\n%!"
 
 (* ---- Test 86: CUDA backend registration ---- *)
 let test_cuda_backend () =
@@ -5016,6 +5086,8 @@ let () =
   run_test "max_pool1d" test_max_pool1d;
   run_test "avg_pool1d" test_avg_pool1d;
   run_test "gather" test_gather;
+  run_test "repeat" test_repeat;
+  run_test "embedding_gather" test_embedding_gather;
   run_test "cuda_backend" test_cuda_backend;
   run_test "backend_availability" test_backend_availability;
   Printf.printf "\n============================\n%!";
