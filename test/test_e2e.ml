@@ -4441,7 +4441,70 @@ let test_conv1d () =
   Schedule.reset ();
   let bad = try ignore (Tensor.conv1d (Tensor.from_float_list [2; 3; 4] (List.init 24 Float.of_int)) wp); false
     with Invalid_argument _ -> true in
-  check "conv1d bad dims" bad
+  check "conv1d bad dims" bad;
+  (* kernel larger than input → reject *)
+  Schedule.reset ();
+  let bad_k = try
+    let xi = Tensor.from_float_list [1; 3] [1.0; 2.0; 3.0] in
+    let wk = Tensor.from_float_list [1; 1; 4] [1.0; 1.0; 1.0; 1.0] in
+    ignore (Tensor.conv1d xi wk); false
+    with Invalid_argument _ -> true in
+  check "conv1d kernel>input" bad_k
+
+(* ---- Test 91: L1 loss ---- *)
+let test_l1_loss () =
+  Printf.printf "\n=== L1 Loss ===\n%!";
+  Schedule.reset ();
+  let pred = Tensor.from_float_list [4] [1.0; 2.0; 3.0; 4.0] in
+  let target = Tensor.from_float_list [4] [1.5; 2.5; 2.5; 3.5] in
+  let loss = Tensor.l1_loss pred target in
+  let lv = Tensor.item loss in
+  Printf.printf "  L1 loss: %.4f\n%!" lv;
+  (* |0.5| + |0.5| + |0.5| + |0.5| = 2.0, mean = 0.5 *)
+  check_float "l1 loss value" lv 0.5 0.01;
+  (* Same predictions → 0 *)
+  Schedule.reset ();
+  let same = Tensor.from_float_list [3] [1.0; 2.0; 3.0] in
+  let l_same = Tensor.l1_loss same same in
+  check_float "l1 same" (Tensor.item l_same) 0.0 0.001;
+  (* Shape mismatch *)
+  let bad = try ignore (Tensor.l1_loss pred same); false
+    with Invalid_argument _ -> true in
+  check "l1 bad shape" bad
+
+(* ---- Test 92: Max pool 1D ---- *)
+let test_max_pool1d () =
+  Printf.printf "\n=== Max Pool 1D ===\n%!";
+  Schedule.reset ();
+  (* 1 channel, length 6, kernel=2 → length 3 *)
+  let x = Tensor.from_float_list [1; 6] [1.0; 3.0; 2.0; 5.0; 4.0; 6.0] in
+  let y = Tensor.max_pool1d ~kernel_size:2 x in
+  let yv = Tensor.to_float_list y in
+  Printf.printf "  maxpool1d: [%s]\n%!" (String.concat "; " (List.map (Printf.sprintf "%.1f") yv));
+  check "maxpool1d shape" (y.shape = [1; 3]);
+  check_float "maxpool1d[0]" (List.nth yv 0) 3.0 0.01;
+  check_float "maxpool1d[1]" (List.nth yv 1) 5.0 0.01;
+  check_float "maxpool1d[2]" (List.nth yv 2) 6.0 0.01;
+  (* With stride=1 → length 5 *)
+  Schedule.reset ();
+  let x2 = Tensor.from_float_list [1; 6] [1.0; 3.0; 2.0; 5.0; 4.0; 6.0] in
+  let y2 = Tensor.max_pool1d ~kernel_size:2 ~stride:1 x2 in
+  check "maxpool1d stride=1 shape" (y2.shape = [1; 5]);
+  (* 2 channels *)
+  Schedule.reset ();
+  let x3 = Tensor.from_float_list [2; 4] [1.0; 4.0; 2.0; 3.0;  5.0; 2.0; 6.0; 1.0] in
+  let y3 = Tensor.max_pool1d ~kernel_size:2 x3 in
+  let yv3 = Tensor.to_float_list y3 in
+  check "maxpool1d 2ch shape" (y3.shape = [2; 2]);
+  check_float "maxpool1d ch0[0]" (List.nth yv3 0) 4.0 0.01;
+  check_float "maxpool1d ch0[1]" (List.nth yv3 1) 3.0 0.01;
+  check_float "maxpool1d ch1[0]" (List.nth yv3 2) 5.0 0.01;
+  check_float "maxpool1d ch1[1]" (List.nth yv3 3) 6.0 0.01;
+  (* Bad dims *)
+  Schedule.reset ();
+  let bad = try ignore (Tensor.max_pool1d ~kernel_size:2 (Tensor.from_float_list [2; 3; 4] (List.init 24 Float.of_int))); false
+    with Invalid_argument _ -> true in
+  check "maxpool1d bad dims" bad
 
 (* ---- Test 86: CUDA backend registration ---- *)
 let test_cuda_backend () =
@@ -4884,6 +4947,8 @@ let () =
   run_test "kl_div_loss" test_kl_div_loss;
   run_test "normalize" test_normalize;
   run_test "conv1d" test_conv1d;
+  run_test "l1_loss" test_l1_loss;
+  run_test "max_pool1d" test_max_pool1d;
   run_test "cuda_backend" test_cuda_backend;
   run_test "backend_availability" test_backend_availability;
   Printf.printf "\n============================\n%!";

@@ -793,6 +793,12 @@ let binary_cross_entropy (pred : t) (target : t) =
   let term2 = mul (sub one target) (log (sub (add one eps) clamped)) in
   neg_ (mean (add term1 term2))
 
+(** L1 loss (Mean Absolute Error): mean(|pred - target|). *)
+let l1_loss (pred : t) (target : t) =
+  if pred.shape <> target.shape then
+    invalid_arg "l1_loss: shapes must match";
+  mean (abs_ (sub pred target))
+
 (** Huber loss (smooth L1): quadratic for small errors, linear for large errors.
     huber(x) = 0.5*x^2 if |x| <= delta, else delta*(|x| - 0.5*delta).
     More robust to outliers than MSE. *)
@@ -1099,8 +1105,12 @@ let _conv2d_impl ?(stride=1) ?(padding=0) (input : t) (weight : t) : t =
   let kw = List.nth weight.shape 3 in
   if c_in <> c_in_w then
     invalid_arg (Printf.sprintf "conv2d: input channels %d != weight channels %d" c_in c_in_w);
-  let oh = (ih + 2 * padding - kh) / stride + 1 in
-  let ow = (iw + 2 * padding - kw) / stride + 1 in
+  let eff_h = ih + 2 * padding - kh in
+  let eff_w = iw + 2 * padding - kw in
+  if eff_h < 0 || eff_w < 0 then
+    invalid_arg "conv2d: kernel larger than padded input, check padding/kernel";
+  let oh = eff_h / stride + 1 in
+  let ow = eff_w / stride + 1 in
   if oh <= 0 || ow <= 0 then
     invalid_arg "conv2d: output dimensions <= 0, check stride/padding/kernel";
   (* Realize input and weight, extract to host arrays *)
@@ -1169,7 +1179,10 @@ let conv1d ?(stride=1) ?(padding=0) (input : t) (weight : t) : t =
   let kl = List.nth weight.shape 2 in
   if c_in <> c_in_w then
     invalid_arg (Printf.sprintf "conv1d: input channels %d != weight channels %d" c_in c_in_w);
-  let ol = (il + 2 * padding - kl) / stride + 1 in
+  let effective_l = il + 2 * padding - kl in
+  if effective_l < 0 then
+    invalid_arg "conv1d: kernel larger than padded input, check padding/kernel";
+  let ol = effective_l / stride + 1 in
   if ol <= 0 then
     invalid_arg "conv1d: output length <= 0, check stride/padding/kernel";
   let input_r = !realize_ref input in
@@ -1198,6 +1211,43 @@ let conv1d ?(stride=1) ?(padding=0) (input : t) (weight : t) : t =
     done
   done;
   from_float_list ~device:input.device ~dtype:input.dtype [c_out; ol]
+    (Array.to_list out_vals)
+
+(* 1D max pooling via host-side computation (forward/inference only).
+   input [C, L] → [C, OL]. Gradients do not flow through this operation. *)
+let max_pool1d ?(stride=0) ?(padding=0) ~kernel_size (input : t) : t =
+  let ( + ) = Stdlib.( + ) and ( - ) = Stdlib.( - )
+  and ( * ) = Stdlib.( * ) and ( / ) = Stdlib.( / ) in
+  let stride = if stride = 0 then kernel_size else stride in
+  if List.length input.shape <> 2 then
+    invalid_arg (Printf.sprintf "max_pool1d: input must be 2-D [C,L], got [%s]"
+      (String.concat "," (List.map string_of_int input.shape)));
+  let c = List.nth input.shape 0 in
+  let il = List.nth input.shape 1 in
+  let eff_l = il + 2 * padding - kernel_size in
+  if eff_l < 0 then
+    invalid_arg "max_pool1d: kernel larger than padded input";
+  let ol = eff_l / stride + 1 in
+  let input_r = !realize_ref input in
+  let inp_vals = Array.of_list (to_float_list input_r) in
+  let get_inp ci i =
+    let i' = i - padding in
+    if i' < 0 || i' >= il then Float.neg_infinity
+    else inp_vals.(ci * il + i')
+  in
+  let out_vals = Array.make (c * ol) Float.neg_infinity in
+  for ci = 0 to c - 1 do
+    for oi = 0 to ol - 1 do
+      let best = ref Float.neg_infinity in
+      for ki = 0 to kernel_size - 1 do
+        let ii = oi * stride + ki in
+        let v = get_inp ci ii in
+        if v > !best then best := v
+      done;
+      out_vals.(ci * ol + oi) <- !best
+    done
+  done;
+  from_float_list ~device:input.device ~dtype:input.dtype [c; ol]
     (Array.to_list out_vals)
 
 (* 2D max pooling via host-side computation (forward/inference only).
