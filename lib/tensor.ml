@@ -1760,3 +1760,93 @@ let trace (t : t) : t =
 (* tril and triu already defined earlier (graph-based, autograd-compatible) *)
 
 (* eye and linspace already defined earlier *)
+
+(** Outer product of two 1D tensors: [n] x [m] → [n; m].
+    Autograd-compatible (uses reshape + matmul). *)
+let outer (a : t) (b : t) : t =
+  (match a.shape, b.shape with
+   | [_], [_] -> ()
+   | _ -> invalid_arg "outer: both tensors must be 1D");
+  let n = List.hd a.shape in
+  let m = List.hd b.shape in
+  let a2 = reshape a [n; 1] in
+  let b2 = reshape b [1; m] in
+  matmul a2 b2
+
+(** Create coordinate grids from 1D coordinate vectors.
+    Returns list of tensors, each with shape [n1; n2; ...].
+    Host-side operation; does not participate in autograd. *)
+let meshgrid (tensors : t list) : t list =
+  let ( * ) = Stdlib.( * ) in
+  let ( + ) = Stdlib.( + ) in
+  let ( - ) = Stdlib.( - ) in
+  let ( / ) = Stdlib.( / ) in
+  ignore (( + ), ( - ));
+  let sizes = List.map (fun (t : t) ->
+    match t.shape with
+    | [n] -> n
+    | _ -> invalid_arg "meshgrid: all tensors must be 1D"
+  ) tensors in
+  let ndim = List.length sizes in
+  let total = List.fold_left ( * ) 1 sizes in
+  let vals_list = List.map (fun t -> Array.of_list (to_float_list t)) tensors in
+  List.mapi (fun dim _t ->
+    let vals = List.nth vals_list dim in
+    let out = Array.make total 0.0 in
+    (* Compute strides for output indexing *)
+    let strides = Array.make ndim 1 in
+    for i = ndim - 2 downto 0 do
+      strides.(i) <- strides.(i + 1) * List.nth sizes (i + 1)
+    done;
+    for flat = 0 to total - 1 do
+      let coord = (flat / strides.(dim)) mod List.nth sizes dim in
+      out.(flat) <- vals.(coord)
+    done;
+    let device = (List.hd tensors).device in
+    let dtype = (List.hd tensors).dtype in
+    from_float_list ~device ~dtype sizes (Array.to_list out)
+  ) tensors
+
+(** Scatter values into a tensor at given indices along an axis.
+    scatter axis index src → new tensor with src values placed at index positions.
+    Host-side operation; does not participate in autograd. *)
+let scatter ?(axis=0) (t : t) (index : t) (src : t) : t =
+  let ( * ) = Stdlib.( * ) in
+  let ( + ) = Stdlib.( + ) in
+  let ( - ) = Stdlib.( - ) in
+  let ( / ) = Stdlib.( / ) in
+  ignore (( + ), ( - ));
+  let ndim = List.length t.shape in
+  let ax = if axis < 0 then ndim + axis else axis in
+  if index.shape <> src.shape then invalid_arg "scatter: index and src must have same shape";
+  let out = Array.of_list (to_float_list t) in
+  let idx_vals = Array.of_list (to_float_list index) in
+  let src_vals = Array.of_list (to_float_list src) in
+  let idx_total = Array.length idx_vals in
+  (* Compute strides for index/src shape *)
+  let idx_strides = Array.make ndim 1 in
+  for i = ndim - 2 downto 0 do
+    idx_strides.(i) <- idx_strides.(i + 1) * List.nth index.shape (i + 1)
+  done;
+  (* Compute strides for output shape *)
+  let out_strides = Array.make ndim 1 in
+  for i = ndim - 2 downto 0 do
+    out_strides.(i) <- out_strides.(i + 1) * List.nth t.shape (i + 1)
+  done;
+  for flat = 0 to idx_total - 1 do
+    (* Decode flat index into coordinates *)
+    let remaining = ref flat in
+    let out_flat = ref 0 in
+    for d = 0 to ndim - 1 do
+      let coord = !remaining / idx_strides.(d) in
+      remaining := !remaining - coord * idx_strides.(d);
+      if d = ax then begin
+        let idx_f = idx_vals.(flat) in
+        let idx_val = Float.to_int idx_f in
+        out_flat := !out_flat + idx_val * out_strides.(d)
+      end else
+        out_flat := !out_flat + coord * out_strides.(d)
+    done;
+    out.(!out_flat) <- src_vals.(flat)
+  done;
+  from_float_list ~device:t.device ~dtype:t.dtype t.shape (Array.to_list out)
