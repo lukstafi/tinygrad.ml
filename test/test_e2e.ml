@@ -4504,7 +4504,72 @@ let test_max_pool1d () =
   Schedule.reset ();
   let bad = try ignore (Tensor.max_pool1d ~kernel_size:2 (Tensor.from_float_list [2; 3; 4] (List.init 24 Float.of_int))); false
     with Invalid_argument _ -> true in
-  check "maxpool1d bad dims" bad
+  check "maxpool1d bad dims" bad;
+  (* Validation: kernel_size=0, padding<0 *)
+  let bad_ks = try ignore (Tensor.max_pool1d ~kernel_size:0 x); false
+    with Invalid_argument _ -> true in
+  check "maxpool1d bad kernel_size" bad_ks;
+  let bad_pad = try ignore (Tensor.max_pool1d ~kernel_size:2 ~padding:(-1) x); false
+    with Invalid_argument _ -> true in
+  check "maxpool1d bad padding" bad_pad
+
+(* ---- Test 93: Avg pool 1D ---- *)
+let test_avg_pool1d () =
+  Printf.printf "\n=== Avg Pool 1D ===\n%!";
+  Schedule.reset ();
+  (* 1 channel, length 6, kernel=2 → length 3 *)
+  let x = Tensor.from_float_list [1; 6] [1.0; 3.0; 2.0; 5.0; 4.0; 6.0] in
+  let y = Tensor.avg_pool1d ~kernel_size:2 x in
+  let yv = Tensor.to_float_list y in
+  Printf.printf "  avgpool1d: [%s]\n%!" (String.concat "; " (List.map (Printf.sprintf "%.1f") yv));
+  check "avgpool1d shape" (y.shape = [1; 3]);
+  check_float "avgpool1d[0]" (List.nth yv 0) 2.0 0.01;  (* (1+3)/2 *)
+  check_float "avgpool1d[1]" (List.nth yv 1) 3.5 0.01;  (* (2+5)/2 *)
+  check_float "avgpool1d[2]" (List.nth yv 2) 5.0 0.01;  (* (4+6)/2 *)
+  (* stride=1 *)
+  Schedule.reset ();
+  let x2 = Tensor.from_float_list [1; 4] [1.0; 2.0; 3.0; 4.0] in
+  let y2 = Tensor.avg_pool1d ~kernel_size:2 ~stride:1 x2 in
+  check "avgpool1d stride=1 shape" (y2.shape = [1; 3]);
+  let yv2 = Tensor.to_float_list y2 in
+  check_float "avgpool1d s1[0]" (List.nth yv2 0) 1.5 0.01;
+  check_float "avgpool1d s1[1]" (List.nth yv2 1) 2.5 0.01;
+  check_float "avgpool1d s1[2]" (List.nth yv2 2) 3.5 0.01
+
+(* ---- Test 94: Gather ---- *)
+let test_gather () =
+  Printf.printf "\n=== Gather ===\n%!";
+  Schedule.reset ();
+  (* 1D gather: select elements by index *)
+  let src = Tensor.from_float_list [1; 4] [10.0; 20.0; 30.0; 40.0] in
+  let idx = Tensor.from_float_list [1; 2] [3.0; 1.0] in
+  let g = Tensor.gather ~axis:1 src idx in
+  let gv = Tensor.to_float_list g in
+  Printf.printf "  gather: [%s]\n%!" (String.concat "; " (List.map (Printf.sprintf "%.0f") gv));
+  check "gather shape" (g.shape = [1; 2]);
+  check_float "gather[0]" (List.nth gv 0) 40.0 0.01;
+  check_float "gather[1]" (List.nth gv 1) 20.0 0.01;
+  (* 2D gather along axis=0 *)
+  Schedule.reset ();
+  let src2 = Tensor.from_float_list [3; 2] [1.0; 2.0; 3.0; 4.0; 5.0; 6.0] in
+  let idx2 = Tensor.from_float_list [2; 2] [0.0; 2.0; 1.0; 0.0] in
+  let g2 = Tensor.gather ~axis:0 src2 idx2 in
+  let gv2 = Tensor.to_float_list g2 in
+  check "gather 2d shape" (g2.shape = [2; 2]);
+  check_float "gather 2d[0,0]" (List.nth gv2 0) 1.0 0.01;  (* row 0, col 0 *)
+  check_float "gather 2d[0,1]" (List.nth gv2 1) 6.0 0.01;  (* row 2, col 1 *)
+  check_float "gather 2d[1,0]" (List.nth gv2 2) 3.0 0.01;  (* row 1, col 0 *)
+  check_float "gather 2d[1,1]" (List.nth gv2 3) 2.0 0.01;  (* row 0, col 1 *)
+  (* Bad axis *)
+  let bad = try ignore (Tensor.gather ~axis:5 src idx); false
+    with Invalid_argument _ -> true in
+  check "gather bad axis" bad;
+  (* Dim mismatch *)
+  Schedule.reset ();
+  let bad2 = try ignore (Tensor.gather ~axis:0 src2
+    (Tensor.from_float_list [3; 3] (List.init 9 Float.of_int))); false
+    with Invalid_argument _ -> true in
+  check "gather dim mismatch" bad2
 
 (* ---- Test 86: CUDA backend registration ---- *)
 let test_cuda_backend () =
@@ -4949,6 +5014,8 @@ let () =
   run_test "conv1d" test_conv1d;
   run_test "l1_loss" test_l1_loss;
   run_test "max_pool1d" test_max_pool1d;
+  run_test "avg_pool1d" test_avg_pool1d;
+  run_test "gather" test_gather;
   run_test "cuda_backend" test_cuda_backend;
   run_test "backend_availability" test_backend_availability;
   Printf.printf "\n============================\n%!";

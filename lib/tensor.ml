@@ -1218,7 +1218,13 @@ let conv1d ?(stride=1) ?(padding=0) (input : t) (weight : t) : t =
 let max_pool1d ?(stride=0) ?(padding=0) ~kernel_size (input : t) : t =
   let ( + ) = Stdlib.( + ) and ( - ) = Stdlib.( - )
   and ( * ) = Stdlib.( * ) and ( / ) = Stdlib.( / ) in
+  if kernel_size <= 0 then
+    invalid_arg (Printf.sprintf "max_pool1d: kernel_size must be > 0, got %d" kernel_size);
+  if padding < 0 then
+    invalid_arg (Printf.sprintf "max_pool1d: padding must be >= 0, got %d" padding);
   let stride = if stride = 0 then kernel_size else stride in
+  if stride <= 0 then
+    invalid_arg (Printf.sprintf "max_pool1d: stride must be > 0, got %d" stride);
   if List.length input.shape <> 2 then
     invalid_arg (Printf.sprintf "max_pool1d: input must be 2-D [C,L], got [%s]"
       (String.concat "," (List.map string_of_int input.shape)));
@@ -1245,6 +1251,49 @@ let max_pool1d ?(stride=0) ?(padding=0) ~kernel_size (input : t) : t =
         if v > !best then best := v
       done;
       out_vals.(ci * ol + oi) <- !best
+    done
+  done;
+  from_float_list ~device:input.device ~dtype:input.dtype [c; ol]
+    (Array.to_list out_vals)
+
+(* 1D average pooling via host-side computation (forward/inference only).
+   input [C, L] → [C, OL]. Gradients do not flow through this operation. *)
+let avg_pool1d ?(stride=0) ?(padding=0) ~kernel_size (input : t) : t =
+  let ( + ) = Stdlib.( + ) and ( - ) = Stdlib.( - )
+  and ( * ) = Stdlib.( * ) and ( / ) = Stdlib.( / ) in
+  if kernel_size <= 0 then
+    invalid_arg (Printf.sprintf "avg_pool1d: kernel_size must be > 0, got %d" kernel_size);
+  if padding < 0 then
+    invalid_arg (Printf.sprintf "avg_pool1d: padding must be >= 0, got %d" padding);
+  let stride = if stride = 0 then kernel_size else stride in
+  if stride <= 0 then
+    invalid_arg (Printf.sprintf "avg_pool1d: stride must be > 0, got %d" stride);
+  if List.length input.shape <> 2 then
+    invalid_arg (Printf.sprintf "avg_pool1d: input must be 2-D [C,L], got [%s]"
+      (String.concat "," (List.map string_of_int input.shape)));
+  let c = List.nth input.shape 0 in
+  let il = List.nth input.shape 1 in
+  let eff_l = il + 2 * padding - kernel_size in
+  if eff_l < 0 then
+    invalid_arg "avg_pool1d: kernel larger than padded input";
+  let ol = eff_l / stride + 1 in
+  let input_r = !realize_ref input in
+  let inp_vals = Array.of_list (to_float_list input_r) in
+  let get_inp ci i =
+    let i' = i - padding in
+    if i' < 0 || i' >= il then 0.0
+    else inp_vals.(ci * il + i')
+  in
+  let fk = Float.of_int kernel_size in
+  let out_vals = Array.make (c * ol) 0.0 in
+  for ci = 0 to c - 1 do
+    for oi = 0 to ol - 1 do
+      let s = ref 0.0 in
+      for ki = 0 to kernel_size - 1 do
+        let ii = oi * stride + ki in
+        s := !s +. get_inp ci ii
+      done;
+      out_vals.(ci * ol + oi) <- !s /. fk
     done
   done;
   from_float_list ~device:input.device ~dtype:input.dtype [c; ol]
@@ -1466,3 +1515,51 @@ let topk ?(axis=(-1)) ~k (t : t) : t * t =
   let v_t = from_float_list ~device:t.device ~dtype:t.dtype out_shape (Array.to_list top_vals) in
   let i_t = from_float_list ~device:t.device ~dtype:t.dtype out_shape (Array.to_list top_idxs) in
   (v_t, i_t)
+
+(** Gather values along an axis using integer indices (host-side).
+    src: N-D tensor, index: N-D tensor of integer indices (as floats).
+    Output shape = index shape. For each position, selects from src along
+    the given axis at the index value. *)
+let gather ?(axis=0) (src : t) (index : t) : t =
+  let ( + ) = Stdlib.( + ) and ( - ) = Stdlib.( - )
+  and ( * ) = Stdlib.( * ) and ( / ) = Stdlib.( / ) in
+  let ndim = List.length src.shape in
+  let ax = if axis < 0 then ndim + axis else axis in
+  if ax < 0 || ax >= ndim then
+    invalid_arg (Printf.sprintf "gather: axis %d out of range for %d-D tensor" axis ndim);
+  if List.length index.shape <> ndim then
+    invalid_arg "gather: index must have same number of dimensions as src";
+  List.iteri (fun i (sd, id) ->
+    if i <> ax && sd <> id then
+      invalid_arg (Printf.sprintf "gather: dimension %d mismatch: src=%d, index=%d" i sd id)
+  ) (List.combine src.shape index.shape);
+  let src_r = !realize_ref src in
+  let idx_r = !realize_ref index in
+  let src_vals = Array.of_list (to_float_list src_r) in
+  let idx_vals = Array.of_list (to_float_list idx_r) in
+  let out_size = Helpers.prod index.shape in
+  let out_vals = Array.make out_size 0.0 in
+  let src_strides = Array.make ndim 1 in
+  for i = ndim - 2 downto 0 do
+    src_strides.(i) <- src_strides.(i + 1) * List.nth src.shape (i + 1)
+  done;
+  let idx_strides = Array.make ndim 1 in
+  for i = ndim - 2 downto 0 do
+    idx_strides.(i) <- idx_strides.(i + 1) * List.nth index.shape (i + 1)
+  done;
+  for flat = 0 to out_size - 1 do
+    let remaining = ref flat in
+    let coords = Array.make ndim 0 in
+    for d = 0 to ndim - 1 do
+      coords.(d) <- !remaining / idx_strides.(d);
+      remaining := !remaining - coords.(d) * idx_strides.(d)
+    done;
+    let idx_val = Float.to_int idx_vals.(flat) in
+    let src_flat = ref 0 in
+    for d = 0 to ndim - 1 do
+      let c = if d = ax then idx_val else coords.(d) in
+      src_flat := !src_flat + c * src_strides.(d)
+    done;
+    out_vals.(flat) <- src_vals.(!src_flat)
+  done;
+  from_float_list ~device:src.device ~dtype:src.dtype index.shape (Array.to_list out_vals)
