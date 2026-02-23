@@ -4641,6 +4641,102 @@ let test_embedding_gather () =
   check_float "gather row2[0]" (List.nth rv 6) 40.0 0.01;
   Printf.printf "  Gather-based embedding lookup works\n%!"
 
+(* ---- Test 97: Masked fill ---- *)
+let test_masked_fill () =
+  Printf.printf "\n=== Masked Fill ===\n%!";
+  Schedule.reset ();
+  let t = Tensor.from_float_list [4] [1.0; 2.0; 3.0; 4.0] in
+  let mask = Tensor.gt t (Tensor.const_like t 2.0) in
+  let filled = Tensor.masked_fill t mask (-1.0) in
+  let fv = Tensor.to_float_list filled in
+  Printf.printf "  masked_fill: [%s]\n%!" (String.concat "; " (List.map (Printf.sprintf "%.0f") fv));
+  check "masked_fill shape" (filled.shape = [4]);
+  check_float "masked_fill[0]" (List.nth fv 0) 1.0 0.01;
+  check_float "masked_fill[1]" (List.nth fv 1) 2.0 0.01;
+  check_float "masked_fill[2]" (List.nth fv 2) (-1.0) 0.01;
+  check_float "masked_fill[3]" (List.nth fv 3) (-1.0) 0.01;
+  (* 2D mask *)
+  Schedule.reset ();
+  let t2 = Tensor.from_float_list [2; 3] [1.0; 2.0; 3.0; 4.0; 5.0; 6.0] in
+  let mask2 = Tensor.le t2 (Tensor.const_like t2 3.0) in
+  let f2 = Tensor.masked_fill t2 mask2 0.0 in
+  let fv2 = Tensor.to_float_list f2 in
+  check_float "masked_fill 2d[0]" (List.nth fv2 0) 0.0 0.01;
+  check_float "masked_fill 2d[3]" (List.nth fv2 3) 4.0 0.01
+
+(* ---- Test 98: Roll ---- *)
+let test_roll () =
+  Printf.printf "\n=== Roll ===\n%!";
+  Schedule.reset ();
+  (* 1D roll by 2 *)
+  let t = Tensor.from_float_list [5] [1.0; 2.0; 3.0; 4.0; 5.0] in
+  let r = Tensor.roll ~shift:2 t in
+  let rv = Tensor.to_float_list r in
+  Printf.printf "  roll +2: [%s]\n%!" (String.concat "; " (List.map (Printf.sprintf "%.0f") rv));
+  check "roll shape" (r.shape = [5]);
+  check_float "roll[0]" (List.nth rv 0) 4.0 0.01;
+  check_float "roll[1]" (List.nth rv 1) 5.0 0.01;
+  check_float "roll[2]" (List.nth rv 2) 1.0 0.01;
+  (* Negative shift *)
+  Schedule.reset ();
+  let t2 = Tensor.from_float_list [4] [1.0; 2.0; 3.0; 4.0] in
+  let r2 = Tensor.roll ~shift:(-1) t2 in
+  let rv2 = Tensor.to_float_list r2 in
+  check_float "roll neg[0]" (List.nth rv2 0) 2.0 0.01;
+  check_float "roll neg[3]" (List.nth rv2 3) 1.0 0.01;
+  (* 2D roll along axis=1 *)
+  Schedule.reset ();
+  let t3 = Tensor.from_float_list [2; 3] [1.0; 2.0; 3.0; 4.0; 5.0; 6.0] in
+  let r3 = Tensor.roll ~axis:1 ~shift:1 t3 in
+  let rv3 = Tensor.to_float_list r3 in
+  check_float "roll 2d[0]" (List.nth rv3 0) 3.0 0.01;  (* last col wraps to first *)
+  check_float "roll 2d[1]" (List.nth rv3 1) 1.0 0.01;
+  check_float "roll 2d[2]" (List.nth rv3 2) 2.0 0.01;
+  (* Bad axis *)
+  let bad = try ignore (Tensor.roll ~axis:5 ~shift:1 t); false
+    with Invalid_argument _ -> true in
+  check "roll bad axis" bad
+
+(* ---- Test 99: Transformer encoder layer ---- *)
+let test_transformer_encoder_layer () =
+  Printf.printf "\n=== Transformer Encoder Layer ===\n%!";
+  Schedule.reset ();
+  Random.init 42;
+  let te = Nn.transformer_encoder_layer ~d_model:8 ~num_heads:2 () in
+  (* Input: [4, 8] = seq_len=4, d_model=8 *)
+  let x = Tensor.from_float_list [4; 8]
+    (List.init 32 (fun i -> Float.of_int i *. 0.1)) in
+  let out = Nn.transformer_encoder_layer_forward te x in
+  Printf.printf "  TE output shape: [%s]\n%!"
+    (String.concat "," (List.map string_of_int out.shape));
+  check "te shape" (out.shape = [4; 8]);
+  (* Output should be finite *)
+  let ov = Tensor.to_float_list out in
+  let all_finite = List.for_all Float.is_finite ov in
+  check "te values finite" all_finite;
+  (* Residual: output shouldn't be identical to input *)
+  let iv = List.init 32 (fun i -> Float.of_int i *. 0.1) in
+  let diff = List.map2 (fun a b -> Float.abs (a -. b)) iv ov in
+  let max_diff = List.fold_left Float.max 0.0 diff in
+  Printf.printf "  Max diff from input: %.4f\n%!" max_diff;
+  check "te changes input" (max_diff > 0.001);
+  (* Params *)
+  let params = Nn.transformer_encoder_layer_params te in
+  let nparams = List.length params in
+  Printf.printf "  TE has %d param tensors\n%!" nparams;
+  check "te has params" (nparams > 0);
+  (* Validation *)
+  let bad_shape = try
+    ignore (Nn.transformer_encoder_layer_forward te
+      (Tensor.from_float_list [4] [1.0; 2.0; 3.0; 4.0])); false
+    with Invalid_argument _ -> true in
+  check "te bad shape" bad_shape;
+  let bad_dim = try
+    ignore (Nn.transformer_encoder_layer_forward te
+      (Tensor.from_float_list [4; 4] (List.init 16 Float.of_int))); false
+    with Invalid_argument _ -> true in
+  check "te bad d_model" bad_dim
+
 (* ---- Test 86: CUDA backend registration ---- *)
 let test_cuda_backend () =
   Printf.printf "\n=== CUDA Backend ===\n%!";
@@ -5088,6 +5184,9 @@ let () =
   run_test "gather" test_gather;
   run_test "repeat" test_repeat;
   run_test "embedding_gather" test_embedding_gather;
+  run_test "masked_fill" test_masked_fill;
+  run_test "roll" test_roll;
+  run_test "transformer_encoder_layer" test_transformer_encoder_layer;
   run_test "cuda_backend" test_cuda_backend;
   run_test "backend_availability" test_backend_availability;
   Printf.printf "\n============================\n%!";

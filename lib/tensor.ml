@@ -197,6 +197,13 @@ let ge a b =
 let le a b = ge b a
 let gt a b = lt b a
 
+(** Replace elements where mask is true with fill_value.
+    mask: boolean tensor (broadcastable to t.shape).
+    Autograd-compatible (uses where_). *)
+let masked_fill (t : t) (mask : t) (fill_value : float) : t =
+  let fill = full ~device:t.device ~dtype:t.dtype t.shape fill_value in
+  where_ mask fill t
+
 (** Scalar constant broadcast to tensor shape *)
 let const_like (t : t) (v : float) =
   full ~device:t.device ~dtype:t.dtype t.shape v
@@ -1516,10 +1523,11 @@ let topk ?(axis=(-1)) ~k (t : t) : t * t =
   let i_t = from_float_list ~device:t.device ~dtype:t.dtype out_shape (Array.to_list top_idxs) in
   (v_t, i_t)
 
-(** Gather values along an axis using integer indices (host-side).
+(** Gather values along an axis using integer indices (host-side, forward only).
     src: N-D tensor, index: N-D tensor of integer indices (as floats).
     Output shape = index shape. For each position, selects from src along
-    the given axis at the index value. *)
+    the given axis at the index value.
+    Note: gradients do NOT flow through this operation. *)
 let gather ?(axis=0) (src : t) (index : t) : t =
   let ( + ) = Stdlib.( + ) and ( - ) = Stdlib.( - )
   and ( * ) = Stdlib.( * ) and ( / ) = Stdlib.( / ) in
@@ -1570,9 +1578,11 @@ let gather ?(axis=0) (src : t) (index : t) : t =
   done;
   from_float_list ~device:src.device ~dtype:src.dtype index.shape (Array.to_list out_vals)
 
-(** Repeat tensor along each dimension. repeats is a list of repeat counts
-    per dimension (must have same length as tensor dimensions).
-    Example: repeat [2; 3] on shape [2; 4] → shape [4; 12]. *)
+(** Repeat tensor along each dimension (host-side, forward only).
+    repeats is a list of repeat counts per dimension
+    (must have same length as tensor dimensions).
+    Example: repeat [2; 3] on shape [2; 4] → shape [4; 12].
+    Note: gradients do NOT flow through this operation. *)
 let repeat (t : t) (repeats : int list) : t =
   let ( + ) = Stdlib.( + ) and ( - ) = Stdlib.( - )
   and ( * ) = Stdlib.( * ) and ( / ) = Stdlib.( / ) in
@@ -1609,3 +1619,38 @@ let repeat (t : t) (repeats : int list) : t =
     out_vals.(flat) <- src_vals.(!src_flat)
   done;
   from_float_list ~device:t.device ~dtype:t.dtype out_shape (Array.to_list out_vals)
+
+(** Roll (circular shift) elements along an axis (host-side, forward only).
+    Positive shift moves elements toward higher indices (wrapping around).
+    Gradients do NOT flow through this operation. *)
+let roll ?(axis=0) ~shift (t : t) : t =
+  let ( + ) = Stdlib.( + ) and ( - ) = Stdlib.( - )
+  and ( * ) = Stdlib.( * ) and ( / ) = Stdlib.( / ) in
+  let ndim = List.length t.shape in
+  let ax = if axis < 0 then ndim + axis else axis in
+  if ax < 0 || ax >= ndim then
+    invalid_arg (Printf.sprintf "roll: axis %d out of range for %d-D tensor" axis ndim);
+  let t_r = !realize_ref t in
+  let src_vals = Array.of_list (to_float_list t_r) in
+  let total = Helpers.prod t.shape in
+  let out_vals = Array.make total 0.0 in
+  let strides = Array.make ndim 1 in
+  for i = ndim - 2 downto 0 do
+    strides.(i) <- strides.(i + 1) * List.nth t.shape (i + 1)
+  done;
+  let axis_dim = List.nth t.shape ax in
+  for flat = 0 to total - 1 do
+    let remaining = ref flat in
+    let src_flat = ref 0 in
+    for d = 0 to ndim - 1 do
+      let coord = !remaining / strides.(d) in
+      remaining := !remaining - coord * strides.(d);
+      let c = if d = ax then
+        (* Source coordinate: wrap backward *)
+        ((coord - shift) mod axis_dim + axis_dim) mod axis_dim
+      else coord in
+      src_flat := !src_flat + c * strides.(d)
+    done;
+    out_vals.(flat) <- src_vals.(!src_flat)
+  done;
+  from_float_list ~device:t.device ~dtype:t.dtype t.shape (Array.to_list out_vals)

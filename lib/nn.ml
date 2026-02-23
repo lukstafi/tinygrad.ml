@@ -1078,3 +1078,70 @@ let parameter_count (params : Tensor.t list) : int =
     Same semantics as {!parameter_count}: shared weights counted per occurrence. *)
 let sequential_parameter_count (layers : layer list) : int =
   parameter_count (sequential_params layers)
+
+(** Transformer encoder layer: self-attention + feedforward.
+    Pre-norm architecture: LayerNorm → MHA → residual → LayerNorm → FFN → residual.
+    Forward/inference only for the attention component (host-side MHA). *)
+type transformer_encoder_layer = {
+  te_mha: multi_head_attention;
+  te_ff1: linear;
+  te_ff2: linear;
+  te_ln1_weight: Tensor.t;
+  te_ln1_bias: Tensor.t;
+  te_ln2_weight: Tensor.t;
+  te_ln2_bias: Tensor.t;
+  te_d_model: int;
+  te_dim_ff: int;
+}
+
+let transformer_encoder_layer ?(device="CPU") ?(dtype=Dtype.float32)
+    ?(dim_feedforward=0) ~d_model ~num_heads () =
+  let dim_ff = if dim_feedforward = 0 then 4 * d_model else dim_feedforward in
+  if d_model <= 0 then
+    invalid_arg (Printf.sprintf "transformer_encoder_layer: d_model must be > 0, got %d" d_model);
+  if num_heads <= 0 then
+    invalid_arg (Printf.sprintf "transformer_encoder_layer: num_heads must be > 0, got %d" num_heads);
+  if d_model mod num_heads <> 0 then
+    invalid_arg (Printf.sprintf "transformer_encoder_layer: d_model=%d must be divisible by num_heads=%d" d_model num_heads);
+  let mha = multi_head_attention ~device ~dtype ~d_model ~n_heads:num_heads () in
+  let ff1 = linear ~device ~dtype ~in_features:d_model ~out_features:dim_ff () in
+  let ff2 = linear ~device ~dtype ~in_features:dim_ff ~out_features:d_model () in
+  let ln1_w = Tensor.ones ~device ~dtype [d_model] in
+  let ln1_b = Tensor.zeros ~device ~dtype [d_model] in
+  let ln2_w = Tensor.ones ~device ~dtype [d_model] in
+  let ln2_b = Tensor.zeros ~device ~dtype [d_model] in
+  { te_mha = mha; te_ff1 = ff1; te_ff2 = ff2;
+    te_ln1_weight = ln1_w; te_ln1_bias = ln1_b;
+    te_ln2_weight = ln2_w; te_ln2_bias = ln2_b;
+    te_d_model = d_model; te_dim_ff = dim_ff }
+
+let transformer_encoder_layer_forward (te : transformer_encoder_layer) (x : Tensor.t) : Tensor.t =
+  if List.length x.shape <> 2 then
+    invalid_arg (Printf.sprintf "transformer_encoder_layer: input must be 2-D [seq, d_model], got [%s]"
+      (String.concat "," (List.map string_of_int x.shape)));
+  let d = List.nth x.shape 1 in
+  if d <> te.te_d_model then
+    invalid_arg (Printf.sprintf "transformer_encoder_layer: expected d_model=%d, got %d" te.te_d_model d);
+  (* Pre-norm: LayerNorm → MHA → residual *)
+  let normed1 = Tensor.layer_norm ~weight:te.te_ln1_weight ~bias:te.te_ln1_bias
+    x ~normalized_shape:[te.te_d_model] in
+  let attn_out = multi_head_attention_forward te.te_mha normed1 in
+  let x2 = Tensor.add x attn_out in
+  (* Pre-norm: LayerNorm → FFN → residual *)
+  let normed2 = Tensor.layer_norm ~weight:te.te_ln2_weight ~bias:te.te_ln2_bias
+    x2 ~normalized_shape:[te.te_d_model] in
+  let ff_out = linear_forward te.te_ff1 normed2 in
+  let ff_out = Tensor.relu ff_out in
+  let ff_out = linear_forward te.te_ff2 ff_out in
+  Tensor.add x2 ff_out
+
+let transformer_encoder_layer_params (te : transformer_encoder_layer) : Tensor.t list =
+  multi_head_attention_params te.te_mha
+  @ linear_params te.te_ff1
+  @ linear_params te.te_ff2
+  @ [te.te_ln1_weight; te.te_ln1_bias; te.te_ln2_weight; te.te_ln2_bias]
+
+let of_transformer_encoder_layer name (te : transformer_encoder_layer) : layer =
+  { name;
+    forward = transformer_encoder_layer_forward te;
+    params = (fun () -> transformer_encoder_layer_params te) }
