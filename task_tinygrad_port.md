@@ -554,3 +554,10 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **Tensor.max_pool1d**: 1D max pooling via host-side computation. input [C, L] → [C, OL]. Supports stride, padding, kernel_size. Same host-side pattern as max_pool2d (forward/inference only).
 - **Conv1d regression test**: Added test for kernel > input rejection to lock the negative-numerator fix.
 - **Test count**: 1304 passing tests.
+
+## Claude round 65 decisions
+
+- **Codex review fix (round 63 MEDIUM)**: Added `max_pool1d` argument validation for `kernel_size > 0`, `padding >= 0`, `stride > 0` — matching `max_pool2d` guards. Added negative-path tests.
+- **Tensor.avg_pool1d**: 1D average pooling via host-side computation. input [C, L] → [C, OL]. Same validation and pattern as max_pool1d.
+- **Tensor.gather**: Index-based selection along an axis (host-side). src N-D, index N-D with same dims except axis. Useful for NLP/RL embedding lookups. Validates axis, dimension counts, and non-axis shape matching.
+- **Test count**: 1324 passing tests.
