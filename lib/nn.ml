@@ -1115,6 +1115,10 @@ let transformer_encoder_layer ?(device="CPU") ?(dtype=Dtype.float32)
     te_ln2_weight = ln2_w; te_ln2_bias = ln2_b;
     te_d_model = d_model; te_dim_ff = dim_ff }
 
+(** Forward pass for transformer encoder layer.
+    Gradients flow through FFN weights and layer norm params.
+    MHA attention weights are forward/inference-only (host-side matmul
+    in scaled_dot_product_attention breaks gradient flow through Q/K/V projections). *)
 let transformer_encoder_layer_forward (te : transformer_encoder_layer) (x : Tensor.t) : Tensor.t =
   if List.length x.shape <> 2 then
     invalid_arg (Printf.sprintf "transformer_encoder_layer: input must be 2-D [seq, d_model], got [%s]"
@@ -1145,3 +1149,29 @@ let of_transformer_encoder_layer name (te : transformer_encoder_layer) : layer =
   { name;
     forward = transformer_encoder_layer_forward te;
     params = (fun () -> transformer_encoder_layer_params te) }
+
+(** Sinusoidal positional encoding for transformers.
+    Returns a tensor of shape [max_len, d_model] with fixed sinusoidal values.
+    PE(pos, 2i) = sin(pos / 10000^(2i/d_model))
+    PE(pos, 2i+1) = cos(pos / 10000^(2i/d_model))
+    No trainable parameters. *)
+let positional_encoding ?(device="CPU") ?(dtype=Dtype.float32) ~max_len ~d_model () : Tensor.t =
+  if max_len <= 0 then
+    invalid_arg (Printf.sprintf "positional_encoding: max_len must be > 0, got %d" max_len);
+  if d_model <= 0 then
+    invalid_arg (Printf.sprintf "positional_encoding: d_model must be > 0, got %d" d_model);
+  let pe = Array.make (max_len * d_model) 0.0 in
+  for pos = 0 to max_len - 1 do
+    for i = 0 to d_model / 2 - 1 do
+      let angle = Float.of_int pos /. (10000.0 ** (2.0 *. Float.of_int i /. Float.of_int d_model)) in
+      pe.(pos * d_model + 2 * i) <- Stdlib.Float.sin angle;
+      pe.(pos * d_model + 2 * i + 1) <- Stdlib.Float.cos angle
+    done;
+    (* Handle odd d_model: last position gets sin only *)
+    if d_model mod 2 = 1 then begin
+      let i = d_model / 2 in
+      let angle = Float.of_int pos /. (10000.0 ** (2.0 *. Float.of_int i /. Float.of_int d_model)) in
+      pe.(pos * d_model + d_model - 1) <- Stdlib.Float.sin angle
+    end
+  done;
+  Tensor.from_float_list ~device ~dtype [max_len; d_model] (Array.to_list pe)
