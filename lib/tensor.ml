@@ -629,6 +629,13 @@ let maximum (a : t) (b : t) =
   let cond = lt b' a' in  (* b < a, i.e. a > b *)
   where_ cond a' b'
 
+(** Global average pool: reduce spatial dims, keep channels.
+    Input [C, H, W] → [C, 1, 1]. *)
+let global_avg_pool2d (t : t) =
+  if List.length t.shape <> 3 then
+    invalid_arg "global_avg_pool2d: input must be 3-D [C,H,W]";
+  mean ~axes:[1; 2] t
+
 (** Linspace: [n] evenly spaced values from [start] to [stop] (inclusive) *)
 let linspace ?(device="CPU") ?(dtype=Dtype.float32) ~start ~stop (n : int) : t =
   if n < 1 then invalid_arg "Tensor.linspace: n must be >= 1";
@@ -947,10 +954,16 @@ let backward (loss : t) (targets : t list) : (t * t) list =
     (target, grad_tensor)
   ) grad_pairs
 
-(** conv2d implementation — placed after to_float_list so we can extract weights. *)
+(* conv2d implementation — placed after to_float_list so we can extract weights.
+   Note: conv2d extracts weight values to host for scheduling compatibility.
+   This means gradients do NOT flow through weights. Use for inference only. *)
 let _conv2d_impl ?(stride=1) ?(padding=0) (input : t) (weight : t) : t =
   let ( + ) = Stdlib.( + ) and ( - ) = Stdlib.( - )
   and ( * ) = Stdlib.( * ) and ( / ) = Stdlib.( / ) in
+  if stride <= 0 then
+    invalid_arg (Printf.sprintf "conv2d: stride must be > 0, got %d" stride);
+  if padding < 0 then
+    invalid_arg (Printf.sprintf "conv2d: padding must be >= 0, got %d" padding);
   if List.length input.shape <> 3 then
     invalid_arg (Printf.sprintf "conv2d: input must be 3-D [C,H,W], got [%s]"
       (String.concat "," (List.map string_of_int input.shape)));
@@ -1018,7 +1031,20 @@ let _conv2d_impl ?(stride=1) ?(padding=0) (input : t) (weight : t) : t =
       ) (List.hd contribs) (List.tl contribs) in
       reshape result [1; oh; ow]
   ) in
-  cat ~axis:0 out_channels
+  (* Cat output channels in chunks to stay within CPU buffer limits *)
+  let rec chunked_cat tensors =
+    let len = List.length tensors in
+    if len <= 6 then cat ~axis:0 tensors
+    else
+      let rec take_n n lst = match n, lst with
+        | 0, _ | _, [] -> ([], lst)
+        | _, x :: rest -> let (taken, remaining) = take_n (n - 1) rest in (x :: taken, remaining)
+      in
+      let (chunk, rest) = take_n 6 tensors in
+      let c = !realize_ref (cat ~axis:0 chunk) in
+      chunked_cat (c :: rest)
+  in
+  chunked_cat out_channels
 
 let () = conv2d_ref := _conv2d_impl
 
@@ -1028,6 +1054,10 @@ let () = conv2d_ref := _conv2d_impl
 let max_pool2d ?(stride=0) ?(padding=0) ~kernel_size (input : t) : t =
   let ( + ) = Stdlib.( + ) and ( - ) = Stdlib.( - )
   and ( * ) = Stdlib.( * ) and ( / ) = Stdlib.( / ) in
+  if kernel_size <= 0 then
+    invalid_arg (Printf.sprintf "max_pool2d: kernel_size must be > 0, got %d" kernel_size);
+  if padding < 0 then
+    invalid_arg (Printf.sprintf "max_pool2d: padding must be >= 0, got %d" padding);
   if List.length input.shape <> 3 then
     invalid_arg (Printf.sprintf "max_pool2d: input must be 3-D [C,H,W], got [%s]"
       (String.concat "," (List.map string_of_int input.shape)));
@@ -1079,6 +1109,10 @@ let max_pool2d ?(stride=0) ?(padding=0) ~kernel_size (input : t) : t =
 let avg_pool2d ?(stride=0) ?(padding=0) ~kernel_size (input : t) : t =
   let ( + ) = Stdlib.( + ) and ( - ) = Stdlib.( - )
   and ( * ) = Stdlib.( * ) and ( / ) = Stdlib.( / ) in
+  if kernel_size <= 0 then
+    invalid_arg (Printf.sprintf "avg_pool2d: kernel_size must be > 0, got %d" kernel_size);
+  if padding < 0 then
+    invalid_arg (Printf.sprintf "avg_pool2d: padding must be >= 0, got %d" padding);
   if List.length input.shape <> 3 then
     invalid_arg (Printf.sprintf "avg_pool2d: input must be 3-D [C,H,W], got [%s]"
       (String.concat "," (List.map string_of_int input.shape)));

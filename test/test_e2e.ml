@@ -3476,6 +3476,28 @@ let test_nn_conv2d () =
   check "nn_conv2d weight shape" ((List.hd params).shape = [2; 1; 2; 2]);
   check "nn_conv2d bias shape" ((List.nth params 1).shape = [2])
 
+(* ---- Test 86k0: Conv2D/Pool parameter validation ---- *)
+let test_conv_pool_validation () =
+  Printf.printf "\n=== Conv/Pool Param Validation ===\n%!";
+  let inp = Tensor.from_float_list [1; 4; 4] (List.init 16 Float.of_int) in
+  let w = Tensor.from_float_list [1; 1; 2; 2] [1.;1.;1.;1.] in
+  (* conv2d stride=0 rejected *)
+  let c1 = try ignore (Tensor.conv2d ~stride:0 inp w); false
+    with Invalid_argument _ -> true in
+  check "conv2d stride=0 rejected" c1;
+  (* conv2d padding=-1 rejected *)
+  let c2 = try ignore (Tensor.conv2d ~padding:(-1) inp w); false
+    with Invalid_argument _ -> true in
+  check "conv2d padding=-1 rejected" c2;
+  (* max_pool2d kernel_size=0 rejected *)
+  let c3 = try ignore (Tensor.max_pool2d ~kernel_size:0 inp); false
+    with Invalid_argument _ -> true in
+  check "maxpool kernel=0 rejected" c3;
+  (* avg_pool2d padding=-1 rejected *)
+  let c4 = try ignore (Tensor.avg_pool2d ~kernel_size:2 ~padding:(-1) inp); false
+    with Invalid_argument _ -> true in
+  check "avgpool padding=-1 rejected" c4
+
 (* ---- Test 86k: Max Pool 2D ---- *)
 let test_max_pool2d () =
   Printf.printf "\n=== Max Pool 2D ===\n%!";
@@ -3544,6 +3566,62 @@ let test_cnn_pipeline () =
   List.iteri (fun i vi ->
     check (Printf.sprintf "cnn flat[%d] finite" i) (Float.is_finite vi)
   ) fv
+
+(* ---- Test 86n: Global avg pool ---- *)
+let test_global_avg_pool () =
+  Printf.printf "\n=== Global Avg Pool ===\n%!";
+  Schedule.reset ();
+  let inp = Tensor.from_float_list [2; 3; 3]
+    (List.init 18 (fun i -> Float.of_int (i + 1))) in
+  let out = Tensor.global_avg_pool2d inp in
+  (* Channel 0: mean of 1..9 = 5.0, Channel 1: mean of 10..18 = 14.0 *)
+  check "gap shape" (out.shape = [2; 1; 1]);
+  let v = Tensor.to_float_list out in
+  check_float "gap ch0" (List.nth v 0) 5.0 1e-4;
+  check_float "gap ch1" (List.nth v 1) 14.0 1e-4
+
+(* ---- Test 86o: Full CNN inference demo ---- *)
+let test_cnn_inference () =
+  Printf.printf "\n=== CNN Inference Demo ===\n%!";
+  (* Demonstrate a full CNN inference pipeline:
+     conv2d(1→4, 3x3) → relu → maxpool(2) → conv2d(4→8, 3x3) → relu →
+     global_avg_pool → flatten → linear(8→3) *)
+  Schedule.reset ();
+  (* Layer 1: Conv2D 1→4 channels, 3x3 kernel *)
+  let conv1 = Nn.conv2d ~in_channels:1 ~out_channels:4 ~kernel_size:(3,3) () in
+  (* Layer 2: Conv2D 4→8 channels, 3x3 kernel *)
+  let conv2 = Nn.conv2d ~in_channels:4 ~out_channels:8 ~kernel_size:(3,3) () in
+  (* Layer 3: Linear 8→3 (classification head) *)
+  let fc = Nn.linear ~in_features:8 ~out_features:3 () in
+  (* Input: 1-channel 8x8 image *)
+  let x = Tensor.from_float_list [1; 8; 8]
+    (List.init 64 (fun i -> Float.of_int i /. 64.0)) in
+  (* Forward pass *)
+  let c1 = Nn.conv2d_forward conv1 x in
+  check "cnn_inf conv1 shape" (c1.shape = [4; 6; 6]);
+  let r1 = Tensor.relu c1 in
+  let p1 = Tensor.max_pool2d ~kernel_size:2 r1 in
+  check "cnn_inf pool1 shape" (p1.shape = [4; 3; 3]);
+  let c2 = Nn.conv2d_forward conv2 p1 in
+  check "cnn_inf conv2 shape" (c2.shape = [8; 1; 1]);
+  let r2 = Tensor.relu c2 in
+  (* Global average pool (already 1x1, but demonstrate) *)
+  let gap = Tensor.global_avg_pool2d r2 in
+  check "cnn_inf gap shape" (gap.shape = [8; 1; 1]);
+  (* Flatten to [8] *)
+  let flat = Tensor.reshape gap [8] in
+  check "cnn_inf flat shape" (flat.shape = [8]);
+  (* Expand to [1; 8] for matmul compatibility *)
+  let flat2d = Tensor.reshape flat [1; 8] in
+  let logits = Nn.linear_forward fc flat2d in
+  check "cnn_inf logits shape" (logits.shape = [1; 3]);
+  let v = Tensor.to_float_list logits in
+  check "cnn_inf logits len=3" (List.length v = 3);
+  List.iteri (fun i vi ->
+    check (Printf.sprintf "cnn_inf logit[%d] finite" i) (Float.is_finite vi)
+  ) v;
+  Printf.printf "  logits: [%s]\n%!"
+    (String.concat ", " (List.map (Printf.sprintf "%.4f") v))
 
 (* ---- Test 86: CUDA backend registration ---- *)
 let test_cuda_backend () =
@@ -3957,9 +4035,12 @@ let () =
   run_test "conv2d_basic" test_conv2d_basic;
   run_test "conv2d_padding" test_conv2d_padding;
   run_test "nn_conv2d" test_nn_conv2d;
+  run_test "conv_pool_validation" test_conv_pool_validation;
   run_test "max_pool2d" test_max_pool2d;
   run_test "avg_pool2d" test_avg_pool2d;
   run_test "cnn_pipeline" test_cnn_pipeline;
+  run_test "global_avg_pool" test_global_avg_pool;
+  run_test "cnn_inference" test_cnn_inference;
   run_test "cuda_backend" test_cuda_backend;
   run_test "backend_availability" test_backend_availability;
   Printf.printf "\n============================\n%!";
