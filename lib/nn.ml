@@ -358,7 +358,7 @@ let of_multi_head_attention ?mask name (mha : multi_head_attention) : layer =
     forward = multi_head_attention_forward ?mask mha;
     params = (fun () -> multi_head_attention_params mha) }
 
-(** 2D convolution layer.
+(** 2D convolution layer (forward/inference only — gradients do not flow through weights).
     weight: [out_channels, in_channels, kernel_h, kernel_w]
     bias: [out_channels] (optional) *)
 type conv2d = {

@@ -450,3 +450,12 @@ Port tinygrad: ~/tinygrad/ to OCaml. Where reasonable, minimize how much of the 
 - **CNN pipeline test**: End-to-end test of conv2d(1→2, 3x3) → relu → max_pool2d(2) → flatten → verified finite outputs. Demonstrates composability of conv/pool/activation layers.
 - **Key insight**: The scheduler's `pad_index` function can't handle deeply nested shrink+pad+reshape chains (index out of bounds). Pool operations work around this by extracting values to host, computing the pool op in OCaml, then creating a new tensor from the results.
 - **Test count**: 1046 passing tests.
+
+## Claude round 52 decisions
+
+- **Codex review fix (round 50)**: Added stride>0 and padding>=0 validation guards to `conv2d`, `max_pool2d`, and `avg_pool2d`. Added kernel_size>0 guard to pool operations.
+- **Conv2D documented as forward/inference-only**: Weight values are extracted to host floats (via `to_float_list`), so gradients don't flow through weights. This is an intentional design trade-off due to scheduler limitations with multi-input expression graphs.
+- **Tensor.global_avg_pool2d**: Global average pooling over spatial dimensions of 3-D `[C,H,W]` tensor, implemented as `mean ~axes:[1;2]`.
+- **chunked_cat in conv2d**: Conv2d with many output channels produces large `cat ~axis:0` that exceeds the CPU backend's 8-buffer exec limit. Added `chunked_cat` helper that realizes in groups of 6 to stay within limits.
+- **CNN inference demo**: Full pipeline test: conv2d(1→4,3x3,pad=1) → relu → max_pool2d(2) → conv2d(4→8,3x3,pad=1) → relu → global_avg_pool2d → flatten → linear(8→3). Verifies all shapes and finite logits.
+- **Test count**: 1063 passing tests.
