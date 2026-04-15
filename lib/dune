@@ -1,5 +1,6 @@
 (library
  (name tinygrad_ml_metal)
+ (public_name tinygrad_ml.metal)
  (wrapped false)
  (optional)
  (modules metal_backend)
@@ -7,6 +8,7 @@
 
 (library
  (name tinygrad_ml_cuda)
+ (public_name tinygrad_ml.cuda)
  (wrapped false)
  (optional)
  (modules cuda_backend)
@@ -14,6 +16,7 @@
 
 (library
  (name tinygrad_ml)
+ (public_name tinygrad_ml)
  (wrapped false)
  (modules :standard \ metal_backend cuda_backend)
  (libraries
